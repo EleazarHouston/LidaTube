@@ -167,3 +167,94 @@ def test_home_route_returns_html(lidatube_module):
 
     assert response.status_code == 200
     assert b"LidaTube" in response.data
+
+
+def test_get_song_links_closes_ytmusic_client(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+
+    class FakeYTMusic:
+        def __init__(self):
+            self.close_called = 0
+
+        def search(self, query, filter, limit):
+            return []
+
+        def close(self):
+            self.close_called += 1
+
+    fake_client = FakeYTMusic()
+    monkeypatch.setattr(lidatube_module, "YTMusic", lambda: fake_client)
+
+    req_album = {
+        "artist": "Artist",
+        "album_name": "Album",
+        "missing_tracks": [
+            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
+        ],
+    }
+
+    handler._get_song_links(req_album, artist="Artist", cleaned_artist="artist")
+
+    assert fake_client.close_called == 1
+
+
+def test_get_song_links_secondary_closes_ytmusic_client(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+    monkeypatch.setattr(handler, "_yt_search", lambda query_text: [])
+
+    class FakeYTMusic:
+        def __init__(self):
+            self.close_called = 0
+
+        def search(self, query, filter, limit):
+            return []
+
+        def close(self):
+            self.close_called += 1
+
+    fake_client = FakeYTMusic()
+    monkeypatch.setattr(lidatube_module, "YTMusic", lambda: fake_client)
+
+    req_album = {
+        "artist": "Artist",
+        "album_name": "Album",
+        "missing_tracks": [
+            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
+        ],
+    }
+
+    handler._get_song_links_secondary(req_album, artist="Artist", cleaned_artist="artist")
+
+    assert fake_client.close_called == 1
+
+
+def test_link_finder_does_not_retry_secondary_after_emfile(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+
+    class FailingYTMusic:
+        def search(self, query, filter, limit):
+            raise OSError(24, "No file descriptors available")
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", FailingYTMusic)
+    secondary_search_mock = Mock()
+    monkeypatch.setattr(handler, "_get_song_links_secondary", secondary_search_mock)
+
+    req_album = {
+        "artist": "Andy Grammer",
+        "album_name": "The Art of Joy",
+        "track_count": 2,
+        "missing_count": 1,
+        "missing_tracks": [
+            {"artist": "Andy Grammer", "track_title": "The Wrong Party", "link": "", "title_of_link": ""},
+        ],
+    }
+
+    handler._link_finder(req_album)
+
+    secondary_search_mock.assert_not_called()
