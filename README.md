@@ -7,6 +7,13 @@
 
 LidaTube is a tool for finding and fetching missing Lidarr albums via yt-dlp.
 
+## Running tests
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest
+```
+
 
 ## Run using docker-compose
 
