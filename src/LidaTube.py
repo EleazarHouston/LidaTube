@@ -437,50 +437,47 @@ class DataHandler:
                         self.general_logger.warning(f"File Already Exists: {artist_str} - {title_str}")
                     else:
                         try:
-                            temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-                            ydl_opts = {
-                                "logger": self.general_logger,
-                                "ffmpeg_location": "/usr/bin/ffmpeg",
-                                "format": "bestaudio",
-                                "outtmpl": f"{file_name}.%(ext)s",
-                                "paths": {"home": self.download_folder, "temp": temp_dir.name},
-                                "quiet": False,
-                                "progress_hooks": [self.progress_callback],
-                                "writethumbnail": True,
-                                "postprocessors": [
-                                    {
-                                        "key": "FFmpegExtractAudio",
-                                        "preferredcodec": self.preferred_codec,
-                                        "preferredquality": "0",
-                                    },
-                                    {
-                                        "key": "EmbedThumbnail",
-                                    },
-                                    {
-                                        "key": "FFmpegMetadata",
-                                    },
-                                ],
-                            }
-                            if self.cookies_path:
-                                ydl_opts["cookiefile"] = self.cookies_path
-                            yt_downloader = yt_dlp.YoutubeDL(ydl_opts)
-                            yt_downloader.download([link])
-                            self.general_logger.warning(f"DL Complete : {link}")
-                            _general.add_metadata(self.general_logger, song, req_album, full_file_path_with_ext)
-                            grabbed_count += 1
-                            if self.attempt_lidarr_import:
-                                self.attempt_lidarr_song_import(req_album, song, f"{artist_str} - {album_name} - {track_number} - {title_str}.{self.preferred_codec}")
+                            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+                                ydl_opts = {
+                                    "logger": self.general_logger,
+                                    "ffmpeg_location": "/usr/bin/ffmpeg",
+                                    "format": "bestaudio",
+                                    "outtmpl": f"{file_name}.%(ext)s",
+                                    "paths": {"home": self.download_folder, "temp": temp_dir},
+                                    "quiet": False,
+                                    "progress_hooks": [self.progress_callback],
+                                    "writethumbnail": True,
+                                    "postprocessors": [
+                                        {
+                                            "key": "FFmpegExtractAudio",
+                                            "preferredcodec": self.preferred_codec,
+                                            "preferredquality": "0",
+                                        },
+                                        {
+                                            "key": "EmbedThumbnail",
+                                        },
+                                        {
+                                            "key": "FFmpegMetadata",
+                                        },
+                                    ],
+                                }
+                                if self.cookies_path:
+                                    ydl_opts["cookiefile"] = self.cookies_path
+                                yt_downloader = yt_dlp.YoutubeDL(ydl_opts)
+                                yt_downloader.download([link])
+                                self.general_logger.warning(f"DL Complete : {link}")
+                                _general.add_metadata(self.general_logger, song, req_album, full_file_path_with_ext)
+                                grabbed_count += 1
+                                if self.attempt_lidarr_import:
+                                    self.attempt_lidarr_song_import(req_album, song, f"{artist_str} - {album_name} - {track_number} - {title_str}.{self.preferred_codec}")
 
-                            self.ytdlp_stop_event.wait(self.sleep_interval)
-                            if self.ytdlp_stop_event.is_set():
-                                return
+                                self.ytdlp_stop_event.wait(self.sleep_interval)
+                                if self.ytdlp_stop_event.is_set():
+                                    return
 
                         except Exception as e:
                             self.general_logger.error(f"Error downloading song: {link}. Error message: {e}")
                             error_count += 1
-
-                        finally:
-                            temp_dir.cleanup()
 
                 song_processed_count = grabbed_count + error_count + existing_count
                 req_album["status"] = f"Processed: {song_processed_count} of {total_req}"
@@ -517,6 +514,49 @@ class DataHandler:
         elif d["status"] == "downloading":
             self.general_logger.warning(f'Downloaded {d["_percent_str"]} of {d["_total_bytes_str"]} at {d["_speed_str"]}')
 
+    def _close_ytmusic_client(self, ytmusic):
+        if ytmusic is None:
+            return
+        close_fn = getattr(ytmusic, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception as e:
+                self.general_logger.warning(f"Error closing YTMusic client: {str(e)}")
+
+    def _is_resource_exhaustion_error(self, error):
+        if error is None:
+            return False
+        errnos = {23, 24}
+        queue = [error]
+        visited = set()
+        while queue:
+            current_error = queue.pop()
+            current_id = id(current_error)
+            if current_id in visited:
+                continue
+            visited.add(current_id)
+
+            if isinstance(current_error, OSError) and current_error.errno in errnos:
+                return True
+
+            if "no file descriptors available" in str(current_error).lower():
+                return True
+
+            cause = getattr(current_error, "__cause__", None)
+            if cause is not None:
+                queue.append(cause)
+
+            context = getattr(current_error, "__context__", None)
+            if context is not None:
+                queue.append(context)
+
+            for arg in getattr(current_error, "args", ()):
+                if isinstance(arg, BaseException):
+                    queue.append(arg)
+
+        return False
+
     def _link_finder(self, req_album):
         try:
             self.general_logger.warning(f'Searching for: {req_album["artist"]} - {req_album["album_name"]}')
@@ -543,7 +583,7 @@ class DataHandler:
             else:
                 req_album["status"] = "Searching"
                 socketio.emit("ytdlp_update", {"status": self.ytdlp_status, "data": self.ytdlp_items, "percent_completion": self.percent_completion})
-                self._get_song_links(req_album, artist, cleaned_artist)
+                continue_with_secondary_search = self._get_song_links(req_album, artist, cleaned_artist)
 
                 # Second Check
                 number_of_links = len([x["link"] for x in req_album["missing_tracks"] if x["link"] != ""])
@@ -552,6 +592,10 @@ class DataHandler:
                     req_album["status"] = "All Tracks Found"
                     socketio.emit("ytdlp_update", {"status": self.ytdlp_status, "data": self.ytdlp_items, "percent_completion": self.percent_completion})
                     self.general_logger.warning(f'Links found for all Tracks of: {req_album["artist"]} - {req_album["album_name"]}')
+                elif not continue_with_secondary_search:
+                    self.general_logger.warning(
+                        f'Skipping secondary search due to resource exhaustion: {req_album["artist"]} - {req_album["album_name"]}'
+                    )
                 else:
                     self.general_logger.warning(f'Not all tracks found, searching again: {req_album["artist"]} - {req_album["album_name"]}')
                     self._get_song_links_secondary(req_album, artist, cleaned_artist)
@@ -560,6 +604,7 @@ class DataHandler:
             self.general_logger.error(f"Error in Link Finder: {str(e)}")
 
     def _get_song_links_secondary(self, req_album, artist, cleaned_artist):
+        ytmusic = None
         try:
             ytmusic = YTMusic()
             for missing_track in req_album["missing_tracks"]:
@@ -595,14 +640,17 @@ class DataHandler:
 
         except Exception as e:
             self.general_logger.error(f"Error in Secondary Search: {str(e)}")
+        finally:
+            self._close_ytmusic_client(ytmusic)
 
     def _get_song_links(self, req_album, artist, cleaned_artist):
+        ytmusic = None
         try:
             ytmusic = YTMusic()
             self.general_logger.warning(f'Searching for individual Tracks: {req_album["artist"]} - {req_album["album_name"]}')
             for missing_track in req_album["missing_tracks"]:
                 if self.ytdlp_stop_event.is_set():
-                    return
+                    return True
                 if missing_track["link"] == "":
                     song_title = missing_track["track_title"]
                     cleaned_song_title = _general.string_cleaner(song_title).lower()
@@ -621,8 +669,14 @@ class DataHandler:
 
         except Exception as e:
             self.general_logger.error(f"Error in Song Search: {str(e)}")
+            if self._is_resource_exhaustion_error(e):
+                return False
+        finally:
+            self._close_ytmusic_client(ytmusic)
+        return True
 
     def _get_album_links(self, req_album, artist, album_name, cleaned_artist, cleaned_album, query_text):
+        ytmusic = None
         try:
             ytmusic = YTMusic()
             search_results = ytmusic.search(query=query_text, filter="albums", limit=10)
@@ -667,6 +721,8 @@ class DataHandler:
 
         except Exception as e:
             self.general_logger.error(f"Error in Album Search: {str(e)}")
+        finally:
+            self._close_ytmusic_client(ytmusic)
 
     def _yt_search(self, query_text):
         try:

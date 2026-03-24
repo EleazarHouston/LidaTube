@@ -232,6 +232,52 @@ def test_get_song_links_secondary_closes_ytmusic_client(lidatube_module, monkeyp
     assert fake_client.close_called == 1
 
 
+def test_get_album_links_closes_ytmusic_client(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+    monkeypatch.setattr(lidatube_module.fuzz, "ratio", lambda _left, _right: 100)
+
+    class FakeYTMusic:
+        def __init__(self):
+            self.close_called = 0
+
+        def search(self, query, filter, limit):
+            return [{"browseId": "album-1"}]
+
+        def get_album(self, browse_id):
+            assert browse_id == "album-1"
+            return {"tracks": [{"title": "Track One", "videoId": "vid-1"}]}
+
+        def close(self):
+            self.close_called += 1
+
+    fake_client = FakeYTMusic()
+    monkeypatch.setattr(lidatube_module, "YTMusic", lambda: fake_client)
+    monkeypatch.setattr(lidatube_module._matcher, "album_matcher", lambda *_args, **_kwargs: {"browseId": "album-1"})
+
+    req_album = {
+        "artist": "Artist",
+        "album_name": "Album",
+        "missing_tracks": [
+            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
+        ],
+        "status": "",
+    }
+
+    handler._get_album_links(
+        req_album,
+        artist="Artist",
+        album_name="Album",
+        cleaned_artist="artist",
+        cleaned_album="album",
+        query_text="Artist - Album",
+    )
+
+    assert fake_client.close_called == 1
+    assert req_album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
+
+
 def test_link_finder_does_not_retry_secondary_after_emfile(lidatube_module, monkeypatch):
     handler = build_data_handler(lidatube_module)
     emit_mock = Mock()
