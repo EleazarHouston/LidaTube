@@ -58,8 +58,8 @@ function update_lidarr_progress_bar(status, scan_progress) {
 
     const phase = scan_progress.phase || "Idle";
     let extra_detail = "";
-    if (status === "busy" && phase === "Fetching wanted albums") {
-        extra_detail = `Pages: ${scan_progress.pages_scanned || 0}, Albums: ${scan_progress.albums_discovered || 0}`;
+    if (status === "busy" && (phase === "Fetching wanted albums" || phase === "Fetching albums & tracks")) {
+        extra_detail = `Pages: ${scan_progress.pages_scanned || 0}, Albums: ${scan_progress.albums_discovered || 0}, Tracks scanned: ${scan_progress.albums_processed || 0}`;
     } else if (status === "busy" && phase === "Fetching missing tracks") {
         extra_detail = `Albums: ${scan_progress.albums_processed || 0}/${scan_progress.albums_total || 0}`;
     }

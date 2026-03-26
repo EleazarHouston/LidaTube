@@ -239,6 +239,8 @@ class DataHandler:
 
             future_map = {}
             total_albums = 0
+            albums_processed = 0
+            undrained_futures = set()
             with concurrent.futures.ThreadPoolExecutor(max_workers=scan_worker_count) as executor:
                 while True:
                     if self.lidarr_stop_event.is_set():
@@ -281,12 +283,28 @@ class DataHandler:
                             self.lidarr_items.append(new_item)
                             future = executor.submit(self.get_missing_tracks_for_album, new_item)
                             future_map[future] = new_item
+                            undrained_futures.add(future)
+
+                        # Drain any track futures that already completed while this page was being fetched
+                        newly_done = [f for f in undrained_futures if f.done()]
+                        for f in newly_done:
+                            undrained_futures.discard(f)
+                            req_album = future_map[f]
+                            try:
+                                f.result()
+                            except Exception as e:
+                                self.general_logger.error(f'Error Getting Missing Tracks for {req_album["artist"]} - {req_album["album_name"]}: {str(e)}')
+                            albums_processed += 1
 
                         self.lidarr_futures = list(future_map.keys())
+                        discovered = len(self.lidarr_items)
                         self._set_lidarr_scan_progress(
-                            phase="Fetching wanted albums",
+                            phase="Fetching albums & tracks",
                             pages_scanned=page,
-                            albums_discovered=len(self.lidarr_items),
+                            albums_discovered=discovered,
+                            albums_processed=albums_processed,
+                            albums_total=discovered,
+                            percent=int(albums_processed / discovered * 100) if discovered else 0,
                         )
                         self._emit_lidarr_update()
                         page += 1
@@ -302,13 +320,12 @@ class DataHandler:
                 self._set_lidarr_scan_progress(
                     phase="Fetching missing tracks",
                     albums_total=total_albums,
-                    albums_processed=0,
-                    percent=0,
+                    albums_processed=albums_processed,
+                    percent=int(albums_processed / total_albums * 100) if total_albums else 100,
                 )
                 self._emit_lidarr_update()
 
-                albums_processed = 0
-                for future in concurrent.futures.as_completed(future_map):
+                for future in concurrent.futures.as_completed(undrained_futures):
                     if self.lidarr_stop_event.is_set():
                         break
                     req_album = future_map[future]
