@@ -51,7 +51,10 @@ echo "-----------------"
 # Create the required directories with the correct permissions
 echo "Setting up directories.."
 mkdir -p /lidatube/downloads /lidatube/config /lidatube/cache
-chown -R ${PUID}:${PGID} /lidatube
+# Avoid recursively traversing the whole app path (especially large downloads mounts)
+# during startup. Set direct ownership for writable paths and recurse only on small dirs.
+chown ${PUID}:${PGID} /lidatube/downloads /lidatube/config /lidatube/cache 2>/dev/null || true
+chown -R ${PUID}:${PGID} /lidatube/config /lidatube/cache 2>/dev/null || true
 
 # Set XDG_CACHE_HOME to use the cache directory
 export XDG_CACHE_HOME=/lidatube/cache
