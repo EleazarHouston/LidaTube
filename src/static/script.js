@@ -2,7 +2,8 @@ var get_wanted_lidarr = document.getElementById('get-lidarr-wanted-btn');
 var stop_lidarr = document.getElementById('stop-lidarr-btn');
 var reset_lidarr = document.getElementById('reset-lidarr-btn');
 var lidarr_spinner = document.getElementById('lidarr-spinner');
-var lidarr_progress_bar = document.getElementById('lidarr-progress-status-bar');
+var lidarr_progress_bar = document.getElementById('lidarr-progress-status-bar-inner');
+var lidarr_scan_status_text = document.getElementById('lidarr-scan-status-text');
 var lidarr_table = document.getElementById('lidarr-table').getElementsByTagName('tbody')[0];
 var select_all_checkbox = document.getElementById("select-all-checkbox");
 
@@ -24,6 +25,46 @@ var socket = io();
 
 lidarr_progress_bar.style.width = "0%";
 lidarr_progress_bar.setAttribute("aria-valuenow", 0);
+lidarr_progress_bar.textContent = "0%";
+
+function update_lidarr_progress_bar(status, scan_progress) {
+    var percent = Number(scan_progress.percent ?? 0);
+    if (!Number.isFinite(percent)) {
+        percent = 0;
+    }
+    if (status === "complete") {
+        percent = 100;
+    } else if (status === "idle") {
+        percent = 0;
+    }
+    percent = Math.max(0, Math.min(100, Math.round(percent)));
+
+    lidarr_progress_bar.style.width = percent + "%";
+    lidarr_progress_bar.setAttribute("aria-valuenow", percent);
+    lidarr_progress_bar.textContent = percent + "%";
+    lidarr_progress_bar.classList.remove("bg-primary", "bg-success", "bg-warning", "bg-danger", "bg-dark", "progress-bar-animated");
+
+    if (status === "busy") {
+        lidarr_progress_bar.classList.add("bg-success", "progress-bar-animated");
+    } else if (status === "stopped") {
+        lidarr_progress_bar.classList.add("bg-warning");
+    } else if (status === "complete") {
+        lidarr_progress_bar.classList.add("bg-dark");
+    } else if (status === "error") {
+        lidarr_progress_bar.classList.add("bg-danger");
+    } else {
+        lidarr_progress_bar.classList.add("bg-primary");
+    }
+
+    const phase = scan_progress.phase || "Idle";
+    let extra_detail = "";
+    if (status === "busy" && phase === "Fetching wanted albums") {
+        extra_detail = `Pages: ${scan_progress.pages_scanned || 0}, Albums: ${scan_progress.albums_discovered || 0}`;
+    } else if (status === "busy" && phase === "Fetching missing tracks") {
+        extra_detail = `Albums: ${scan_progress.albums_processed || 0}/${scan_progress.albums_total || 0}`;
+    }
+    lidarr_scan_status_text.textContent = extra_detail ? `${phase} (${extra_detail})` : phase;
+}
 
 function check_if_all_true() {
     var all_checked = true;
@@ -147,6 +188,7 @@ reset_ytdlp.addEventListener('click', function () {
 socket.on("lidarr_update", (response) => {
     lidarr_table.innerHTML = '';
     var all_checked = true;
+    update_lidarr_progress_bar(response.status, response.scan_progress || {});
     if (response.status == "busy") {
         get_wanted_lidarr.disabled = true;
         lidarr_spinner.classList.remove('d-none');

@@ -33,6 +33,14 @@ class DataHandler:
         self.lidarr_futures = []
         self.lidarr_status = "idle"
         self.lidarr_stop_event = threading.Event()
+        self.lidarr_scan_progress = {
+            "phase": "Idle",
+            "pages_scanned": 0,
+            "albums_discovered": 0,
+            "albums_processed": 0,
+            "albums_total": 0,
+            "percent": 0,
+        }
 
         self.ytdlp_items = []
         self.ytdlp_futures = []
@@ -70,6 +78,7 @@ class DataHandler:
             "secondary_search": "YTS",
             "preferred_codec": "mp3",
             "attempt_lidarr_import": False,
+            "lidarr_scan_thread_limit": 8,
         }
 
         # Load settings from environmental variables (which take precedence) over the configuration file.
@@ -93,6 +102,8 @@ class DataHandler:
         self.preferred_codec = os.environ.get("preferred_codec", "")
         attempt_lidarr_import = os.environ.get("attempt_lidarr_import", "")
         self.attempt_lidarr_import = attempt_lidarr_import.lower() == "true" if attempt_lidarr_import != "" else ""
+        lidarr_scan_thread_limit = os.environ.get("lidarr_scan_thread_limit", "")
+        self.lidarr_scan_thread_limit = int(lidarr_scan_thread_limit) if lidarr_scan_thread_limit else ""
 
         # Load variables from the configuration file if not set by environmental variables.
         try:
@@ -137,6 +148,7 @@ class DataHandler:
                         "secondary_search": self.secondary_search,
                         "preferred_codec": self.preferred_codec,
                         "attempt_lidarr_import": self.attempt_lidarr_import,
+                        "lidarr_scan_thread_limit": self.lidarr_scan_thread_limit,
                     },
                     json_file,
                     indent=4,
@@ -146,7 +158,8 @@ class DataHandler:
             self.general_logger.error(f"Error Saving Config: {str(e)}")
 
     def connect(self):
-        socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": self.lidarr_items})
+        self._ensure_lidarr_scan_state()
+        self._emit_lidarr_update()
         socketio.emit("ytdlp_update", {"status": self.ytdlp_status, "data": self.ytdlp_items, "percent_completion": self.percent_completion})
         self.clients_connected_counter += 1
 
@@ -178,12 +191,43 @@ class DataHandler:
             self.general_logger.error(f"Error in Scheduler: {str(e)}")
             self.general_logger.error(f"Scheduler Stopped")
 
+    def _ensure_lidarr_scan_state(self):
+        if not hasattr(self, "lidarr_scan_progress"):
+            self.lidarr_scan_progress = {
+                "phase": "Idle",
+                "pages_scanned": 0,
+                "albums_discovered": 0,
+                "albums_processed": 0,
+                "albums_total": 0,
+                "percent": 0,
+            }
+        if not hasattr(self, "lidarr_scan_thread_limit"):
+            self.lidarr_scan_thread_limit = max(1, int(getattr(self, "thread_limit", 1)))
+
+    def _set_lidarr_scan_progress(self, **kwargs):
+        self._ensure_lidarr_scan_state()
+        self.lidarr_scan_progress.update(kwargs)
+
+    def _emit_lidarr_update(self):
+        self._ensure_lidarr_scan_state()
+        socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": self.lidarr_items, "scan_progress": self.lidarr_scan_progress})
+
     def get_wanted_albums_from_lidarr(self):
         try:
             self.general_logger.warning(f"Accessing Lidarr API")
+            self._ensure_lidarr_scan_state()
             self.lidarr_status = "busy"
             self.lidarr_stop_event.clear()
             self.lidarr_items = []
+            self._set_lidarr_scan_progress(
+                phase="Fetching wanted albums",
+                pages_scanned=0,
+                albums_discovered=0,
+                albums_processed=0,
+                albums_total=0,
+                percent=0,
+            )
+            self._emit_lidarr_update()
             page = 1
             while True:
                 if self.lidarr_stop_event.is_set():
@@ -223,6 +267,12 @@ class DataHandler:
                         }
                         self.lidarr_items.append(new_item)
 
+                    self._set_lidarr_scan_progress(
+                        phase="Fetching wanted albums",
+                        pages_scanned=page,
+                        albums_discovered=len(self.lidarr_items),
+                    )
+                    self._emit_lidarr_update()
                     page += 1
                 else:
                     self.general_logger.error(f"Lidarr Wanted API Error Code: {response.status_code}")
@@ -232,19 +282,57 @@ class DataHandler:
 
             self.lidarr_items.sort(key=lambda x: (x["artist"], x["album_name"]))
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.thread_limit) as executor:
-                self.lidarr_futures = [executor.submit(self.get_missing_tracks_for_album, album) for album in self.lidarr_items]
-                concurrent.futures.wait(self.lidarr_futures)
+            total_albums = len(self.lidarr_items)
+            self._set_lidarr_scan_progress(
+                phase="Fetching missing tracks",
+                albums_total=total_albums,
+                albums_processed=0,
+                percent=0,
+            )
+            self._emit_lidarr_update()
+
+            scan_worker_count = max(1, min(int(self.lidarr_scan_thread_limit), total_albums or 1))
+            self.general_logger.warning(f"Fetching missing tracks with {scan_worker_count} worker(s)")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=scan_worker_count) as executor:
+                future_map = {executor.submit(self.get_missing_tracks_for_album, album): album for album in self.lidarr_items}
+                self.lidarr_futures = list(future_map.keys())
+                albums_processed = 0
+                for future in concurrent.futures.as_completed(future_map):
+                    if self.lidarr_stop_event.is_set():
+                        break
+                    req_album = future_map[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        self.general_logger.error(f'Error Getting Missing Tracks for {req_album["artist"]} - {req_album["album_name"]}: {str(e)}')
+                    albums_processed += 1
+                    percent = int((albums_processed / total_albums) * 100) if total_albums else 100
+                    self._set_lidarr_scan_progress(
+                        phase="Fetching missing tracks",
+                        albums_processed=albums_processed,
+                        percent=percent,
+                    )
+                    self._emit_lidarr_update()
 
             self.lidarr_status = "stopped" if self.lidarr_stop_event.is_set() else "complete"
+            if self.lidarr_status == "complete":
+                self._set_lidarr_scan_progress(
+                    phase="Complete",
+                    albums_processed=total_albums,
+                    albums_total=total_albums,
+                    percent=100,
+                )
+            elif self.lidarr_status == "stopped":
+                self._set_lidarr_scan_progress(phase="Stopped")
 
         except Exception as e:
             self.general_logger.error(f"Error Getting Missing Albums: {str(e)}")
             self.lidarr_status = "error"
+            self._set_lidarr_scan_progress(phase="Error")
             socketio.emit("new_toast_msg", {"title": "Error Getting Missing Albums", "message": str(e)})
 
         finally:
-            socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": self.lidarr_items})
+            self._emit_lidarr_update()
 
     def get_missing_tracks_for_album(self, req_album):
         self.general_logger.warning(f'Reading Missing Track list of {req_album["artist"]} - {req_album["album_name"]} from Lidarr API')
