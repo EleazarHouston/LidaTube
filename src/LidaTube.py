@@ -557,6 +557,28 @@ class DataHandler:
 
         return False
 
+    def _set_track_link(self, track, link, title):
+        track["link"] = link
+        track["title_of_link"] = title
+
+    def _set_track_link_from_video_id(self, track, video_id, title):
+        self._set_track_link(track, f'https://www.youtube.com/watch?v={video_id}', title)
+
+    def _count_found_links(self, req_album):
+        return len([x["link"] for x in req_album["missing_tracks"] if x["link"] != ""])
+
+    def _apply_album_track_links(self, req_album, album_details):
+        for track in album_details["tracks"]:
+            if self.ytdlp_stop_event.is_set():
+                return True
+            for missing_track in req_album["missing_tracks"]:
+                missing_track_title = _general.string_cleaner(missing_track["track_title"])
+                song_title = _general.string_cleaner(track["title"])
+                if fuzz.ratio(song_title, missing_track_title) > 90:
+                    self._set_track_link_from_video_id(missing_track, track["videoId"], track["title"])
+                    break
+        return False
+
     def _link_finder(self, req_album):
         try:
             self.general_logger.warning(f'Searching for: {req_album["artist"]} - {req_album["album_name"]}')
@@ -574,7 +596,7 @@ class DataHandler:
                 self._get_album_links(req_album, artist, album_name, cleaned_artist, cleaned_album, query_text)
 
             # Check if there are links for each track
-            number_of_links = len([x["link"] for x in req_album["missing_tracks"] if x["link"] != ""])
+            number_of_links = self._count_found_links(req_album)
             all_tracks_found = number_of_links == len(req_album["missing_tracks"])
             if all_tracks_found:
                 req_album["status"] = "All Tracks Found"
@@ -586,7 +608,7 @@ class DataHandler:
                 continue_with_secondary_search = self._get_song_links(req_album, artist, cleaned_artist)
 
                 # Second Check
-                number_of_links = len([x["link"] for x in req_album["missing_tracks"] if x["link"] != ""])
+                number_of_links = self._count_found_links(req_album)
                 all_tracks_found = number_of_links == len(req_album["missing_tracks"])
                 if all_tracks_found:
                     req_album["status"] = "All Tracks Found"
@@ -617,25 +639,20 @@ class DataHandler:
                     search_results = ytmusic.search(query=query_text, filter="songs", limit=20)
                     song_match = _matcher.song_matcher(self.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results)
                     if song_match:
-                        missing_track["link"] = f'https://www.youtube.com/watch?v={song_match["videoId"]}'
-                        missing_track["title_of_link"] = song_match["title"]
+                        self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"])
                     elif self.fallback_to_top_result:
                         if search_results:
-                            missing_track["link"] = f'https://www.youtube.com/watch?v={search_results[0]["videoId"]}'
-                            missing_track["title_of_link"] = search_results[0]["title"]
+                            self._set_track_link_from_video_id(missing_track, search_results[0]["videoId"], search_results[0]["title"])
                     else:
-                        song_title = missing_track["track_title"]
                         search_results = self._yt_search(query_text)
                         song_match = _matcher.song_matcher_yt(self.minimum_match_ratio, query_text, search_results)
                         if song_match:
                             if self.secondary_search == "YTS":
-                                missing_track["link"] = song_match["link"]
-                                missing_track["title_of_link"] = song_match["title"]
+                                self._set_track_link(missing_track, song_match["link"], song_match["title"])
                             elif self.secondary_search == "YTDLP":
-                                missing_track["link"] = song_match["webpage_url"]
-                                missing_track["title_of_link"] = song_match["title"]
+                                self._set_track_link(missing_track, song_match["webpage_url"], song_match["title"])
 
-            number_of_links = len([x["link"] for x in req_album["missing_tracks"] if x["link"] != ""])
+            number_of_links = self._count_found_links(req_album)
             self.general_logger.warning(f'Found {number_of_links} of the missing {len(req_album["missing_tracks"])} tracks: {req_album["artist"]} - {req_album["album_name"]}')
 
         except Exception as e:
@@ -659,13 +676,11 @@ class DataHandler:
                     search_results = ytmusic.search(query=query_text, filter="songs", limit=5)
                     song_match = _matcher.song_matcher(self.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results)
                     if song_match:
-                        missing_track["link"] = f'https://www.youtube.com/watch?v={song_match["videoId"]}'
-                        missing_track["title_of_link"] = song_match["title"]
+                        self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"])
 
                     elif self.fallback_to_top_result:
                         if search_results:
-                            missing_track["link"] = f'https://www.youtube.com/watch?v={search_results[0]["videoId"]}'
-                            missing_track["title_of_link"] = search_results[0]["title"]
+                            self._set_track_link_from_video_id(missing_track, search_results[0]["videoId"], search_results[0]["title"])
 
         except Exception as e:
             self.general_logger.error(f"Error in Song Search: {str(e)}")
@@ -686,33 +701,15 @@ class DataHandler:
             if album_match:
                 req_album["status"] = "Album Found"
                 album_details = ytmusic.get_album(album_match["browseId"])
-
-                for track in album_details["tracks"]:
-                    if self.ytdlp_stop_event.is_set():
-                        return
-                    for missing_track in req_album["missing_tracks"]:
-                        missing_track_title = _general.string_cleaner(missing_track["track_title"])
-                        song_title = _general.string_cleaner(track["title"])
-                        if fuzz.ratio(song_title, missing_track_title) > 90:
-                            missing_track["link"] = f'https://www.youtube.com/watch?v={track["videoId"]}'
-                            missing_track["title_of_link"] = track["title"]
-                            break
+                if self._apply_album_track_links(req_album, album_details):
+                    return
 
             elif self.fallback_to_top_result:
                 if search_results:
                     req_album["status"] = "Album Found"
                     album_details = ytmusic.get_album(search_results[0]["browseId"])
-
-                    for track in album_details["tracks"]:
-                        if self.ytdlp_stop_event.is_set():
-                            return
-                        for missing_track in req_album["missing_tracks"]:
-                            missing_track_title = _general.string_cleaner(missing_track["track_title"])
-                            song_title = _general.string_cleaner(track["title"])
-                            if fuzz.ratio(song_title, missing_track_title) > 90:
-                                missing_track["link"] = f'https://www.youtube.com/watch?v={track["videoId"]}'
-                                missing_track["title_of_link"] = track["title"]
-                                break
+                    if self._apply_album_track_links(req_album, album_details):
+                        return
                 else:
                     self.general_logger.warning(f'No search results for album: {req_album["artist"]} - {req_album["album_name"]}')
 

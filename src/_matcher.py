@@ -38,20 +38,30 @@ SONG_KEYWORDS_TO_REMOVE = [
 ]
 
 
-def remove_album_keywords(text):
+def _remove_keywords(text, keywords):
     ret = text
-    for keyword in ALBUM_KEYWORDS_TO_REMOVE:
+    for keyword in keywords:
         if keyword in ret:
             ret = re.sub(r"(\s*\(\s*)?(" + re.escape(keyword) + r")(?:\s*\))?", "", ret)
     return ret
+
+
+def _normalized_text(text):
+    return _general.string_cleaner(text).lower()
+
+
+def _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item):
+    if best_match_rating > minimum_match_ratio:
+        return best_match_item
+    return None
+
+
+def remove_album_keywords(text):
+    return _remove_keywords(text, ALBUM_KEYWORDS_TO_REMOVE)
 
 
 def remove_song_keywords(text):
-    ret = text
-    for keyword in SONG_KEYWORDS_TO_REMOVE:
-        if keyword in ret:
-            ret = re.sub(r"(\s*\(\s*)?(" + re.escape(keyword) + r")(?:\s*\))?", "", ret)
-    return ret
+    return _remove_keywords(text, SONG_KEYWORDS_TO_REMOVE)
 
 
 def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, cleaned_album, search_results, item_wanted_type="Album"):
@@ -66,9 +76,9 @@ def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, clean
         artists_string = "".join([item["artists"][x]["name"] for x in range(1, len(item["artists"]))])
         raw_artist_match_ratio = fuzz.ratio(artist, artists_string)
 
-        cleaned_yt_album_name = _general.string_cleaner(item["title"]).lower()
+        cleaned_yt_album_name = _normalized_text(item["title"])
         cleaned_album_match_ratio = fuzz.ratio(cleaned_album, cleaned_yt_album_name)
-        cleaned_artists_string = _general.string_cleaner(artists_string).lower()
+        cleaned_artists_string = _normalized_text(artists_string)
         cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
 
         cleaned_yt_album_title_minus_keywords = remove_album_keywords(cleaned_yt_album_name)
@@ -85,10 +95,7 @@ def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, clean
             if combined_rating == 100:
                 break
 
-    if best_match_rating > minimum_match_ratio:
-        return best_match_item
-    else:
-        return None
+    return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
 
 
 def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results, item_wanted_type="song"):
@@ -96,6 +103,8 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         return None
     best_match_rating = 0
     best_match_item = None
+    cleaned_song_title_minus_keywords = remove_song_keywords(cleaned_song_title)
+
     for item in search_results:
         if item["resultType"] != item_wanted_type:
             continue
@@ -105,15 +114,14 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         if artist.lower() in artists_string.lower():
             raw_artist_match_ratio = 100
 
-        cleaned_artists_string = _general.string_cleaner(artists_string).lower()
+        cleaned_artists_string = _normalized_text(artists_string)
         cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
 
-        cleaned_yt_song_title = _general.string_cleaner(item["title"]).lower()
+        cleaned_yt_song_title = _normalized_text(item["title"])
         cleaned_song_title_ratio = fuzz.ratio(cleaned_song_title, cleaned_yt_song_title)
         if song_title.lower() in item["title"].lower():
             cleaned_song_title_ratio = 100
 
-        cleaned_song_title_minus_keywords = remove_song_keywords(cleaned_song_title)
         cleaned_yt_title_minus_keywords = remove_song_keywords(cleaned_yt_song_title)
         cleaned_song_title_minus_keywords_ratio = fuzz.ratio(cleaned_song_title_minus_keywords, cleaned_yt_title_minus_keywords)
 
@@ -125,10 +133,7 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
             if combined_rating == 100:
                 break
 
-    if best_match_rating > minimum_match_ratio:
-        return best_match_item
-    else:
-        return None
+    return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
 
 
 def song_matcher_yt(minimum_match_ratio, query_text, search_results):
@@ -136,6 +141,8 @@ def song_matcher_yt(minimum_match_ratio, query_text, search_results):
         return None
     best_match_rating = 0
     best_match_item = None
+    cleaned_query_text = _general.string_cleaner(query_text)
+    cleaned_query_text_minus_keywords = remove_song_keywords(cleaned_query_text)
 
     for item in search_results:
         title = item.get("title", "")
@@ -144,13 +151,11 @@ def song_matcher_yt(minimum_match_ratio, query_text, search_results):
             title_similarity = 100
 
         cleaned_title = _general.string_cleaner(title)
-        cleaned_query_text = _general.string_cleaner(query_text)
         cleaned_title_similarity = fuzz.ratio(cleaned_query_text, cleaned_title)
         if cleaned_query_text in cleaned_title:
             cleaned_title_similarity = 100
 
         cleaned_title_minus_keywords = remove_song_keywords(cleaned_title)
-        cleaned_query_text_minus_keywords = remove_song_keywords(cleaned_query_text)
         cleaned_title_minus_keywords_similarity = fuzz.ratio(cleaned_query_text_minus_keywords, cleaned_title_minus_keywords)
         if cleaned_query_text_minus_keywords in cleaned_title_minus_keywords:
             cleaned_title_minus_keywords_similarity = 100
@@ -164,7 +169,4 @@ def song_matcher_yt(minimum_match_ratio, query_text, search_results):
             if combined_match_ratio == 100:
                 break
 
-    if best_match_rating > minimum_match_ratio:
-        return best_match_item
-    else:
-        return None
+    return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
