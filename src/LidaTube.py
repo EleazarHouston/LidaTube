@@ -231,76 +231,82 @@ class DataHandler:
                 percent=0,
             )
             self._emit_lidarr_update()
+
             page = 1
-            while True:
-                if self.lidarr_stop_event.is_set():
-                    return
-                endpoint = f"{self.lidarr_address}/api/v1/wanted/missing?includeArtist=true"
-                params = {"apikey": self.lidarr_api_key, "page": page}
-                response = requests.get(endpoint, params=params, timeout=self.lidarr_api_timeout)
-                if response.status_code == 200:
-                    wanted_missing_albums = response.json()
-                    if not wanted_missing_albums["records"]:
-                        break
-                    for album in wanted_missing_albums["records"]:
-                        if self.lidarr_stop_event.is_set():
-                            break
-                        parsed_date = datetime.fromisoformat(album["releaseDate"].replace("Z", "+00:00"))
-                        album_year = parsed_date.year
-                        album_name = _general.convert_to_lidarr_format(album["title"])
-                        album_folder = f"{album_name} ({album_year})"
-                        album_full_path = os.path.join(album["artist"]["path"], album_folder)
-                        album_release_id = album["releases"][0]["id"]
-                        new_item = {
-                            "artist_id": album["artistId"],
-                            "artist_path": album["artist"]["path"],
-                            "artist": album["artist"]["artistName"],
-                            "album_name": album_name,
-                            "album_folder": album_folder,
-                            "album_full_path": album_full_path,
-                            "album_year": album_year,
-                            "album_id": album["id"],
-                            "album_release_id": album_release_id,
-                            "album_genres": ", ".join(album["genres"]),
-                            "track_count": 0,
-                            "missing_count": 0,
-                            "missing_tracks": [],
-                            "checked": True,
-                            "scan_ready": False,
-                            "scan_in_progress": False,
-                            "status": "",
-                        }
-                        self.lidarr_items.append(new_item)
+            page_size = 500
+            scan_worker_count = max(1, int(self.lidarr_scan_thread_limit))
+            self.general_logger.warning(f"Fetching wanted albums (pageSize={page_size}) and missing tracks with {scan_worker_count} worker(s)")
 
-                    self._set_lidarr_scan_progress(
-                        phase="Fetching wanted albums",
-                        pages_scanned=page,
-                        albums_discovered=len(self.lidarr_items),
-                    )
-                    self._emit_lidarr_update()
-                    page += 1
-                else:
-                    self.general_logger.error(f"Lidarr Wanted API Error Code: {response.status_code}")
-                    self.general_logger.error(f"Lidarr Wanted API Error Text: {response.text}")
-                    socketio.emit("new_toast_msg", {"title": f"Lidarr API Error: {response.status_code}", "message": response.text})
-                    break
-
-            self.lidarr_items.sort(key=lambda x: (x["artist"], x["album_name"]))
-
-            total_albums = len(self.lidarr_items)
-            self._set_lidarr_scan_progress(
-                phase="Fetching missing tracks",
-                albums_total=total_albums,
-                albums_processed=0,
-                percent=0,
-            )
-            self._emit_lidarr_update()
-
-            scan_worker_count = max(1, min(int(self.lidarr_scan_thread_limit), total_albums or 1))
-            self.general_logger.warning(f"Fetching missing tracks with {scan_worker_count} worker(s)")
+            future_map = {}
+            total_albums = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=scan_worker_count) as executor:
-                future_map = {executor.submit(self.get_missing_tracks_for_album, album): album for album in self.lidarr_items}
-                self.lidarr_futures = list(future_map.keys())
+                while True:
+                    if self.lidarr_stop_event.is_set():
+                        break
+                    endpoint = f"{self.lidarr_address}/api/v1/wanted/missing?includeArtist=true"
+                    params = {"apikey": self.lidarr_api_key, "page": page, "pageSize": page_size}
+                    response = requests.get(endpoint, params=params, timeout=self.lidarr_api_timeout)
+                    if response.status_code == 200:
+                        wanted_missing_albums = response.json()
+                        if not wanted_missing_albums["records"]:
+                            break
+                        for album in wanted_missing_albums["records"]:
+                            if self.lidarr_stop_event.is_set():
+                                break
+                            parsed_date = datetime.fromisoformat(album["releaseDate"].replace("Z", "+00:00"))
+                            album_year = parsed_date.year
+                            album_name = _general.convert_to_lidarr_format(album["title"])
+                            album_folder = f"{album_name} ({album_year})"
+                            album_full_path = os.path.join(album["artist"]["path"], album_folder)
+                            album_release_id = album["releases"][0]["id"]
+                            new_item = {
+                                "artist_id": album["artistId"],
+                                "artist_path": album["artist"]["path"],
+                                "artist": album["artist"]["artistName"],
+                                "album_name": album_name,
+                                "album_folder": album_folder,
+                                "album_full_path": album_full_path,
+                                "album_year": album_year,
+                                "album_id": album["id"],
+                                "album_release_id": album_release_id,
+                                "album_genres": ", ".join(album["genres"]),
+                                "track_count": 0,
+                                "missing_count": 0,
+                                "missing_tracks": [],
+                                "checked": True,
+                                "scan_ready": False,
+                                "scan_in_progress": False,
+                                "status": "",
+                            }
+                            self.lidarr_items.append(new_item)
+                            future = executor.submit(self.get_missing_tracks_for_album, new_item)
+                            future_map[future] = new_item
+
+                        self.lidarr_futures = list(future_map.keys())
+                        self._set_lidarr_scan_progress(
+                            phase="Fetching wanted albums",
+                            pages_scanned=page,
+                            albums_discovered=len(self.lidarr_items),
+                        )
+                        self._emit_lidarr_update()
+                        page += 1
+                    else:
+                        self.general_logger.error(f"Lidarr Wanted API Error Code: {response.status_code}")
+                        self.general_logger.error(f"Lidarr Wanted API Error Text: {response.text}")
+                        socketio.emit("new_toast_msg", {"title": f"Lidarr API Error: {response.status_code}", "message": response.text})
+                        break
+
+                self.lidarr_items.sort(key=lambda x: (x["artist"], x["album_name"]))
+
+                total_albums = len(self.lidarr_items)
+                self._set_lidarr_scan_progress(
+                    phase="Fetching missing tracks",
+                    albums_total=total_albums,
+                    albums_processed=0,
+                    percent=0,
+                )
+                self._emit_lidarr_update()
+
                 albums_processed = 0
                 for future in concurrent.futures.as_completed(future_map):
                     if self.lidarr_stop_event.is_set():
