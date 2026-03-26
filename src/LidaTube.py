@@ -33,6 +33,7 @@ class DataHandler:
         self.lidarr_futures = []
         self.lidarr_status = "idle"
         self.lidarr_stop_event = threading.Event()
+        self.lidarr_scan_guard = threading.Lock()
         self.lidarr_scan_progress = {
             "phase": "Idle",
             "pages_scanned": 0,
@@ -192,6 +193,8 @@ class DataHandler:
             self.general_logger.error(f"Scheduler Stopped")
 
     def _ensure_lidarr_scan_state(self):
+        if not hasattr(self, "lidarr_scan_guard"):
+            self.lidarr_scan_guard = threading.Lock()
         if not hasattr(self, "lidarr_scan_progress"):
             self.lidarr_scan_progress = {
                 "phase": "Idle",
@@ -263,6 +266,8 @@ class DataHandler:
                             "missing_count": 0,
                             "missing_tracks": [],
                             "checked": True,
+                            "scan_ready": False,
+                            "scan_in_progress": False,
                             "status": "",
                         }
                         self.lidarr_items.append(new_item)
@@ -335,10 +340,26 @@ class DataHandler:
             self._emit_lidarr_update()
 
     def get_missing_tracks_for_album(self, req_album):
+        self._ensure_lidarr_scan_state()
+        while True:
+            with self.lidarr_scan_guard:
+                if req_album.get("scan_ready", False):
+                    return
+                if not req_album.get("scan_in_progress", False):
+                    req_album["scan_in_progress"] = True
+                    break
+
+            if self.ytdlp_stop_event.is_set() or self.lidarr_stop_event.is_set():
+                return
+            time.sleep(0.1)
+
         self.general_logger.warning(f'Reading Missing Track list of {req_album["artist"]} - {req_album["album_name"]} from Lidarr API')
         endpoint = f"{self.lidarr_address}/api/v1/track"
         params = {"apikey": self.lidarr_api_key, "albumId": req_album["album_id"]}
         try:
+            req_album["missing_tracks"] = []
+            req_album["track_count"] = 0
+            req_album["missing_count"] = 0
             response = requests.get(endpoint, params=params, timeout=self.lidarr_api_timeout)
             if response.status_code == 200:
                 tracks = response.json()
@@ -370,6 +391,9 @@ class DataHandler:
             self.general_logger.error(req_album["album_name"])
             self.general_logger.error(f"Error Getting Missing Tracks: {str(e)}")
             socketio.emit("new_toast_msg", {"title": "Error Getting Missing Tracks", "message": str(e)})
+        finally:
+            req_album["scan_in_progress"] = False
+            req_album["scan_ready"] = True
 
     def attempt_lidarr_song_import(self, req_album, song, filename):
         try:
@@ -438,7 +462,7 @@ class DataHandler:
                 self.percent_completion = 0
             for i in range(len(self.lidarr_items)):
                 if i in data:
-                    self.lidarr_items[i]["status"] = "Queued"
+                    self.lidarr_items[i]["status"] = "Queued" if self.lidarr_items[i].get("scan_ready", True) else "Waiting for refresh data"
                     self.lidarr_items[i]["checked"] = True
                     self.ytdlp_items.append(self.lidarr_items[i])
                 else:
@@ -492,8 +516,33 @@ class DataHandler:
             socketio.emit("ytdlp_update", {"status": self.ytdlp_status, "data": self.ytdlp_items, "percent_completion": self.percent_completion})
             socketio.emit("new_toast_msg", {"title": "End of Session", "message": f"Downloading {self.ytdlp_status.capitalize()}"})
 
+    def _wait_for_album_scan_data(self, req_album):
+        if req_album.get("scan_ready", True):
+            return True
+
+        req_album["status"] = "Waiting for refresh data"
+        socketio.emit("ytdlp_update", {"status": self.ytdlp_status, "data": self.ytdlp_items, "percent_completion": self.percent_completion})
+
+        if not req_album.get("scan_in_progress", False):
+            self.general_logger.warning(f'Prioritizing scan for queued album: {req_album["artist"]} - {req_album["album_name"]}')
+            self.get_missing_tracks_for_album(req_album)
+            if req_album.get("scan_ready", False):
+                return True
+
+        while not self.ytdlp_stop_event.is_set():
+            if req_album.get("scan_ready", False):
+                return True
+            if self.lidarr_status != "busy":
+                return req_album.get("scan_ready", False)
+            self.ytdlp_stop_event.wait(0.5)
+
+        return False
+
     def find_link_and_download(self, req_album):
         try:
+            if not self._wait_for_album_scan_data(req_album):
+                req_album["status"] = "Download Stopped" if self.ytdlp_stop_event.is_set() else "Refresh data unavailable"
+                return
             self._link_finder(req_album)
             if self.ytdlp_stop_event.is_set():
                 return
