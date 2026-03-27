@@ -234,7 +234,7 @@ class DataHandler:
             self._emit_lidarr_update()
 
             page = 1
-            page_size = 500
+            page_size = 2000
             scan_worker_count = max(1, int(self.lidarr_scan_thread_limit))
             self.general_logger.warning(f"Fetching wanted albums (pageSize={page_size}) and missing tracks with {scan_worker_count} worker(s)")
 
@@ -251,9 +251,13 @@ class DataHandler:
                     response = requests.get(endpoint, params=params, timeout=self.lidarr_api_timeout)
                     if response.status_code == 200:
                         wanted_missing_albums = response.json()
+                        response.close()
+                        del response
                         if not wanted_missing_albums["records"]:
                             break
-                        for album in wanted_missing_albums["records"]:
+                        albums_on_page = wanted_missing_albums["records"]
+                        del wanted_missing_albums
+                        for album in albums_on_page:
                             if self.lidarr_stop_event.is_set():
                                 break
                             parsed_date = datetime.fromisoformat(album["releaseDate"].replace("Z", "+00:00"))
@@ -285,6 +289,7 @@ class DataHandler:
                             future = executor.submit(self.get_missing_tracks_for_album, new_item)
                             future_map[future] = new_item
                             undrained_futures.add(future)
+                        del albums_on_page
 
                         # Drain any track futures that already completed while this page was being fetched
                         newly_done = [f for f in undrained_futures if f.done()]
@@ -387,9 +392,12 @@ class DataHandler:
             response = requests.get(endpoint, params=params, timeout=self.lidarr_api_timeout)
             if response.status_code == 200:
                 tracks = response.json()
+                response.close()
+                del response
                 track_count = len(tracks)
                 for track in tracks:
                     if self.lidarr_stop_event.is_set():
+                        del tracks
                         return
                     if not track.get("hasFile", False):
                         new_item = {
@@ -402,6 +410,7 @@ class DataHandler:
                             "title_of_link": "",
                         }
                         req_album["missing_tracks"].append(new_item)
+                del tracks
 
                 req_album["track_count"] = track_count
                 req_album["missing_count"] = len(req_album["missing_tracks"])
