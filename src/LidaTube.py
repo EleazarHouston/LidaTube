@@ -33,6 +33,7 @@ class DataHandler:
         self.lidarr_futures = []
         self.lidarr_status = "idle"
         self.lidarr_stop_event = threading.Event()
+        self.lidarr_session = requests.Session()
         self.lidarr_scan_guard = threading.Lock()
         self.lidarr_scan_progress = {
             "phase": "Idle",
@@ -159,6 +160,8 @@ class DataHandler:
         except Exception as e:
             self.general_logger.error(f"Error Saving Config: {str(e)}")
 
+        self._load_lidarr_cache()
+
     def connect(self):
         self._ensure_lidarr_scan_state()
         self._emit_lidarr_update()
@@ -216,6 +219,30 @@ class DataHandler:
         self._ensure_lidarr_scan_state()
         socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": self.lidarr_items, "scan_progress": self.lidarr_scan_progress})
 
+    def _save_lidarr_cache(self):
+        try:
+            cache_path = os.path.join(self.config_folder, "lidarr_cache.json")
+            with open(cache_path, "w") as f:
+                json.dump({"lidarr_items": self.lidarr_items, "lidarr_scan_progress": self.lidarr_scan_progress}, f)
+            self.general_logger.warning(f"Saved {len(self.lidarr_items)} albums to Lidarr cache")
+        except Exception as e:
+            self.general_logger.error(f"Error saving Lidarr cache: {str(e)}")
+
+    def _load_lidarr_cache(self):
+        try:
+            cache_path = os.path.join(self.config_folder, "lidarr_cache.json")
+            if os.path.exists(cache_path):
+                with open(cache_path, "r") as f:
+                    cache = json.load(f)
+                self.lidarr_items = cache.get("lidarr_items", [])
+                cached_progress = cache.get("lidarr_scan_progress", {})
+                cached_progress["phase"] = "Complete (cached)"
+                self.lidarr_scan_progress.update(cached_progress)
+                self.lidarr_status = "complete"
+                self.general_logger.warning(f"Loaded {len(self.lidarr_items)} albums from Lidarr cache")
+        except Exception as e:
+            self.general_logger.error(f"Error loading Lidarr cache: {str(e)}")
+
     def get_wanted_albums_from_lidarr(self):
         try:
             self.general_logger.warning(f"Accessing Lidarr API")
@@ -248,7 +275,7 @@ class DataHandler:
                         break
                     endpoint = f"{self.lidarr_address}/api/v1/wanted/missing?includeArtist=true"
                     params = {"apikey": self.lidarr_api_key, "page": page, "pageSize": page_size}
-                    response = requests.get(endpoint, params=params, timeout=self.lidarr_api_timeout)
+                    response = self.lidarr_session.get(endpoint, params=params, timeout=self.lidarr_api_timeout)
                     if response.status_code == 200:
                         wanted_missing_albums = response.json()
                         response.close()
@@ -356,6 +383,7 @@ class DataHandler:
                     albums_total=total_albums,
                     percent=100,
                 )
+                self._save_lidarr_cache()
             elif self.lidarr_status == "stopped":
                 self._set_lidarr_scan_progress(phase="Stopped")
 
@@ -385,48 +413,62 @@ class DataHandler:
         self.general_logger.warning(f'Reading Missing Track list of {req_album["artist"]} - {req_album["album_name"]} from Lidarr API')
         endpoint = f"{self.lidarr_address}/api/v1/track"
         params = {"apikey": self.lidarr_api_key, "albumId": req_album["album_id"]}
-        try:
-            req_album["missing_tracks"] = []
-            req_album["track_count"] = 0
-            req_album["missing_count"] = 0
-            response = requests.get(endpoint, params=params, timeout=self.lidarr_api_timeout)
-            if response.status_code == 200:
-                tracks = response.json()
-                response.close()
-                del response
-                track_count = len(tracks)
-                for track in tracks:
-                    if self.lidarr_stop_event.is_set():
-                        del tracks
-                        return
-                    if not track.get("hasFile", False):
-                        new_item = {
-                            "artist": req_album["artist"],
-                            "track_title": track["title"],
-                            "track_number": track["trackNumber"],
-                            "absolute_track_number": track["absoluteTrackNumber"],
-                            "track_id": track["id"],
-                            "link": "",
-                            "title_of_link": "",
-                        }
-                        req_album["missing_tracks"].append(new_item)
-                del tracks
+        last_error = None
+        for attempt in range(3):
+            try:
+                req_album["missing_tracks"] = []
+                req_album["track_count"] = 0
+                req_album["missing_count"] = 0
+                self._wait_if_fd_pressure()
+                if self.lidarr_stop_event.is_set():
+                    return
+                response = self.lidarr_session.get(endpoint, params=params, timeout=self.lidarr_api_timeout)
+                if response.status_code == 200:
+                    tracks = response.json()
+                    response.close()
+                    del response
+                    track_count = len(tracks)
+                    for track in tracks:
+                        if self.lidarr_stop_event.is_set():
+                            del tracks
+                            return
+                        if not track.get("hasFile", False):
+                            new_item = {
+                                "artist": req_album["artist"],
+                                "track_title": track["title"],
+                                "track_number": track["trackNumber"],
+                                "absolute_track_number": track["absoluteTrackNumber"],
+                                "track_id": track["id"],
+                                "link": "",
+                                "title_of_link": "",
+                            }
+                            req_album["missing_tracks"].append(new_item)
+                    del tracks
 
-                req_album["track_count"] = track_count
-                req_album["missing_count"] = len(req_album["missing_tracks"])
+                    req_album["track_count"] = track_count
+                    req_album["missing_count"] = len(req_album["missing_tracks"])
+                    last_error = None
 
-            else:
-                self.general_logger.error(req_album["album_name"])
-                self.general_logger.error(f"Lidarr Track API Error Code: {response.status_code}")
-                self.general_logger.error(f"Lidarr Track API Error Text: {response.text}")
+                else:
+                    self.general_logger.error(req_album["album_name"])
+                    self.general_logger.error(f"Lidarr Track API Error Code: {response.status_code}")
+                    self.general_logger.error(f"Lidarr Track API Error Text: {response.text}")
+                break
 
-        except Exception as e:
+            except Exception as e:
+                last_error = e
+                if self._is_resource_exhaustion_error(e) and attempt < 2:
+                    self.general_logger.warning(f'FD exhaustion on track fetch attempt {attempt + 1}, backing off: {req_album["album_name"]}')
+                    threading.Thread(target=self._signal_fd_exhaustion, daemon=True).start()
+                    continue
+                break
+
+        if last_error is not None:
             self.general_logger.error(req_album["album_name"])
-            self.general_logger.error(f"Error Getting Missing Tracks: {str(e)}")
-            socketio.emit("new_toast_msg", {"title": "Error Getting Missing Tracks", "message": str(e)})
-        finally:
-            req_album["scan_in_progress"] = False
-            req_album["scan_ready"] = True
+            self.general_logger.error(f"Error Getting Missing Tracks: {str(last_error)}")
+            socketio.emit("new_toast_msg", {"title": "Error Getting Missing Tracks", "message": str(last_error)})
+        req_album["scan_in_progress"] = False
+        req_album["scan_ready"] = True
 
     def attempt_lidarr_song_import(self, req_album, song, filename):
         try:
