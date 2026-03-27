@@ -502,16 +502,20 @@ def test_cache_saved_after_each_page(lidatube_module, monkeypatch):
     assert len(save_calls) >= 2
 
 
-def test_missing_tracks_cleared_after_download(lidatube_module, monkeypatch):
-    """missing_tracks is cleared after download completes to free memory."""
+def test_missing_tracks_preserved_after_download(lidatube_module, monkeypatch):
+    """missing_tracks must NOT be cleared after download — clearing it corrupts the cache
+    for the next session (album re-queued with no tracks = silent no-op download)."""
     handler = build_data_handler(lidatube_module)
     handler.ytdlp_in_progress_flag = False
     handler.index = 0
     handler.streaming_mode = False
-    emit_mock = Mock()
-    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
     monkeypatch.setattr(handler.config, "library_scan_on_completion", False)
 
+    original_tracks = [
+        {"artist": "A", "track_title": "T1", "track_number": 1, "absolute_track_number": 1,
+         "track_id": 1, "link": "", "title_of_link": ""},
+    ]
     req_album = {
         "artist": "A",
         "album_name": "B",
@@ -520,10 +524,7 @@ def test_missing_tracks_cleared_after_download(lidatube_module, monkeypatch):
         "album_folder": "B (2024)",
         "track_count": 1,
         "missing_count": 1,
-        "missing_tracks": [
-            {"artist": "A", "track_title": "T1", "track_number": 1, "absolute_track_number": 1,
-             "track_id": 1, "link": "", "title_of_link": ""},
-        ],
+        "missing_tracks": original_tracks,
         "scan_ready": True,
         "status": "",
         "checked": True,
@@ -535,7 +536,29 @@ def test_missing_tracks_cleared_after_download(lidatube_module, monkeypatch):
 
     handler.find_link_and_download(req_album)
 
-    assert req_album["missing_tracks"] == []
+    assert req_album["missing_tracks"] is original_tracks
+
+
+def test_response_closed_on_non_200_track_fetch(lidatube_module, monkeypatch):
+    """Response must be closed even when Lidarr returns a non-200 status (prevents FD leak)."""
+    handler = build_data_handler(lidatube_module)
+    handler.streaming_mode = False
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+
+    close_called = []
+    error_response = FakeResponse(500, None, "Server Error")
+    error_response.close = lambda: close_called.append(1)
+
+    handler.lidarr_client.get_tracks_for_album.return_value = error_response
+
+    album = {
+        "artist": "A", "album_name": "B", "album_id": 1,
+        "missing_tracks": [], "track_count": 0, "missing_count": 0,
+        "scan_ready": False, "scan_in_progress": False, "status": "",
+    }
+    handler.get_missing_tracks_for_album(album)
+
+    assert len(close_called) >= 1
 
 
 def test_link_finder_does_not_retry_secondary_after_emfile(lidatube_module, monkeypatch):

@@ -223,79 +223,79 @@ class DataHandler:
                         break
 
                     response = self.lidarr_client.get_wanted_albums(page, page_size)
-
-                    if response.status_code == 200:
-                        wanted_missing_albums = response.json()
-                        response.close()
-                        del response
-                        if not wanted_missing_albums["records"]:
+                    try:
+                        if response.status_code != 200:
+                            self.general_logger.error(f"Lidarr Wanted API Error Code: {response.status_code}")
+                            self.general_logger.error(f"Lidarr Wanted API Error Text: {response.text}")
+                            socketio.emit("new_toast_msg", {"title": f"Lidarr API Error: {response.status_code}", "message": response.text})
                             break
-                        albums_on_page = wanted_missing_albums["records"]
-                        del wanted_missing_albums
+                        wanted_missing_albums = response.json()
+                    finally:
+                        response.close()
 
-                        for album in albums_on_page:
-                            if self.lidarr_stop_event.is_set():
-                                break
-                            parsed_date = datetime.fromisoformat(album["releaseDate"].replace("Z", "+00:00"))
-                            album_year = parsed_date.year
-                            album_name = _general.convert_to_lidarr_format(album["title"])
-                            album_folder = f"{album_name} ({album_year})"
-                            album_full_path = os.path.join(album["artist"]["path"], album_folder)
-                            album_release_id = album["releases"][0]["id"]
-                            new_item = {
-                                "artist_id": album["artistId"],
-                                "artist_path": album["artist"]["path"],
-                                "artist": album["artist"]["artistName"],
-                                "album_name": album_name,
-                                "album_folder": album_folder,
-                                "album_full_path": album_full_path,
-                                "album_year": album_year,
-                                "album_id": album["id"],
-                                "album_release_id": album_release_id,
-                                "album_genres": ", ".join(album["genres"]),
-                                "track_count": 0,
-                                "missing_count": 0,
-                                "missing_tracks": [],
-                                "checked": True,
-                                "scan_ready": False,
-                                "scan_in_progress": False,
-                                "status": "",
-                            }
-                            self.lidarr_items.append(new_item)
-                            future = executor.submit(self.get_missing_tracks_for_album, new_item)
-                            future_map[future] = new_item
-                            undrained_futures.add(future)
-                        del albums_on_page
-
-                        # Drain completed track futures while next page is being fetched
-                        newly_done = [f for f in undrained_futures if f.done()]
-                        for f in newly_done:
-                            undrained_futures.discard(f)
-                            req_album = future_map[f]
-                            try:
-                                f.result()
-                            except Exception as e:
-                                self.general_logger.error(f'Error Getting Missing Tracks for {req_album["artist"]} - {req_album["album_name"]}: {e}')
-                            albums_processed += 1
-
-                        self.lidarr_futures = list(future_map.keys())
-                        discovered = len(self.lidarr_items)
-                        self._set_lidarr_scan_progress(
-                            phase="Fetching albums & tracks",
-                            pages_scanned=page,
-                            albums_discovered=discovered,
-                            albums_processed=albums_processed,
-                            albums_total=discovered,
-                            percent=int(albums_processed / discovered * 100) if discovered else 0,
-                        )
-                        self._emit_lidarr_update()
-                        self._save_lidarr_cache()
-                        page += 1
-                    else:
-                        self.general_logger.error(f"Lidarr Wanted API Error Code: {response.status_code}")
-                        self.general_logger.error(f"Lidarr Wanted API Error Text: {response.text}")
-                        socketio.emit("new_toast_msg", {"title": f"Lidarr API Error: {response.status_code}", "message": response.text})
+                    if not wanted_missing_albums["records"]:
                         break
+                    albums_on_page = wanted_missing_albums["records"]
+                    del wanted_missing_albums
+
+                    for album in albums_on_page:
+                        if self.lidarr_stop_event.is_set():
+                            break
+                        parsed_date = datetime.fromisoformat(album["releaseDate"].replace("Z", "+00:00"))
+                        album_year = parsed_date.year
+                        album_name = _general.convert_to_lidarr_format(album["title"])
+                        album_folder = f"{album_name} ({album_year})"
+                        album_full_path = os.path.join(album["artist"]["path"], album_folder)
+                        album_release_id = album["releases"][0]["id"]
+                        new_item = {
+                            "artist_id": album["artistId"],
+                            "artist_path": album["artist"]["path"],
+                            "artist": album["artist"]["artistName"],
+                            "album_name": album_name,
+                            "album_folder": album_folder,
+                            "album_full_path": album_full_path,
+                            "album_year": album_year,
+                            "album_id": album["id"],
+                            "album_release_id": album_release_id,
+                            "album_genres": ", ".join(album["genres"]),
+                            "track_count": 0,
+                            "missing_count": 0,
+                            "missing_tracks": [],
+                            "checked": True,
+                            "scan_ready": False,
+                            "scan_in_progress": False,
+                            "status": "",
+                        }
+                        self.lidarr_items.append(new_item)
+                        future = executor.submit(self.get_missing_tracks_for_album, new_item)
+                        future_map[future] = new_item
+                        undrained_futures.add(future)
+                    del albums_on_page
+
+                    # Drain completed track futures while next page is being fetched
+                    newly_done = [f for f in undrained_futures if f.done()]
+                    for f in newly_done:
+                        undrained_futures.discard(f)
+                        req_album = future_map[f]
+                        try:
+                            f.result()
+                        except Exception as e:
+                            self.general_logger.error(f'Error Getting Missing Tracks for {req_album["artist"]} - {req_album["album_name"]}: {e}')
+                        albums_processed += 1
+
+                    self.lidarr_futures = list(future_map.keys())
+                    discovered = len(self.lidarr_items)
+                    self._set_lidarr_scan_progress(
+                        phase="Fetching albums & tracks",
+                        pages_scanned=page,
+                        albums_discovered=discovered,
+                        albums_processed=albums_processed,
+                        albums_total=discovered,
+                        percent=int(albums_processed / discovered * 100) if discovered else 0,
+                    )
+                    self._emit_lidarr_update()
+                    self._save_lidarr_cache()
+                    page += 1
 
                 self.lidarr_items.sort(key=lambda x: (x["artist"], x["album_name"]))
                 total_albums = len(self.lidarr_items)
@@ -361,34 +361,35 @@ class DataHandler:
                     return
 
                 response = self.lidarr_client.get_tracks_for_album(req_album["album_id"])
-                if response.status_code == 200:
-                    tracks = response.json()
+                try:
+                    if response.status_code == 200:
+                        tracks = response.json()
+                        track_count = len(tracks)
+                        for track in tracks:
+                            if self.lidarr_stop_event.is_set():
+                                del tracks
+                                return
+                            if not track.get("hasFile", False):
+                                new_item = {
+                                    "artist": req_album["artist"],
+                                    "track_title": track["title"],
+                                    "track_number": track["trackNumber"],
+                                    "absolute_track_number": track["absoluteTrackNumber"],
+                                    "track_id": track["id"],
+                                    "link": "",
+                                    "title_of_link": "",
+                                }
+                                req_album["missing_tracks"].append(new_item)
+                        del tracks
+                        req_album["track_count"] = track_count
+                        req_album["missing_count"] = len(req_album["missing_tracks"])
+                        last_error = None
+                    else:
+                        self.general_logger.error(req_album["album_name"])
+                        self.general_logger.error(f"Lidarr Track API Error Code: {response.status_code}")
+                        self.general_logger.error(f"Lidarr Track API Error Text: {response.text}")
+                finally:
                     response.close()
-                    del response
-                    track_count = len(tracks)
-                    for track in tracks:
-                        if self.lidarr_stop_event.is_set():
-                            del tracks
-                            return
-                        if not track.get("hasFile", False):
-                            new_item = {
-                                "artist": req_album["artist"],
-                                "track_title": track["title"],
-                                "track_number": track["trackNumber"],
-                                "absolute_track_number": track["absoluteTrackNumber"],
-                                "track_id": track["id"],
-                                "link": "",
-                                "title_of_link": "",
-                            }
-                            req_album["missing_tracks"].append(new_item)
-                    del tracks
-                    req_album["track_count"] = track_count
-                    req_album["missing_count"] = len(req_album["missing_tracks"])
-                    last_error = None
-                else:
-                    self.general_logger.error(req_album["album_name"])
-                    self.general_logger.error(f"Lidarr Track API Error Code: {response.status_code}")
-                    self.general_logger.error(f"Lidarr Track API Error Text: {response.text}")
                 break
 
             except Exception as e:
@@ -620,7 +621,6 @@ class DataHandler:
             req_album["status"] = "Download Error"
 
         finally:
-            req_album["missing_tracks"] = []
             self.index += 1
             self.percent_completion = 100 * (self.index / len(self.ytdlp_items)) if self.ytdlp_items else 0
             self._emit_ytdlp_update()

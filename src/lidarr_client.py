@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import requests
 
 
@@ -7,7 +8,14 @@ class LidarrClient:
     def __init__(self, config, logger=None):
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
-        self.session = requests.Session()
+        self._local = threading.local()
+
+    @property
+    def session(self):
+        """Return a thread-local session so each worker thread has its own connection pool."""
+        if not hasattr(self._local, "session"):
+            self._local.session = requests.Session()
+        return self._local.session
 
     def get_wanted_albums(self, page, page_size=2000):
         endpoint = f"{self.config.lidarr_address}/api/v1/wanted/missing?includeArtist=true"

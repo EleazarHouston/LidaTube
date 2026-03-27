@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import Mock, patch
 import pytest
 
@@ -159,3 +160,24 @@ def test_import_song_returns_response(client):
     with patch.object(client.session, "post", return_value=FakeResponse(202, {})):
         response = client.import_song(req_album, song, "My Song.mp3")
     assert response.status_code == 202
+
+
+# --- thread-local sessions ---
+
+
+def test_different_threads_get_different_sessions(client):
+    """Each thread must have its own session so connections don't share a pool."""
+    sessions = {}
+    barrier = threading.Barrier(2)
+
+    def capture():
+        sessions["thread"] = client.session
+        barrier.wait()  # hold the session alive until main has captured its own
+
+    t = threading.Thread(target=capture)
+    t.start()
+    sessions["main"] = client.session
+    barrier.wait()
+    t.join()
+
+    assert sessions["main"] is not sessions["thread"]
