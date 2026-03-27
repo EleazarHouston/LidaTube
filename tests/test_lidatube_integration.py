@@ -2,7 +2,7 @@ import importlib
 import os
 import sys
 import threading
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -33,20 +33,38 @@ def build_data_handler(module):
     handler.lidarr_futures = []
     handler.lidarr_status = "idle"
     handler.lidarr_stop_event = threading.Event()
+    handler.lidarr_scan_guard = threading.Lock()
+    handler.lidarr_scan_progress = {
+        "phase": "Idle",
+        "pages_scanned": 0,
+        "albums_discovered": 0,
+        "albums_processed": 0,
+        "albums_total": 0,
+        "percent": 0,
+    }
 
     handler.ytdlp_items = []
     handler.ytdlp_futures = []
     handler.ytdlp_status = "idle"
     handler.ytdlp_stop_event = threading.Event()
-
+    handler.fd_exhaustion_event = threading.Event()
     handler.percent_completion = 0
-    handler.thread_limit = 1
-    handler.lidarr_address = "http://lidarr.test"
-    handler.lidarr_api_key = "api-key"
-    handler.lidarr_api_timeout = 30
-    handler.minimum_match_ratio = 80
-    handler.fallback_to_top_result = False
-    handler.secondary_search = "YTS"
+
+    # Config mock
+    cfg = Mock()
+    cfg.lidarr_address = "http://lidarr.test"
+    cfg.lidarr_api_key = "api-key"
+    cfg.lidarr_api_timeout = 30
+    cfg.minimum_match_ratio = 80
+    cfg.fallback_to_top_result = False
+    cfg.secondary_search = "YTS"
+    cfg.thread_limit = 1
+    cfg.lidarr_scan_thread_limit = 8
+    cfg.CONFIG_FOLDER = "config"
+    handler.config = cfg
+
+    # LidarrClient mock
+    handler.lidarr_client = Mock()
 
     return handler
 
@@ -59,6 +77,9 @@ class FakeResponse:
 
     def json(self):
         return self._payload
+
+    def close(self):
+        pass
 
 
 def test_get_wanted_albums_from_lidarr_populates_missing_tracks(lidatube_module, monkeypatch):
@@ -97,19 +118,15 @@ def test_get_wanted_albums_from_lidarr_populates_missing_tracks(lidatube_module,
         ],
     }
 
-    def fake_requests_get(url, params=None, timeout=None):
-        if "wanted/missing" in url:
-            page = params["page"]
-            records = page_one_records if page == 1 else []
-            return FakeResponse(200, {"records": records})
+    def fake_get_wanted(page, page_size=2000):
+        records = page_one_records if page == 1 else []
+        return FakeResponse(200, {"records": records})
 
-        if url.endswith("/api/v1/track"):
-            album_id = params["albumId"]
-            return FakeResponse(200, tracks_by_album[album_id])
+    def fake_get_tracks(album_id):
+        return FakeResponse(200, tracks_by_album[album_id])
 
-        raise AssertionError(f"Unexpected URL in test: {url}")
-
-    monkeypatch.setattr(lidatube_module.requests, "get", fake_requests_get)
+    handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
+    handler.lidarr_client.get_tracks_for_album.side_effect = fake_get_tracks
 
     handler.get_wanted_albums_from_lidarr()
 

@@ -12,23 +12,18 @@ def convert_to_lidarr_format(input_string):
     return result.strip()
 
 
+def _clean_single_string(s):
+    s = re.sub(r'[\/:*?"<>|]', " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return unidecode.unidecode(s)
+
+
 def string_cleaner(input_string):
     if isinstance(input_string, str):
-        raw_string = re.sub(r'[\/:*?"<>|]', " ", input_string)
-        temp_string = re.sub(r"\s+", " ", raw_string)
-        stripped_string = temp_string.strip()
-        normalised_string = unidecode.unidecode(stripped_string)
-        return normalised_string
-
-    elif isinstance(input_string, list):
-        cleaned_strings = []
-        for string in input_string:
-            raw_string = re.sub(r'[\/:*?"<>|]', " ", string)
-            temp_string = re.sub(r"\s+", " ", raw_string)
-            stripped_string = temp_string.strip()
-            normalised_string = unidecode.unidecode(stripped_string)
-            cleaned_strings.append(normalised_string)
-        return cleaned_strings
+        return _clean_single_string(input_string)
+    if isinstance(input_string, list):
+        return [_clean_single_string(s) for s in input_string]
+    return None
 
 
 def add_metadata(logger, song, req_album, full_file_path):
@@ -61,3 +56,32 @@ def add_metadata(logger, song, req_album, full_file_path):
 
     except Exception as e:
         logger.error(f"Error adding metadata for {full_file_path}: {e}")
+
+
+def is_resource_exhaustion_error(error):
+    if error is None:
+        return False
+    errnos = {23, 24}
+    queue = [error]
+    visited = set()
+    while queue:
+        current = queue.pop()
+        current_id = id(current)
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+
+        if isinstance(current, OSError) and current.errno in errnos:
+            return True
+        if "no file descriptors available" in str(current).lower():
+            return True
+
+        for attr in ("__cause__", "__context__"):
+            related = getattr(current, attr, None)
+            if related is not None:
+                queue.append(related)
+        for arg in getattr(current, "args", ()):
+            if isinstance(arg, BaseException):
+                queue.append(arg)
+
+    return False
