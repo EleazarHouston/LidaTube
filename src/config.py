@@ -22,7 +22,7 @@ class AppConfig:
         "secondary_search": "YTS",
         "preferred_codec": "mp3",
         "attempt_lidarr_import": False,
-        "lidarr_scan_thread_limit": 8,
+        "lidarr_scan_thread_limit": 16,
     }
 
     _ENV_CONVERTERS = {

@@ -2,6 +2,7 @@ import importlib
 import os
 import sys
 import threading
+import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -293,6 +294,137 @@ def test_get_album_links_closes_ytmusic_client(lidatube_module, monkeypatch):
 
     assert fake_client.close_called == 1
     assert req_album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
+
+
+def test_streaming_mode_adds_scan_ready_album_to_ytdlp_items(lidatube_module, monkeypatch):
+    """When streaming_mode=True, scan_ready albums are auto-added to ytdlp_items."""
+    handler = build_data_handler(lidatube_module)
+    handler.streaming_mode = True
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+
+    album = {
+        "artist": "Test Artist",
+        "album_name": "Test Album",
+        "album_id": 42,
+        "missing_tracks": [],
+        "track_count": 0,
+        "missing_count": 0,
+        "scan_ready": False,
+        "scan_in_progress": False,
+        "status": "",
+    }
+    handler.lidarr_client.get_tracks_for_album.return_value = FakeResponse(
+        200,
+        [{"title": "Track 1", "trackNumber": 1, "absoluteTrackNumber": 1, "id": 1, "hasFile": False}],
+    )
+
+    handler.get_missing_tracks_for_album(album)
+
+    assert album["scan_ready"] is True
+    assert album in handler.ytdlp_items
+    assert album["status"] == "Queued"
+
+
+def test_streaming_mode_off_does_not_add_to_ytdlp_items(lidatube_module, monkeypatch):
+    """When streaming_mode=False, scan_ready albums are NOT added to ytdlp_items."""
+    handler = build_data_handler(lidatube_module)
+    handler.streaming_mode = False
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+
+    album = {
+        "artist": "Test Artist",
+        "album_name": "Test Album",
+        "album_id": 42,
+        "missing_tracks": [],
+        "track_count": 0,
+        "missing_count": 0,
+        "scan_ready": False,
+        "scan_in_progress": False,
+        "status": "",
+    }
+    handler.lidarr_client.get_tracks_for_album.return_value = FakeResponse(200, [])
+
+    handler.get_missing_tracks_for_album(album)
+
+    assert album["scan_ready"] is True
+    assert len(handler.ytdlp_items) == 0
+
+
+def test_master_queue_exits_when_empty_and_not_streaming(lidatube_module, monkeypatch):
+    """master_queue exits immediately when queue is empty and not in streaming mode."""
+    handler = build_data_handler(lidatube_module)
+    handler.streaming_mode = False
+    handler.lidarr_status = "complete"
+    handler.ytdlp_in_progress_flag = True
+    handler.index = 0
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    monkeypatch.setattr(handler.config, "library_scan_on_completion", False)
+
+    handler.master_queue()
+
+    assert handler.ytdlp_status == "complete"
+    assert handler.ytdlp_in_progress_flag is False
+
+
+def test_master_queue_waits_when_streaming_and_fetch_busy(lidatube_module, monkeypatch):
+    """master_queue stays alive while streaming_mode=True and lidarr is busy, then exits once fetch is done."""
+    handler = build_data_handler(lidatube_module)
+    handler.streaming_mode = True
+    handler.lidarr_status = "busy"
+    handler.ytdlp_in_progress_flag = True
+    handler.index = 0
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    monkeypatch.setattr(handler.config, "library_scan_on_completion", False)
+
+    def finish_fetch():
+        time.sleep(0.3)
+        handler.lidarr_status = "complete"
+
+    t = threading.Thread(target=finish_fetch)
+    t.start()
+
+    handler.master_queue()
+    t.join()
+
+    assert handler.ytdlp_status == "complete"
+    assert handler.ytdlp_in_progress_flag is False
+
+
+def test_master_queue_processes_item_added_during_streaming(lidatube_module, monkeypatch):
+    """Items added to ytdlp_items during streaming are processed by the running master_queue."""
+    handler = build_data_handler(lidatube_module)
+    handler.streaming_mode = True
+    handler.lidarr_status = "busy"
+    handler.ytdlp_in_progress_flag = True
+    handler.index = 0
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+    monkeypatch.setattr(handler.config, "library_scan_on_completion", False)
+
+    processed = []
+
+    def fake_find_link_and_download(req_album):
+        processed.append(req_album["album_name"])
+        handler.index += 1
+
+    monkeypatch.setattr(handler, "find_link_and_download", fake_find_link_and_download)
+
+    album = {"album_name": "Late Album", "status": "Queued", "scan_ready": True}
+
+    def add_item_then_finish():
+        time.sleep(0.1)
+        handler.ytdlp_items.append(album)
+        time.sleep(0.2)
+        handler.lidarr_status = "complete"
+
+    t = threading.Thread(target=add_item_then_finish)
+    t.start()
+
+    handler.master_queue()
+    t.join()
+
+    assert "Late Album" in processed
+    assert handler.ytdlp_status == "complete"
 
 
 def test_link_finder_does_not_retry_secondary_after_emfile(lidatube_module, monkeypatch):

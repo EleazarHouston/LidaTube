@@ -28,7 +28,7 @@ def test_defaults_applied(cfg):
     assert cfg.secondary_search == "YTS"
     assert cfg.preferred_codec == "mp3"
     assert cfg.attempt_lidarr_import is False
-    assert cfg.lidarr_scan_thread_limit == 8
+    assert cfg.lidarr_scan_thread_limit == 16
 
 
 # --- File persistence ---

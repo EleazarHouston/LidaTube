@@ -57,6 +57,7 @@ class DataHandler:
         self.index = 0
         self.percent_completion = 0
 
+        self.streaming_mode = False
         self.clients_connected_counter = 0
 
         # Sub-components
@@ -112,10 +113,26 @@ class DataHandler:
 
                 if within_time_window:
                     self.general_logger.warning(f"Time to Start - as in a time window: {self.config.sync_schedule}")
-                    self.get_wanted_albums_from_lidarr()
-                    if self.lidarr_items:
-                        self.add_items_to_download(list(range(len(self.lidarr_items))))
-                    else:
+                    self.streaming_mode = True
+                    self.ytdlp_stop_event.clear()
+
+                    fetch_thread = threading.Thread(target=self.get_wanted_albums_from_lidarr, name="Lidarr_Fetch_Thread")
+                    fetch_thread.daemon = True
+                    fetch_thread.start()
+
+                    if not self.ytdlp_in_progress_flag:
+                        self.ytdlp_items = []
+                        self.percent_completion = 0
+                        self.index = 0
+                        self.ytdlp_in_progress_flag = True
+                        dl_thread = threading.Thread(target=self.master_queue, name="Queue_Thread")
+                        dl_thread.daemon = True
+                        dl_thread.start()
+
+                    fetch_thread.join()
+                    self.streaming_mode = False
+
+                    if not self.lidarr_items:
                         self.general_logger.warning("No Missing Albums")
                     self.general_logger.warning("Big sleep for 1 Hour")
                     time.sleep(3600)
@@ -383,6 +400,10 @@ class DataHandler:
         req_album["scan_in_progress"] = False
         req_album["scan_ready"] = True
 
+        if self.streaming_mode:
+            req_album["status"] = "Queued"
+            self.ytdlp_items.append(req_album)
+
     # --- Lidarr actions ---
 
     def attempt_lidarr_song_import(self, req_album, song, filename):
@@ -451,16 +472,32 @@ class DataHandler:
 
     def master_queue(self):
         try:
-            while not self.ytdlp_stop_event.is_set() and self.index < len(self.ytdlp_items):
-                self.ytdlp_status = "running"
-                with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.thread_limit) as executor:
-                    self.ytdlp_futures = []
-                    start_position = self.index
-                    for req_album in self.ytdlp_items[start_position:]:
-                        if self.ytdlp_stop_event.is_set():
-                            break
-                        self.ytdlp_futures.append(executor.submit(self.find_link_and_download, req_album))
-                    concurrent.futures.wait(self.ytdlp_futures)
+            self.ytdlp_status = "running"
+            self.ytdlp_futures = []
+            submitted_up_to = 0
+            active_futures = set()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.thread_limit) as executor:
+                while not self.ytdlp_stop_event.is_set():
+                    # Submit new items up to thread_limit
+                    while submitted_up_to < len(self.ytdlp_items) and len(active_futures) < self.config.thread_limit:
+                        req_album = self.ytdlp_items[submitted_up_to]
+                        f = executor.submit(self.find_link_and_download, req_album)
+                        active_futures.add(f)
+                        self.ytdlp_futures.append(f)
+                        submitted_up_to += 1
+
+                    if not active_futures:
+                        if self.streaming_mode and self.lidarr_status == "busy":
+                            self.ytdlp_stop_event.wait(0.5)
+                            continue
+                        break
+
+                    done, active_futures = concurrent.futures.wait(
+                        active_futures,
+                        timeout=1.0,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
 
             if self.ytdlp_stop_event.is_set():
                 self.ytdlp_status = "stopped"
