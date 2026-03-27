@@ -186,8 +186,6 @@ reset_ytdlp.addEventListener('click', function () {
 });
 
 socket.on("lidarr_update", (response) => {
-    lidarr_table.innerHTML = '';
-    var all_checked = true;
     update_lidarr_progress_bar(response.status, response.scan_progress || {});
     if (response.status == "busy") {
         get_wanted_lidarr.disabled = true;
@@ -198,6 +196,10 @@ socket.on("lidarr_update", (response) => {
         lidarr_spinner.classList.add('d-none');
     }
 
+    if (!response.data) return;
+
+    lidarr_table.innerHTML = '';
+    var all_checked = true;
     select_all_checkbox.style.display = "block";
     select_all_checkbox.checked = false;
 

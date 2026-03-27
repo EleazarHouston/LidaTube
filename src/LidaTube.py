@@ -150,7 +150,11 @@ class DataHandler:
         self.lidarr_scan_progress.update(kwargs)
 
     def _emit_lidarr_update(self):
-        socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": self.lidarr_items, "scan_progress": self.lidarr_scan_progress})
+        slim_items = [
+            {k: v for k, v in item.items() if k != "missing_tracks"}
+            for item in self.lidarr_items
+        ]
+        socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": slim_items, "scan_progress": self.lidarr_scan_progress})
 
     def _emit_ytdlp_update(self):
         socketio.emit("ytdlp_update", {"status": self.ytdlp_status, "data": self.ytdlp_items, "percent_completion": self.percent_completion})
@@ -161,8 +165,10 @@ class DataHandler:
         try:
             import json
             cache_path = os.path.join(self.config.CONFIG_FOLDER, "lidarr_cache.json")
-            with open(cache_path, "w") as f:
+            tmp_path = cache_path + ".tmp"
+            with open(tmp_path, "w") as f:
                 json.dump({"lidarr_items": self.lidarr_items, "lidarr_scan_progress": self.lidarr_scan_progress}, f)
+            os.replace(tmp_path, cache_path)
             self.general_logger.warning(f"Saved {len(self.lidarr_items)} albums to Lidarr cache")
         except Exception as e:
             self.general_logger.error(f"Error saving Lidarr cache: {e}")
@@ -283,6 +289,7 @@ class DataHandler:
                             percent=int(albums_processed / discovered * 100) if discovered else 0,
                         )
                         self._emit_lidarr_update()
+                        self._save_lidarr_cache()
                         page += 1
                     else:
                         self.general_logger.error(f"Lidarr Wanted API Error Code: {response.status_code}")
@@ -613,6 +620,7 @@ class DataHandler:
             req_album["status"] = "Download Error"
 
         finally:
+            req_album["missing_tracks"] = []
             self.index += 1
             self.percent_completion = 100 * (self.index / len(self.ytdlp_items)) if self.ytdlp_items else 0
             self._emit_ytdlp_update()

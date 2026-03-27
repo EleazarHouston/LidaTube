@@ -427,6 +427,117 @@ def test_master_queue_processes_item_added_during_streaming(lidatube_module, mon
     assert handler.ytdlp_status == "complete"
 
 
+def test_emit_lidarr_update_strips_missing_tracks(lidatube_module, monkeypatch):
+    """lidarr_update socket event must not include missing_tracks (large, not needed by UI)."""
+    handler = build_data_handler(lidatube_module)
+    emitted = {}
+    monkeypatch.setattr(lidatube_module.socketio, "emit", lambda event, data: emitted.update({event: data}))
+
+    handler.lidarr_items = [
+        {
+            "artist": "A",
+            "album_name": "B",
+            "checked": True,
+            "scan_ready": True,
+            "track_count": 2,
+            "missing_count": 1,
+            "missing_tracks": [{"track_title": "secret", "link": ""}],
+        }
+    ]
+    handler._emit_lidarr_update()
+
+    assert "lidarr_update" in emitted
+    item = emitted["lidarr_update"]["data"][0]
+    assert "missing_tracks" not in item
+
+
+def test_save_lidarr_cache_is_atomic(lidatube_module, monkeypatch, tmp_path):
+    """Cache write uses a .tmp file then renames to prevent corruption on kill."""
+    handler = build_data_handler(lidatube_module)
+    handler.config.CONFIG_FOLDER = str(tmp_path)
+    handler.lidarr_items = [{"artist": "X", "album_name": "Y", "missing_tracks": []}]
+
+    rename_calls = []
+    real_replace = lidatube_module.os.replace
+    monkeypatch.setattr(lidatube_module.os, "replace", lambda src, dst: rename_calls.append((src, dst)) or real_replace(src, dst))
+
+    handler._save_lidarr_cache()
+
+    assert len(rename_calls) == 1
+    src, dst = rename_calls[0]
+    assert src.endswith(".tmp")
+    assert not src.endswith(".tmp") or dst == src[: -len(".tmp")]
+
+
+def test_cache_saved_after_each_page(lidatube_module, monkeypatch):
+    """Cache is saved after each page so partial scans survive a restart."""
+    handler = build_data_handler(lidatube_module)
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+
+    save_calls = []
+    monkeypatch.setattr(handler, "_save_lidarr_cache", lambda: save_calls.append(1))
+
+    page_one_records = [
+        {
+            "id": 1,
+            "title": "Album A",
+            "releaseDate": "2024-01-01T00:00:00Z",
+            "genres": [],
+            "artistId": 1,
+            "artist": {"path": "/music/A", "artistName": "Artist A"},
+            "releases": [{"id": 10}],
+        }
+    ]
+
+    def fake_get_wanted(page, page_size=2000):
+        return FakeResponse(200, {"records": page_one_records if page == 1 else []})
+
+    handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
+    handler.lidarr_client.get_tracks_for_album.return_value = FakeResponse(200, [])
+
+    handler.get_wanted_albums_from_lidarr()
+
+    # At least one save during scan (per page) plus the final save on completion
+    assert len(save_calls) >= 2
+
+
+def test_missing_tracks_cleared_after_download(lidatube_module, monkeypatch):
+    """missing_tracks is cleared after download completes to free memory."""
+    handler = build_data_handler(lidatube_module)
+    handler.ytdlp_in_progress_flag = False
+    handler.index = 0
+    handler.streaming_mode = False
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+    monkeypatch.setattr(handler.config, "library_scan_on_completion", False)
+
+    req_album = {
+        "artist": "A",
+        "album_name": "B",
+        "album_id": 1,
+        "artist_path": "/music/A",
+        "album_folder": "B (2024)",
+        "track_count": 1,
+        "missing_count": 1,
+        "missing_tracks": [
+            {"artist": "A", "track_title": "T1", "track_number": 1, "absolute_track_number": 1,
+             "track_id": 1, "link": "", "title_of_link": ""},
+        ],
+        "scan_ready": True,
+        "status": "",
+        "checked": True,
+    }
+    handler.lidarr_items = [req_album]
+    handler.ytdlp_items = [req_album]
+
+    monkeypatch.setattr(handler, "_link_finder", lambda album: None)
+
+    handler.find_link_and_download(req_album)
+
+    assert req_album["missing_tracks"] == []
+
+
 def test_link_finder_does_not_retry_secondary_after_emfile(lidatube_module, monkeypatch):
     handler = build_data_handler(lidatube_module)
     emit_mock = Mock()
