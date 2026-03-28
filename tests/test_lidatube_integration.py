@@ -158,7 +158,6 @@ def test_get_song_links_secondary_uses_yt_search_fallback(lidatube_module, monke
         def search(self, query, filter, limit):
             return []
 
-    monkeypatch.setattr(lidatube_module, "YTMusic", FakeYTMusic)
     monkeypatch.setattr(
         handler,
         "_yt_search",
@@ -173,7 +172,7 @@ def test_get_song_links_secondary_uses_yt_search_fallback(lidatube_module, monke
         ],
     }
 
-    handler._get_song_links_secondary(req_album, artist="Artist", cleaned_artist="artist")
+    handler._get_song_links_secondary(req_album, artist="Artist", cleaned_artist="artist", ytmusic=FakeYTMusic())
 
     assert req_album["missing_tracks"][0]["link"] == "https://example.com/v"
     assert req_album["missing_tracks"][0]["title_of_link"] == "Artist - Track One"
@@ -187,10 +186,10 @@ def test_home_route_returns_html(lidatube_module):
     assert b"LidaTube" in response.data
 
 
-def test_get_song_links_closes_ytmusic_client(lidatube_module, monkeypatch):
+def test_link_finder_closes_ytmusic_client(lidatube_module, monkeypatch):
+    """_link_finder must close the single shared YTMusic session it creates."""
     handler = build_data_handler(lidatube_module)
-    emit_mock = Mock()
-    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
 
     close_called = []
 
@@ -205,98 +204,22 @@ def test_get_song_links_closes_ytmusic_client(lidatube_module, monkeypatch):
             return []
 
     monkeypatch.setattr(lidatube_module, "YTMusic", FakeYTMusic)
-
-    req_album = {
-        "artist": "Artist",
-        "album_name": "Album",
-        "missing_tracks": [
-            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
-        ],
-    }
-
-    handler._get_song_links(req_album, artist="Artist", cleaned_artist="artist")
-
-    assert len(close_called) == 1
-
-
-def test_get_song_links_secondary_closes_ytmusic_client(lidatube_module, monkeypatch):
-    handler = build_data_handler(lidatube_module)
-    emit_mock = Mock()
-    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
     monkeypatch.setattr(handler, "_yt_search", lambda query_text: [])
 
-    close_called = []
-
-    class FakeSession:
-        def close(self):
-            close_called.append(1)
-
-    class FakeYTMusic:
-        _session = FakeSession()
-
-        def search(self, query, filter, limit):
-            return []
-
-    monkeypatch.setattr(lidatube_module, "YTMusic", FakeYTMusic)
-
     req_album = {
         "artist": "Artist",
         "album_name": "Album",
-        "missing_tracks": [
-            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
-        ],
-    }
-
-    handler._get_song_links_secondary(req_album, artist="Artist", cleaned_artist="artist")
-
-    assert len(close_called) == 1
-
-
-def test_get_album_links_closes_ytmusic_client(lidatube_module, monkeypatch):
-    handler = build_data_handler(lidatube_module)
-    emit_mock = Mock()
-    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
-    monkeypatch.setattr(lidatube_module.fuzz, "ratio", lambda _left, _right: 100)
-
-    close_called = []
-
-    class FakeSession:
-        def close(self):
-            close_called.append(1)
-
-    class FakeYTMusic:
-        _session = FakeSession()
-
-        def search(self, query, filter, limit):
-            return [{"browseId": "album-1"}]
-
-        def get_album(self, browse_id):
-            assert browse_id == "album-1"
-            return {"tracks": [{"title": "Track One", "videoId": "vid-1"}]}
-
-    monkeypatch.setattr(lidatube_module, "YTMusic", FakeYTMusic)
-    monkeypatch.setattr(lidatube_module._matcher, "album_matcher", lambda *_args, **_kwargs: {"browseId": "album-1"})
-
-    req_album = {
-        "artist": "Artist",
-        "album_name": "Album",
+        "track_count": 1,
+        "missing_count": 1,
         "missing_tracks": [
             {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
         ],
         "status": "",
     }
 
-    handler._get_album_links(
-        req_album,
-        artist="Artist",
-        album_name="Album",
-        cleaned_artist="artist",
-        cleaned_album="album",
-        query_text="Artist - Album",
-    )
+    handler._link_finder(req_album)
 
     assert len(close_called) == 1
-    assert req_album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
 
 
 def test_streaming_mode_adds_scan_ready_album_to_ytdlp_items(lidatube_module, monkeypatch):
@@ -616,7 +539,7 @@ def test_close_ytmusic_client_handles_none(lidatube_module):
 
 
 def test_ytmusic_session_closed_after_album_search(lidatube_module, monkeypatch):
-    """The YTMusic session must be closed after _get_album_links even on success."""
+    """The YTMusic session must be closed by _link_finder after album search."""
     handler = build_data_handler(lidatube_module)
     monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
 
@@ -638,6 +561,6 @@ def test_ytmusic_session_closed_after_album_search(lidatube_module, monkeypatch)
         "missing_tracks": [{"link": "", "track_title": "T", "artist": "X", "title_of_link": ""}],
         "status": "",
     }
-    handler._get_album_links(req_album, "X", "Y", "x", "y", "X - Y")
+    handler._link_finder(req_album)
 
     assert len(closed) == 1

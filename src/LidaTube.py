@@ -704,6 +704,7 @@ class DataHandler:
             self.general_logger.warning(f"Error closing YTMusic client: {e}")
 
     def _link_finder(self, req_album):
+        ytmusic = None
         try:
             self.general_logger.warning(f'Searching for: {req_album["artist"]} - {req_album["album_name"]}')
             artist = req_album["artist"]
@@ -714,8 +715,11 @@ class DataHandler:
             cleaned_artist = _general.string_cleaner(artist).lower()
             cleaned_album = _general.string_cleaner(album_name).lower()
 
+            self._wait_if_fd_pressure()
+            ytmusic = YTMusic()
+
             if number_tracks_in_album == number_of_missing_tracks:
-                self._get_album_links(req_album, artist, album_name, cleaned_artist, cleaned_album, query_text)
+                self._get_album_links(req_album, artist, album_name, cleaned_artist, cleaned_album, query_text, ytmusic)
 
             number_of_links = self._count_found_links(req_album)
             if number_of_links == len(req_album["missing_tracks"]):
@@ -725,7 +729,7 @@ class DataHandler:
             else:
                 req_album["status"] = "Searching"
                 self._emit_ytdlp_update()
-                continue_with_secondary_search = self._get_song_links(req_album, artist, cleaned_artist)
+                continue_with_secondary_search = self._get_song_links(req_album, artist, cleaned_artist, ytmusic)
 
                 number_of_links = self._count_found_links(req_album)
                 if number_of_links == len(req_album["missing_tracks"]):
@@ -736,16 +740,17 @@ class DataHandler:
                     self.general_logger.warning(f'Skipping secondary search due to resource exhaustion: {req_album["artist"]} - {req_album["album_name"]}')
                 else:
                     self.general_logger.warning(f'Not all tracks found, searching again: {req_album["artist"]} - {req_album["album_name"]}')
-                    self._get_song_links_secondary(req_album, artist, cleaned_artist)
+                    self._get_song_links_secondary(req_album, artist, cleaned_artist, ytmusic)
 
         except Exception as e:
             self.general_logger.error(f"Error in Link Finder: {e}")
+            if _general.is_resource_exhaustion_error(e):
+                threading.Thread(target=self._signal_fd_exhaustion, daemon=True).start()
+        finally:
+            self._close_ytmusic_client(ytmusic)
 
-    def _get_album_links(self, req_album, artist, album_name, cleaned_artist, cleaned_album, query_text):
-        ytmusic = None
+    def _get_album_links(self, req_album, artist, album_name, cleaned_artist, cleaned_album, query_text, ytmusic):
         try:
-            self._wait_if_fd_pressure()
-            ytmusic = YTMusic()
             search_results = ytmusic.search(query=query_text, filter="albums", limit=10)
             self.general_logger.warning(f'Searching for Whole Album: {req_album["artist"]} - {req_album["album_name"]}')
             album_match = _matcher.album_matcher(self.config.minimum_match_ratio, artist, album_name, cleaned_artist, cleaned_album, search_results)
@@ -768,17 +773,11 @@ class DataHandler:
 
         except Exception as e:
             self.general_logger.error(f"Error in Album Search: {e}")
-            if _general.is_resource_exhaustion_error(e):
-                threading.Thread(target=self._signal_fd_exhaustion, daemon=True).start()
-        finally:
-            self._close_ytmusic_client(ytmusic)
+            raise
 
-    def _get_song_links(self, req_album, artist, cleaned_artist):
+    def _get_song_links(self, req_album, artist, cleaned_artist, ytmusic):
         """Primary song-by-song search. Returns True unless FD exhaustion occurred."""
-        ytmusic = None
         try:
-            self._wait_if_fd_pressure()
-            ytmusic = YTMusic()
             self.general_logger.warning(f'Searching for individual Tracks: {req_album["artist"]} - {req_album["album_name"]}')
             for missing_track in req_album["missing_tracks"]:
                 if self.ytdlp_stop_event.is_set():
@@ -796,18 +795,11 @@ class DataHandler:
 
         except Exception as e:
             self.general_logger.error(f"Error in Song Search: {e}")
-            if _general.is_resource_exhaustion_error(e):
-                threading.Thread(target=self._signal_fd_exhaustion, daemon=True).start()
-                return False
-        finally:
-            self._close_ytmusic_client(ytmusic)
+            raise
         return True
 
-    def _get_song_links_secondary(self, req_album, artist, cleaned_artist):
-        ytmusic = None
+    def _get_song_links_secondary(self, req_album, artist, cleaned_artist, ytmusic):
         try:
-            self._wait_if_fd_pressure()
-            ytmusic = YTMusic()
             for missing_track in req_album["missing_tracks"]:
                 if self.ytdlp_stop_event.is_set():
                     return
@@ -835,10 +827,7 @@ class DataHandler:
 
         except Exception as e:
             self.general_logger.error(f"Error in Secondary Search: {e}")
-            if _general.is_resource_exhaustion_error(e):
-                threading.Thread(target=self._signal_fd_exhaustion, daemon=True).start()
-        finally:
-            self._close_ytmusic_client(ytmusic)
+            raise
 
     def _yt_search(self, query_text):
         try:
