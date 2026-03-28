@@ -43,7 +43,7 @@ Certain values can be set via environment variables:
 * __lidarr_api_key__: The API key for Lidarr. Defaults to ``.
 * __lidarr_api_timeout__: Timeout duration for Lidarr API calls. Defaults to `120`.
 * __thread_limit__: Max number of threads to use. Defaults to `1`.
-* __lidarr_scan_thread_limit__: Max worker threads used during the initial Lidarr refresh (fetching missing tracks per album). Defaults to `8`.
+* __lidarr_scan_thread_limit__: Max worker threads used during the initial Lidarr refresh (fetching missing tracks per album). Defaults to `16`.
 * __sleep_interval__: Interval to sleep. Defaults to `0`.
 * __fallback_to_top_result__: Whether to use the top result if no match is found. Defaults to `False`.
 * __library_scan_on_completion__: Whether to scan Lidarr Library on completion. Defaults to `True`.
@@ -52,6 +52,7 @@ Certain values can be set via environment variables:
 * __secondary_search__: Method for secondary search (YTS or YTDLP). Defaults to `YTS`.
 * __preferred_codec__: Preferred codec (mp3). Defaults to `mp3`.
 * __attempt_lidarr_import__: Attempt to import each song directly into Lidarr. Defaults to `False`.
+* __ULIMIT_NOFILE__: Startup target for open file descriptors (set in `init.sh` via `ulimit -n`). Defaults to `8192`.
 
 
 ## Sync Schedule

@@ -60,6 +60,14 @@ chown -R ${PUID}:${PGID} /lidatube/config /lidatube/cache 2>/dev/null || true
 # Set XDG_CACHE_HOME to use the cache directory
 export XDG_CACHE_HOME=/lidatube/cache
 
+# Raise the open-file limit when possible to avoid FD starvation under load.
+NOFILE_TARGET=${ULIMIT_NOFILE:-8192}
+if ulimit -n "${NOFILE_TARGET}" 2>/dev/null; then
+    echo "Open file descriptor limit set to $(ulimit -n)"
+else
+    echo "Unable to set open file descriptor limit to ${NOFILE_TARGET}; current limit is $(ulimit -n)"
+fi
+
 # Start the application with the specified user permissions
 echo "Running LidaTube..."
 exec su-exec ${PUID}:${PGID} gunicorn src.LidaTube:app -c gunicorn_config.py

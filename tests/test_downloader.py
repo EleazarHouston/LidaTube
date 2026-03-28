@@ -96,6 +96,7 @@ def test_download_returns_true_on_success(dl):
     with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
         mock_instance = MagicMock()
         mock_ydl_class.return_value = mock_instance
+        mock_instance.__enter__.return_value = mock_instance
         result = dl.download("https://example.com/vid", "test_file")
     assert result is True
     mock_instance.download.assert_called_once_with(["https://example.com/vid"])
@@ -105,6 +106,7 @@ def test_download_returns_false_on_exception(dl):
     with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
         mock_instance = MagicMock()
         mock_ydl_class.return_value = mock_instance
+        mock_instance.__enter__.return_value = mock_instance
         mock_instance.download.side_effect = Exception("network error")
         result = dl.download("https://example.com/vid", "test_file")
     assert result is False
@@ -114,6 +116,7 @@ def test_download_logs_error_on_failure(dl):
     with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
         mock_instance = MagicMock()
         mock_ydl_class.return_value = mock_instance
+        mock_instance.__enter__.return_value = mock_instance
         mock_instance.download.side_effect = Exception("oops")
         dl.download("https://example.com/vid", "test_file")
     dl.logger.error.assert_called_once()
@@ -123,6 +126,7 @@ def test_download_logs_completion_on_success(dl):
     with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
         mock_instance = MagicMock()
         mock_ydl_class.return_value = mock_instance
+        mock_instance.__enter__.return_value = mock_instance
         dl.download("https://example.com/vid", "test_file")
 
     dl.logger.warning.assert_any_call("DL Complete: https://example.com/vid")

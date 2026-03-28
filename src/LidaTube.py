@@ -1,5 +1,6 @@
 import logging
 import os
+import resource
 import threading
 import time
 from datetime import datetime
@@ -31,6 +32,11 @@ class DataHandler:
         # Configuration
         self.config = AppConfig(self.general_logger)
         self.config.save()
+        self._fd_limit = self._get_fd_limit()
+        self._fd_pressure_ratio = 0.85
+        self._fd_backoff_lock = threading.Lock()
+        self._last_fd_pressure_log = 0.0
+        self._apply_fd_safety_limits()
 
         # Lidarr state
         self.lidarr_items = []
@@ -53,7 +59,8 @@ class DataHandler:
         self.ytdlp_status = "idle"
         self.ytdlp_stop_event = threading.Event()
         self.fd_exhaustion_event = threading.Event()
-        self._ytmusic_semaphore = threading.Semaphore(2)
+        ytmusic_parallel = max(1, min(2, int(self.config.thread_limit)))
+        self._ytmusic_semaphore = threading.Semaphore(ytmusic_parallel)
         self.ytdlp_in_progress_flag = False
         self.index = 0
         self.percent_completion = 0
@@ -66,6 +73,12 @@ class DataHandler:
         self.downloader = Downloader(self.config, self.ytdlp_stop_event, self.general_logger)
 
         self._load_lidarr_cache()
+        self.general_logger.warning(
+            "Thread limits in use: downloads=%s, lidarr_scan=%s, ytmusic_parallel=%s",
+            self.config.thread_limit,
+            self.config.lidarr_scan_thread_limit,
+            ytmusic_parallel,
+        )
 
         thread = threading.Thread(target=self.schedule_checker, name="Schedule_Thread")
         thread.daemon = True
@@ -420,6 +433,7 @@ class DataHandler:
     # --- Lidarr actions ---
 
     def attempt_lidarr_song_import(self, req_album, song, filename):
+        response = None
         try:
             self.general_logger.warning("Attempting import of song via Lidarr API")
             response = self.lidarr_client.import_song(req_album, song, filename)
@@ -430,8 +444,12 @@ class DataHandler:
                 self.general_logger.error(f"Import Attempt - Error message: {response.text}")
         except Exception as e:
             self.general_logger.error(f"Error occurred while attempting import of song: {e}")
+        finally:
+            if response is not None:
+                response.close()
 
     def trigger_lidarr_scan(self):
+        response = None
         try:
             root_folders = self.lidarr_client.get_root_folders()
             if not root_folders:
@@ -444,6 +462,9 @@ class DataHandler:
                 self.general_logger.warning("Lidarr library scan started")
         except Exception as e:
             self.general_logger.error(f"Lidarr library scan failed: {e}")
+        finally:
+            if response is not None:
+                response.close()
 
     def reset_lidarr(self):
         self.lidarr_stop_event.set()
@@ -670,16 +691,105 @@ class DataHandler:
 
     # --- FD management ---
 
+    def _get_fd_limit(self):
+        try:
+            soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if soft_limit and soft_limit != resource.RLIM_INFINITY:
+                return int(soft_limit)
+        except Exception:
+            pass
+        return None
+
+    def _recommended_workers_from_fd_limit(self, configured_workers, estimated_fd_per_worker):
+        try:
+            configured = max(1, int(configured_workers))
+        except (TypeError, ValueError):
+            configured = 1
+
+        if self._fd_limit is None:
+            return configured
+
+        reserved_fds = max(128, int(self._fd_limit * 0.35))
+        available_budget = max(64, self._fd_limit - reserved_fds)
+        recommended = max(1, available_budget // estimated_fd_per_worker)
+        return min(configured, recommended)
+
+    def _apply_fd_safety_limits(self):
+        original_download_workers = self.config.thread_limit
+        original_scan_workers = self.config.lidarr_scan_thread_limit
+
+        self.config.thread_limit = self._recommended_workers_from_fd_limit(
+            original_download_workers, estimated_fd_per_worker=160
+        )
+        self.config.lidarr_scan_thread_limit = self._recommended_workers_from_fd_limit(
+            original_scan_workers, estimated_fd_per_worker=24
+        )
+
+        if self.config.thread_limit < max(1, int(original_download_workers)):
+            self.general_logger.warning(
+                "Clamped thread_limit from %s to %s based on open-file limit %s",
+                original_download_workers,
+                self.config.thread_limit,
+                self._fd_limit,
+            )
+        if self.config.lidarr_scan_thread_limit < max(1, int(original_scan_workers)):
+            self.general_logger.warning(
+                "Clamped lidarr_scan_thread_limit from %s to %s based on open-file limit %s",
+                original_scan_workers,
+                self.config.lidarr_scan_thread_limit,
+                self._fd_limit,
+            )
+
+    def _open_fd_count(self):
+        try:
+            return len(os.listdir("/proc/self/fd"))
+        except Exception:
+            return None
+
+    def _is_fd_pressure_high(self):
+        fd_limit = getattr(self, "_fd_limit", None)
+        if not fd_limit:
+            return False
+        open_count = self._open_fd_count()
+        if open_count is None:
+            return False
+        ratio = open_count / fd_limit
+        if ratio >= getattr(self, "_fd_pressure_ratio", 0.85):
+            now = time.monotonic()
+            last_log = getattr(self, "_last_fd_pressure_log", 0.0)
+            if now - last_log >= 5:
+                self._last_fd_pressure_log = now
+                self.general_logger.warning(
+                    "FD usage high (%s/%s, %.0f%%)",
+                    open_count,
+                    fd_limit,
+                    ratio * 100,
+                )
+            return True
+        return False
+
     def _signal_fd_exhaustion(self):
-        if not self.fd_exhaustion_event.is_set():
+        lock = getattr(self, "_fd_backoff_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._fd_backoff_lock = lock
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            if self.fd_exhaustion_event.is_set():
+                return
             self.general_logger.warning("FD exhaustion detected — backing off for 10 seconds")
             self.fd_exhaustion_event.set()
             time.sleep(10)
             self.fd_exhaustion_event.clear()
             self.general_logger.warning("FD back-off cleared — resuming")
+        finally:
+            lock.release()
 
     def _wait_if_fd_pressure(self):
         """Block while FD back-off is active, then proceed."""
+        if self._is_fd_pressure_high():
+            threading.Thread(target=self._signal_fd_exhaustion, daemon=True).start()
         if self.fd_exhaustion_event.is_set():
             self.general_logger.warning("Waiting for FD pressure to clear (up to 30s)")
             deadline = time.monotonic() + 30

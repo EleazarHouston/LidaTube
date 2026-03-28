@@ -14,8 +14,8 @@ class Downloader:
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
                 ydl_opts = self._get_ydl_opts(file_name, temp_dir)
-                downloader = yt_dlp.YoutubeDL(ydl_opts)
-                downloader.download([link])
+                with yt_dlp.YoutubeDL(ydl_opts) as downloader:
+                    downloader.download([link])
                 self.logger.warning(f"DL Complete: {link}")
                 return True
         except Exception as e:
