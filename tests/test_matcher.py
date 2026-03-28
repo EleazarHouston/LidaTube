@@ -173,3 +173,69 @@ def test_song_matcher_yt_regression_uses_combined_rating_not_raw_title(monkeypat
 
     assert match is not None
     assert match["link"] == "https://second"
+
+
+def test_album_matcher_skips_non_album_result_types():
+    search_results = [
+        {
+            "type": "song",
+            "title": "Exact Match Album",
+            "artists": [{"name": "Various"}, {"name": "Target Artist"}],
+            "browseId": "ignored",
+        },
+        {
+            "type": "Album",
+            "title": "Exact Match Album",
+            "artists": [{"name": "Various"}, {"name": "Target Artist"}],
+            "browseId": "expected",
+        },
+    ]
+
+    match = _matcher.album_matcher(
+        minimum_match_ratio=70,
+        artist="Target Artist",
+        album_name="Exact Match Album",
+        cleaned_artist="target artist",
+        cleaned_album="exact match album",
+        search_results=search_results,
+    )
+
+    assert match is not None
+    assert match["browseId"] == "expected"
+
+
+def test_song_matcher_breaks_early_on_perfect_score(monkeypatch):
+    calls = []
+
+    def fake_ratio(left, right):
+        calls.append((left, right))
+        return 100
+
+    monkeypatch.setattr(_matcher.fuzz, "ratio", fake_ratio)
+    search_results = [
+        {
+            "resultType": "song",
+            "title": "Track One",
+            "videoId": "first",
+            "artists": [{"name": "Target Artist"}],
+        },
+        {
+            "resultType": "song",
+            "title": "Track Two",
+            "videoId": "second",
+            "artists": [{"name": "Target Artist"}],
+        },
+    ]
+
+    match = _matcher.song_matcher(
+        minimum_match_ratio=50,
+        artist="Target Artist",
+        cleaned_artist="target artist",
+        song_title="Track One",
+        cleaned_song_title="track one",
+        search_results=search_results,
+    )
+
+    assert match is not None
+    assert match["videoId"] == "first"
+    assert len(calls) == 4

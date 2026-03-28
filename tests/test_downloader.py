@@ -79,6 +79,16 @@ def test_progress_hook_does_not_raise_when_not_stopped(dl):
     dl._progress_hook({"status": "finished"})  # should not raise
 
 
+def test_progress_hook_logs_download_progress(dl):
+    dl._progress_hook({"status": "downloading", "_percent_str": "25%", "_total_bytes_str": "4.0MiB", "_speed_str": "1.0MiB/s"})
+    dl.logger.warning.assert_called_once_with("Downloaded 25% of 4.0MiB at 1.0MiB/s")
+
+
+def test_progress_hook_logs_finished_status(dl):
+    dl._progress_hook({"status": "finished"})
+    dl.logger.warning.assert_called_once_with("Download complete")
+
+
 # --- download ---
 
 
@@ -107,3 +117,12 @@ def test_download_logs_error_on_failure(dl):
         mock_instance.download.side_effect = Exception("oops")
         dl.download("https://example.com/vid", "test_file")
     dl.logger.error.assert_called_once()
+
+
+def test_download_logs_completion_on_success(dl):
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value = mock_instance
+        dl.download("https://example.com/vid", "test_file")
+
+    dl.logger.warning.assert_any_call("DL Complete: https://example.com/vid")

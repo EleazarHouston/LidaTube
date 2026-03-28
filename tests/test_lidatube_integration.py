@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sys
 import threading
@@ -6,6 +7,7 @@ import time
 from unittest.mock import Mock, patch
 
 import pytest
+import _matcher
 
 
 @pytest.fixture
@@ -49,6 +51,10 @@ def build_data_handler(module):
     handler.ytdlp_status = "idle"
     handler.ytdlp_stop_event = threading.Event()
     handler.fd_exhaustion_event = threading.Event()
+    handler.ytdlp_in_progress_flag = False
+    handler.streaming_mode = False
+    handler.clients_connected_counter = 0
+    handler.index = 0
     handler.percent_completion = 0
 
     # Config mock
@@ -61,11 +67,19 @@ def build_data_handler(module):
     cfg.secondary_search = "YTS"
     cfg.thread_limit = 1
     cfg.lidarr_scan_thread_limit = 8
+    cfg.download_folder = "/downloads"
+    cfg.preferred_codec = "mp3"
+    cfg.sleep_interval = 0
+    cfg.attempt_lidarr_import = False
+    cfg.library_scan_on_completion = False
+    cfg.sync_schedule = []
     cfg.CONFIG_FOLDER = "config"
+    cfg.save = Mock()
     handler.config = cfg
 
     # LidarrClient mock
     handler.lidarr_client = Mock()
+    handler.downloader = Mock()
 
     return handler
 
@@ -564,3 +578,474 @@ def test_ytmusic_session_closed_after_album_search(lidatube_module, monkeypatch)
     handler._link_finder(req_album)
 
     assert len(closed) == 1
+
+
+def test_connect_emits_updates_and_increments_client_counter(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+    monkeypatch.setattr(handler, "_emit_lidarr_update", Mock())
+
+    handler.ytdlp_status = "running"
+    handler.ytdlp_items = [{"album_name": "A"}]
+    handler.percent_completion = 25
+
+    handler.connect()
+
+    handler._emit_lidarr_update.assert_called_once()
+    emit_mock.assert_any_call(
+        "ytdlp_update",
+        {"status": "running", "data": [{"album_name": "A"}], "percent_completion": 25},
+    )
+    assert handler.clients_connected_counter == 1
+
+
+def test_disconnect_clamps_counter_to_zero(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    handler.clients_connected_counter = 0
+
+    handler.disconnect()
+    assert handler.clients_connected_counter == 0
+
+    handler.clients_connected_counter = 1
+    handler.disconnect()
+    assert handler.clients_connected_counter == 0
+
+
+def test_load_settings_emits_current_config(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+
+    handler.config.lidarr_address = "http://lidarr.local"
+    handler.config.lidarr_api_key = "abc123"
+    handler.config.sleep_interval = 1.5
+    handler.config.sync_schedule = [1, 14]
+    handler.config.minimum_match_ratio = 92
+
+    handler.load_settings()
+
+    emit_mock.assert_called_once_with(
+        "settings_loaded",
+        {
+            "lidarr_address": "http://lidarr.local",
+            "lidarr_api_key": "abc123",
+            "sleep_interval": 1.5,
+            "sync_schedule": [1, 14],
+            "minimum_match_ratio": 92,
+        },
+    )
+
+
+def test_update_settings_parses_sync_schedule_and_saves(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    parse_mock = Mock(return_value=[3, 9])
+    monkeypatch.setattr(lidatube_module.AppConfig, "parse_sync_schedule", parse_mock)
+
+    handler.update_settings(
+        {
+            "lidarr_address": "http://new-lidarr",
+            "lidarr_api_key": "new-key",
+            "sleep_interval": "0.75",
+            "minimum_match_ratio": "88",
+            "sync_schedule": "3,9",
+        }
+    )
+
+    assert handler.config.lidarr_address == "http://new-lidarr"
+    assert handler.config.lidarr_api_key == "new-key"
+    assert handler.config.sleep_interval == 0.75
+    assert handler.config.minimum_match_ratio == 88.0
+    assert handler.config.sync_schedule == [3, 9]
+    parse_mock.assert_called_once_with("3,9")
+    handler.config.save.assert_called_once()
+
+
+def test_update_settings_logs_error_on_bad_payload(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+
+    handler.update_settings({"lidarr_address": "http://missing-keys"})
+
+    handler.general_logger.error.assert_called_once()
+
+
+def test_load_lidarr_cache_restores_cached_state(lidatube_module, tmp_path):
+    handler = build_data_handler(lidatube_module)
+    handler.config.CONFIG_FOLDER = str(tmp_path)
+
+    cache_payload = {
+        "lidarr_items": [{"artist": "A", "album_name": "B"}],
+        "lidarr_scan_progress": {"phase": "Fetching", "albums_processed": 5, "albums_total": 10, "percent": 50},
+    }
+    (tmp_path / "lidarr_cache.json").write_text(json.dumps(cache_payload))
+
+    handler._load_lidarr_cache()
+
+    assert handler.lidarr_status == "complete"
+    assert handler.lidarr_items == [{"artist": "A", "album_name": "B"}]
+    assert handler.lidarr_scan_progress["phase"] == "Complete (cached)"
+    assert handler.lidarr_scan_progress["albums_processed"] == 5
+
+
+def test_load_lidarr_cache_logs_error_on_invalid_json(lidatube_module, tmp_path):
+    handler = build_data_handler(lidatube_module)
+    handler.config.CONFIG_FOLDER = str(tmp_path)
+    (tmp_path / "lidarr_cache.json").write_text("{not-json")
+
+    handler._load_lidarr_cache()
+
+    handler.general_logger.error.assert_called_once()
+
+
+def test_get_wanted_albums_handles_non_200_and_emits_toast(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+
+    close_called = []
+    response = FakeResponse(503, {"records": []}, "Service unavailable")
+    response.close = lambda: close_called.append(1)
+    handler.lidarr_client.get_wanted_albums.return_value = response
+
+    handler.get_wanted_albums_from_lidarr()
+
+    assert close_called == [1]
+    assert any(call.args[0] == "new_toast_msg" for call in emit_mock.call_args_list)
+    assert handler.lidarr_status == "complete"
+
+
+def test_get_missing_tracks_retries_after_fd_exhaustion(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+
+    started = []
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            started.append(1)
+
+    monkeypatch.setattr(lidatube_module.threading, "Thread", FakeThread)
+
+    call_count = {"count": 0}
+
+    def fake_get_tracks(album_id):
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            raise OSError(24, "Too many open files")
+        return FakeResponse(
+            200,
+            [{"title": "Track 1", "trackNumber": 1, "absoluteTrackNumber": 1, "id": 1, "hasFile": False}],
+        )
+
+    handler.lidarr_client.get_tracks_for_album.side_effect = fake_get_tracks
+
+    album = {
+        "artist": "Retry Artist",
+        "album_name": "Retry Album",
+        "album_id": 10,
+        "missing_tracks": [],
+        "track_count": 0,
+        "missing_count": 0,
+        "scan_ready": False,
+        "scan_in_progress": False,
+        "status": "",
+    }
+
+    handler.get_missing_tracks_for_album(album)
+
+    assert call_count["count"] == 2
+    assert started == [1]
+    assert album["scan_ready"] is True
+    assert album["missing_count"] == 1
+
+
+def test_wait_for_album_scan_data_returns_false_when_not_busy(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(handler, "_emit_ytdlp_update", Mock())
+    handler.lidarr_status = "complete"
+
+    req_album = {"scan_ready": False, "scan_in_progress": True, "status": ""}
+
+    result = handler._wait_for_album_scan_data(req_album)
+
+    assert result is False
+    assert req_album["status"] == "Waiting for refresh data"
+
+
+def test_find_link_and_download_marks_album_incomplete_when_links_missing(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    monkeypatch.setattr(handler, "_wait_for_album_scan_data", lambda _: True)
+    monkeypatch.setattr(handler, "_link_finder", lambda _: None)
+    monkeypatch.setattr(lidatube_module.os.path, "exists", lambda _: True)
+
+    req_album = {
+        "artist": "Artist",
+        "album_name": "Album",
+        "artist_path": "/music/Artist",
+        "album_folder": "Album (2024)",
+        "missing_count": 2,
+        "missing_tracks": [
+            {
+                "artist": "Artist",
+                "track_title": "Track One",
+                "track_number": 1,
+                "absolute_track_number": 1,
+                "track_id": 1,
+                "link": "https://example.com/1",
+                "title_of_link": "Track One",
+            },
+            {
+                "artist": "Artist",
+                "track_title": "Track Two",
+                "track_number": 2,
+                "absolute_track_number": 2,
+                "track_id": 2,
+                "link": "",
+                "title_of_link": "",
+            },
+        ],
+        "status": "",
+    }
+    handler.ytdlp_items = [req_album]
+
+    handler.find_link_and_download(req_album)
+
+    assert req_album["status"] == "Album Incomplete"
+
+
+def test_find_link_and_download_marks_download_failed_when_all_fail(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    monkeypatch.setattr(handler, "_wait_for_album_scan_data", lambda _: True)
+    monkeypatch.setattr(handler, "_link_finder", lambda _: None)
+    monkeypatch.setattr(lidatube_module.os.path, "exists", lambda _: False)
+    handler.downloader.download.return_value = False
+
+    req_album = {
+        "artist": "Artist",
+        "album_name": "Album",
+        "artist_path": "/music/Artist",
+        "album_folder": "Album (2024)",
+        "missing_count": 1,
+        "missing_tracks": [
+            {
+                "artist": "Artist",
+                "track_title": "Track One",
+                "track_number": 1,
+                "absolute_track_number": 1,
+                "track_id": 1,
+                "link": "https://example.com/1",
+                "title_of_link": "Track One",
+            }
+        ],
+        "status": "",
+    }
+    handler.ytdlp_items = [req_album]
+
+    handler.find_link_and_download(req_album)
+
+    assert req_album["status"] == "Download Failed"
+
+
+def test_stop_ytdlp_cancels_pending_futures_and_marks_unprocessed(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(handler, "_emit_ytdlp_update", Mock())
+
+    class FakeFuture:
+        def __init__(self, done_state):
+            self._done_state = done_state
+            self.cancel_called = False
+
+        def done(self):
+            return self._done_state
+
+        def cancel(self):
+            self.cancel_called = True
+
+    pending = FakeFuture(False)
+    finished = FakeFuture(True)
+    handler.ytdlp_futures = [pending, finished]
+    handler.ytdlp_items = [{"status": "Done"}, {"status": "Queued"}]
+    handler.index = 1
+
+    handler.stop_ytdlp()
+
+    assert pending.cancel_called is True
+    assert finished.cancel_called is False
+    assert handler.ytdlp_items[1]["status"] == "Download Stopped"
+    assert handler.ytdlp_status == "stopped"
+
+
+def test_reset_ytdlp_clears_queue_and_completion(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(handler, "_emit_ytdlp_update", Mock())
+
+    class FakeFuture:
+        def __init__(self):
+            self.cancel_called = False
+
+        def done(self):
+            return False
+
+        def cancel(self):
+            self.cancel_called = True
+
+    future = FakeFuture()
+    handler.ytdlp_futures = [future]
+    handler.ytdlp_items = [{"status": "Queued"}]
+    handler.percent_completion = 42
+
+    handler.reset_ytdlp()
+
+    assert future.cancel_called is True
+    assert handler.ytdlp_items == []
+    assert handler.percent_completion == 0
+
+
+def test_apply_album_track_links_returns_true_when_stop_is_set(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    handler.ytdlp_stop_event.set()
+
+    req_album = {
+        "missing_tracks": [
+            {"track_title": "Track A", "link": "", "title_of_link": ""},
+        ]
+    }
+    album_details = {"tracks": [{"title": "Track A", "videoId": "abc"}]}
+
+    should_stop = handler._apply_album_track_links(req_album, album_details)
+
+    assert should_stop is True
+    assert req_album["missing_tracks"][0]["link"] == ""
+
+
+def test_get_album_links_falls_back_to_top_result(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler.config.fallback_to_top_result = True
+    monkeypatch.setattr(_matcher, "album_matcher", lambda *args, **kwargs: None)
+
+    apply_mock = Mock(return_value=False)
+    monkeypatch.setattr(handler, "_apply_album_track_links", apply_mock)
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return [{"title": "Fallback Album", "browseId": "album-1"}]
+
+        def get_album(self, browse_id):
+            assert browse_id == "album-1"
+            return {"tracks": [{"title": "Track A", "videoId": "vid-1"}]}
+
+    req_album = {"artist": "A", "album_name": "B", "status": "", "missing_tracks": []}
+
+    handler._get_album_links(req_album, "A", "B", "a", "b", "A - B", FakeYTMusic())
+
+    assert req_album["status"] == "Album Found"
+    apply_mock.assert_called_once_with(req_album, {"tracks": [{"title": "Track A", "videoId": "vid-1"}]})
+
+
+def test_get_song_links_uses_fallback_to_top_result(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler.config.fallback_to_top_result = True
+    monkeypatch.setattr(_matcher, "song_matcher", lambda *args, **kwargs: None)
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return [{"title": "Fallback Song", "videoId": "vid-123"}]
+
+    req_album = {
+        "artist": "Artist",
+        "album_name": "Album",
+        "missing_tracks": [
+            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
+        ],
+    }
+
+    handler._get_song_links(req_album, "Artist", "artist", FakeYTMusic())
+
+    track = req_album["missing_tracks"][0]
+    assert track["link"] == "https://www.youtube.com/watch?v=vid-123"
+    assert track["title_of_link"] == "Fallback Song"
+
+
+def test_get_song_links_secondary_ytdlp_mode_uses_webpage_url(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler.config.secondary_search = "YTDLP"
+    monkeypatch.setattr(_matcher, "song_matcher", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        _matcher,
+        "song_matcher_yt",
+        lambda *args, **kwargs: {"title": "YT Match", "webpage_url": "https://yt.example/watch?v=1", "link": "unused"},
+    )
+    monkeypatch.setattr(handler, "_yt_search", lambda _: [{"title": "YT Match", "webpage_url": "https://yt.example/watch?v=1"}])
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return []
+
+    req_album = {
+        "artist": "Artist",
+        "album_name": "Album",
+        "missing_tracks": [
+            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
+        ],
+    }
+
+    handler._get_song_links_secondary(req_album, "Artist", "artist", FakeYTMusic())
+
+    track = req_album["missing_tracks"][0]
+    assert track["link"] == "https://yt.example/watch?v=1"
+    assert track["title_of_link"] == "YT Match"
+
+
+def test_yt_search_returns_empty_list_for_unknown_secondary_mode(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    handler.config.secondary_search = "UNKNOWN"
+
+    assert handler._yt_search("artist - song") == []
+
+
+def test_yt_search_ytdlp_returns_empty_when_stop_requested(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler.config.secondary_search = "YTDLP"
+    handler.ytdlp_stop_event.set()
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, query_text, download=False):
+            return {"entries": [{"webpage_url": "https://yt.example/watch?v=1"}]}
+
+    monkeypatch.setattr(lidatube_module.yt_dlp, "YoutubeDL", FakeYDL)
+
+    assert handler._yt_search("artist - song") == []
+
+
+def test_update_settings_socket_route_forwards_payload(lidatube_module, monkeypatch):
+    update_mock = Mock()
+    monkeypatch.setattr(lidatube_module.data_handler, "update_settings", update_mock)
+    payload = {"minimum_match_ratio": "90"}
+
+    lidatube_module.update_settings(payload)
+
+    update_mock.assert_called_once_with(payload)
+
+
+def test_add_to_download_list_socket_route_forwards_payload(lidatube_module, monkeypatch):
+    add_mock = Mock()
+    monkeypatch.setattr(lidatube_module.data_handler, "add_items_to_download", add_mock)
+    payload = [0, 2, 5]
+
+    lidatube_module.add_to_download_list(payload)
+
+    add_mock.assert_called_once_with(payload)

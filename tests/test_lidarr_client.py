@@ -181,3 +181,30 @@ def test_different_threads_get_different_sessions(client):
     t.join()
 
     assert sessions["main"] is not sessions["thread"]
+
+
+def test_same_thread_reuses_session(client):
+    first = client.session
+    second = client.session
+
+    assert first is second
+
+
+def test_get_root_folders_uses_api_key_header(client):
+    with patch.object(client.session, "get", return_value=FakeResponse(200, [])) as mock_get:
+        client.get_root_folders()
+
+    headers = mock_get.call_args[1]["headers"]
+    assert headers["X-Api-Key"] == "test-api-key"
+
+
+def test_import_song_sends_path_and_api_key_header(client):
+    req_album = {"album_full_path": "/music/Album", "artist_id": 1, "album_id": 10, "album_release_id": 100}
+    song = {"track_id": 42, "track_title": "My Song"}
+    with patch.object(client.session, "post", return_value=FakeResponse(202, {})) as mock_post:
+        client.import_song(req_album, song, "My Song.mp3")
+
+    payload = mock_post.call_args[1]["json"][0]
+    headers = mock_post.call_args[1]["headers"]
+    assert payload["path"] == "/music/Album/My Song.mp3"
+    assert headers["X-Api-Key"] == "test-api-key"

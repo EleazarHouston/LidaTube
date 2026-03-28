@@ -142,3 +142,27 @@ def test_add_metadata_writes_flac_tags(monkeypatch):
     assert audio_file["genre"] == "Rock"
     assert audio_file.saved is True
     logger.error.assert_not_called()
+
+
+def test_add_metadata_logs_error_when_file_extension_missing():
+    logger = Mock()
+    song = {"track_title": "Song", "track_number": 1, "artist": "Track Artist"}
+    req_album = {"artist": "Album Artist", "album_name": "Album", "album_year": 2024, "album_genres": "Rock"}
+
+    _general.add_metadata(logger, song, req_album, "/tmp/file_without_extension")
+
+    logger.error.assert_called_once()
+
+
+def test_is_resource_exhaustion_error_detects_exception_in_args():
+    inner = OSError(24, "Too many open files")
+    outer = RuntimeError("wrapped", inner)
+
+    assert is_resource_exhaustion_error(outer) is True
+
+
+def test_is_resource_exhaustion_error_handles_recursive_exception_graph():
+    err = RuntimeError("cycle")
+    err.__cause__ = err
+
+    assert is_resource_exhaustion_error(err) is False
