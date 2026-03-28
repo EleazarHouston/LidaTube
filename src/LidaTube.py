@@ -407,6 +407,10 @@ class DataHandler:
 
         req_album["scan_in_progress"] = False
         req_album["scan_ready"] = True
+        self.general_logger.warning(
+            f'Track scan complete: {req_album["artist"]} - {req_album["album_name"]} '
+            f'({req_album["missing_count"]} missing of {req_album["track_count"]} tracks)'
+        )
 
         if self.streaming_mode:
             req_album["status"] = "Queued"
@@ -455,13 +459,16 @@ class DataHandler:
             if self.ytdlp_status in ("complete", "stopped"):
                 self.ytdlp_items = []
                 self.percent_completion = 0
+            added = 0
             for i in range(len(self.lidarr_items)):
                 if i in data:
                     self.lidarr_items[i]["status"] = "Queued" if self.lidarr_items[i].get("scan_ready", True) else "Waiting for refresh data"
                     self.lidarr_items[i]["checked"] = True
                     self.ytdlp_items.append(self.lidarr_items[i])
+                    added += 1
                 else:
                     self.lidarr_items[i]["checked"] = False
+            self.general_logger.warning(f"Added {added} album(s) to download queue (queue size: {len(self.ytdlp_items)})")
 
             if not self.ytdlp_in_progress_flag:
                 self.index = 0
@@ -484,6 +491,7 @@ class DataHandler:
             self.ytdlp_futures = []
             submitted_up_to = 0
             active_futures = set()
+            self.general_logger.warning(f"Master queue started: {len(self.ytdlp_items)} item(s), thread_limit={self.config.thread_limit}")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.thread_limit) as executor:
                 while not self.ytdlp_stop_event.is_set():
@@ -616,6 +624,11 @@ class DataHandler:
             else:
                 req_album["status"] = "Partially Complete"
 
+            self.general_logger.warning(
+                f'Download summary for {artist_str} - {album_name}: '
+                f'grabbed={grabbed_count}, existing={existing_count}, errors={error_count}, total={total_req} | status: {req_album["status"]}'
+            )
+
         except Exception as e:
             self.general_logger.error(f"Error Downloading: {e}")
             req_album["status"] = "Download Error"
@@ -658,16 +671,20 @@ class DataHandler:
 
     def _signal_fd_exhaustion(self):
         if not self.fd_exhaustion_event.is_set():
+            self.general_logger.warning("FD exhaustion detected — backing off for 10 seconds")
             self.fd_exhaustion_event.set()
             time.sleep(10)
             self.fd_exhaustion_event.clear()
+            self.general_logger.warning("FD back-off cleared — resuming")
 
     def _wait_if_fd_pressure(self):
         """Block while FD back-off is active, then proceed."""
         if self.fd_exhaustion_event.is_set():
+            self.general_logger.warning("Waiting for FD pressure to clear (up to 30s)")
             deadline = time.monotonic() + 30
             while self.fd_exhaustion_event.is_set() and time.monotonic() < deadline:
                 time.sleep(0.5)
+            self.general_logger.warning("Resuming after FD wait")
 
     # --- Link search helpers ---
 
@@ -700,6 +717,8 @@ class DataHandler:
             session = getattr(ytmusic, "_session", None)
             if session is not None:
                 session.close()
+            else:
+                self.general_logger.warning("YTMusic client has no _session attribute — session may not have been closed")
         except Exception as e:
             self.general_logger.warning(f"Error closing YTMusic client: {e}")
 
@@ -751,17 +770,20 @@ class DataHandler:
 
     def _get_album_links(self, req_album, artist, album_name, cleaned_artist, cleaned_album, query_text, ytmusic):
         try:
-            search_results = ytmusic.search(query=query_text, filter="albums", limit=10)
             self.general_logger.warning(f'Searching for Whole Album: {req_album["artist"]} - {req_album["album_name"]}')
+            search_results = ytmusic.search(query=query_text, filter="albums", limit=10)
+            self.general_logger.warning(f'Album search returned {len(search_results)} result(s) for: {query_text}')
             album_match = _matcher.album_matcher(self.config.minimum_match_ratio, artist, album_name, cleaned_artist, cleaned_album, search_results)
 
             if album_match:
+                self.general_logger.warning(f'Album match found: {album_match.get("title", album_match.get("browseId"))}')
                 req_album["status"] = "Album Found"
                 album_details = ytmusic.get_album(album_match["browseId"])
                 if self._apply_album_track_links(req_album, album_details):
                     return
             elif self.config.fallback_to_top_result:
                 if search_results:
+                    self.general_logger.warning(f'No match — falling back to top result: {search_results[0].get("title", search_results[0].get("browseId"))}')
                     req_album["status"] = "Album Found"
                     album_details = ytmusic.get_album(search_results[0]["browseId"])
                     if self._apply_album_track_links(req_album, album_details):
@@ -789,9 +811,13 @@ class DataHandler:
                     search_results = ytmusic.search(query=query_text, filter="songs", limit=5)
                     song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results)
                     if song_match:
+                        self.general_logger.warning(f'Track matched: "{song_title}" -> "{song_match["title"]}"')
                         self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"])
                     elif self.config.fallback_to_top_result and search_results:
+                        self.general_logger.warning(f'No match — falling back to top result for: "{song_title}" -> "{search_results[0]["title"]}"')
                         self._set_track_link_from_video_id(missing_track, search_results[0]["videoId"], search_results[0]["title"])
+                    else:
+                        self.general_logger.warning(f'No match found for track: "{song_title}"')
 
         except Exception as e:
             self.general_logger.error(f"Error in Song Search: {e}")
@@ -800,6 +826,7 @@ class DataHandler:
 
     def _get_song_links_secondary(self, req_album, artist, cleaned_artist, ytmusic):
         try:
+            self.general_logger.warning(f'Secondary search for: {req_album["artist"]} - {req_album["album_name"]} (mode: {self.config.secondary_search})')
             for missing_track in req_album["missing_tracks"]:
                 if self.ytdlp_stop_event.is_set():
                     return
@@ -810,17 +837,23 @@ class DataHandler:
                     search_results = ytmusic.search(query=query_text, filter="songs", limit=20)
                     song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results)
                     if song_match:
+                        self.general_logger.warning(f'Secondary YTMusic match: "{song_title}" -> "{song_match["title"]}"')
                         self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"])
                     elif self.config.fallback_to_top_result and search_results:
+                        self.general_logger.warning(f'Secondary fallback to top result: "{song_title}" -> "{search_results[0]["title"]}"')
                         self._set_track_link_from_video_id(missing_track, search_results[0]["videoId"], search_results[0]["title"])
                     else:
                         yt_results = self._yt_search(query_text)
                         song_match = _matcher.song_matcher_yt(self.config.minimum_match_ratio, query_text, yt_results)
                         if song_match:
                             if self.config.secondary_search == "YTS":
+                                self.general_logger.warning(f'YTS match: "{song_title}" -> "{song_match["title"]}"')
                                 self._set_track_link(missing_track, song_match["link"], song_match["title"])
                             elif self.config.secondary_search == "YTDLP":
+                                self.general_logger.warning(f'YTDLP match: "{song_title}" -> "{song_match["title"]}"')
                                 self._set_track_link(missing_track, song_match["webpage_url"], song_match["title"])
+                        else:
+                            self.general_logger.warning(f'No match found in secondary search for: "{song_title}"')
 
             found = self._count_found_links(req_album)
             self.general_logger.warning(f'Found {found} of the missing {len(req_album["missing_tracks"])} tracks: {req_album["artist"]} - {req_album["album_name"]}')

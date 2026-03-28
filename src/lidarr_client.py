@@ -36,16 +36,21 @@ class LidarrClient:
         headers = {"X-Api-Key": self.config.lidarr_api_key}
         response = self.session.get(endpoint, headers=headers)
         if response.status_code == 200:
-            return [folder["path"] for folder in response.json()]
+            folders = [folder["path"] for folder in response.json()]
+            self.logger.warning(f"Lidarr root folders: {folders}")
+            return folders
+        self.logger.error(f"Failed to get root folders: HTTP {response.status_code}")
         return []
 
     def trigger_library_scan(self, folders):
+        self.logger.warning(f"Triggering Lidarr library scan for folders: {folders}")
         endpoint = f"{self.config.lidarr_address}/api/v1/command"
         headers = {"X-Api-Key": self.config.lidarr_api_key, "Content-Type": "application/json"}
         data = {"name": "RescanFolders", "folders": folders}
         return self.session.post(endpoint, json=data, headers=headers)
 
     def import_song(self, req_album, song, filename):
+        self.logger.warning(f'Importing song via Lidarr: {req_album.get("artist", "?")} - {song["track_title"]} ({filename})')
         endpoint = f"{self.config.lidarr_address}/api/v1/manualimport"
         headers = {"X-Api-Key": self.config.lidarr_api_key, "Content-Type": "application/json"}
         full_file_path = os.path.join(req_album["album_full_path"], filename)
