@@ -1,6 +1,6 @@
 #!/bin/sh
 
-echo -e "\033[1;32mTheWicklowWolf\033[0m"
+echo -e "\033[1;32mFork of TheWicklowWolf/LidaTube\033[0m"
 echo -e "\033[1;34mLidaTube\033[0m"
 echo "Initializing app..."
 
@@ -20,11 +20,12 @@ _____________________________________
      __/  -'/  `-._ `\_\__           
     /    /-'`  `\   \  \-.\          
 _____________________________________
-Brought to you by TheWicklowWolf   
+Original project by TheWicklowWolf
 _____________________________________
 
-If you'd like to buy me a coffee:
+If you'd like to support the original project:
 https://buymeacoffee.com/thewicklow
+Fork maintained separately at: https://github.com/EleazarHouston/LidaTube
 
 EOF
 

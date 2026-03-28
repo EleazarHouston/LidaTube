@@ -1,11 +1,13 @@
-![Build Status](https://github.com/TheWicklowWolf/LidaTube/actions/workflows/main.yml/badge.svg)
-![Docker Pulls](https://img.shields.io/docker/pulls/thewicklowwolf/lidatube.svg)
+![Build Status](https://github.com/EleazarHouston/LidaTube/actions/workflows/main.yml/badge.svg)
+![Docker Pulls](https://img.shields.io/docker/pulls/eleazarhouston/lidatube.svg)
 
 
 
 <img src=src/static/lidatube.png>
 
 LidaTube is a tool for finding and fetching missing Lidarr albums via yt-dlp.
+This repository is a fork of TheWicklowWolf/LidaTube focused on cleanup and bug fixes.
+Upstream project credit remains with TheWicklowWolf.
 
 ## Running tests
 
@@ -20,7 +22,7 @@ python -m pytest
 ```yaml
 services:
   lidatube:
-    image: thewicklowwolf/lidatube:latest
+    image: ghcr.io/eleazarhouston/lidatube:latest
     container_name: lidatube
     volumes:
       - /path/to/config:/lidatube/config
@@ -73,4 +75,4 @@ To utilize a cookies file with yt-dlp, follow these steps:
 <img src=src/static/dark.png>
 
 
-https://hub.docker.com/r/thewicklowwolf/lidatube
+https://hub.docker.com/r/eleazarhouston/lidatube

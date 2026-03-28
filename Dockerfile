@@ -16,11 +16,11 @@ ENV PYTHONPATH=/lidatube/src
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Make the script executable
-RUN chmod +x thewicklowwolf-init.sh
+RUN chmod +x init.sh
 
 # Expose port
 EXPOSE 5000
 
 # Start the app
-ENTRYPOINT ["./thewicklowwolf-init.sh"]
+ENTRYPOINT ["./init.sh"]
 
