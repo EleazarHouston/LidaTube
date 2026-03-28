@@ -696,12 +696,12 @@ class DataHandler:
     def _close_ytmusic_client(self, ytmusic):
         if ytmusic is None:
             return
-        close_fn = getattr(ytmusic, "close", None)
-        if callable(close_fn):
-            try:
-                close_fn()
-            except Exception as e:
-                self.general_logger.warning(f"Error closing YTMusic client: {e}")
+        try:
+            session = getattr(ytmusic, "_session", None)
+            if session is not None:
+                session.close()
+        except Exception as e:
+            self.general_logger.warning(f"Error closing YTMusic client: {e}")
 
     def _link_finder(self, req_album):
         try:

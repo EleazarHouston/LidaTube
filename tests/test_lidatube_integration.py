@@ -192,18 +192,19 @@ def test_get_song_links_closes_ytmusic_client(lidatube_module, monkeypatch):
     emit_mock = Mock()
     monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
 
+    close_called = []
+
+    class FakeSession:
+        def close(self):
+            close_called.append(1)
+
     class FakeYTMusic:
-        def __init__(self):
-            self.close_called = 0
+        _session = FakeSession()
 
         def search(self, query, filter, limit):
             return []
 
-        def close(self):
-            self.close_called += 1
-
-    fake_client = FakeYTMusic()
-    monkeypatch.setattr(lidatube_module, "YTMusic", lambda: fake_client)
+    monkeypatch.setattr(lidatube_module, "YTMusic", FakeYTMusic)
 
     req_album = {
         "artist": "Artist",
@@ -215,7 +216,7 @@ def test_get_song_links_closes_ytmusic_client(lidatube_module, monkeypatch):
 
     handler._get_song_links(req_album, artist="Artist", cleaned_artist="artist")
 
-    assert fake_client.close_called == 1
+    assert len(close_called) == 1
 
 
 def test_get_song_links_secondary_closes_ytmusic_client(lidatube_module, monkeypatch):
@@ -224,18 +225,19 @@ def test_get_song_links_secondary_closes_ytmusic_client(lidatube_module, monkeyp
     monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
     monkeypatch.setattr(handler, "_yt_search", lambda query_text: [])
 
+    close_called = []
+
+    class FakeSession:
+        def close(self):
+            close_called.append(1)
+
     class FakeYTMusic:
-        def __init__(self):
-            self.close_called = 0
+        _session = FakeSession()
 
         def search(self, query, filter, limit):
             return []
 
-        def close(self):
-            self.close_called += 1
-
-    fake_client = FakeYTMusic()
-    monkeypatch.setattr(lidatube_module, "YTMusic", lambda: fake_client)
+    monkeypatch.setattr(lidatube_module, "YTMusic", FakeYTMusic)
 
     req_album = {
         "artist": "Artist",
@@ -247,7 +249,7 @@ def test_get_song_links_secondary_closes_ytmusic_client(lidatube_module, monkeyp
 
     handler._get_song_links_secondary(req_album, artist="Artist", cleaned_artist="artist")
 
-    assert fake_client.close_called == 1
+    assert len(close_called) == 1
 
 
 def test_get_album_links_closes_ytmusic_client(lidatube_module, monkeypatch):
@@ -256,9 +258,14 @@ def test_get_album_links_closes_ytmusic_client(lidatube_module, monkeypatch):
     monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
     monkeypatch.setattr(lidatube_module.fuzz, "ratio", lambda _left, _right: 100)
 
+    close_called = []
+
+    class FakeSession:
+        def close(self):
+            close_called.append(1)
+
     class FakeYTMusic:
-        def __init__(self):
-            self.close_called = 0
+        _session = FakeSession()
 
         def search(self, query, filter, limit):
             return [{"browseId": "album-1"}]
@@ -267,11 +274,7 @@ def test_get_album_links_closes_ytmusic_client(lidatube_module, monkeypatch):
             assert browse_id == "album-1"
             return {"tracks": [{"title": "Track One", "videoId": "vid-1"}]}
 
-        def close(self):
-            self.close_called += 1
-
-    fake_client = FakeYTMusic()
-    monkeypatch.setattr(lidatube_module, "YTMusic", lambda: fake_client)
+    monkeypatch.setattr(lidatube_module, "YTMusic", FakeYTMusic)
     monkeypatch.setattr(lidatube_module._matcher, "album_matcher", lambda *_args, **_kwargs: {"browseId": "album-1"})
 
     req_album = {
@@ -292,7 +295,7 @@ def test_get_album_links_closes_ytmusic_client(lidatube_module, monkeypatch):
         query_text="Artist - Album",
     )
 
-    assert fake_client.close_called == 1
+    assert len(close_called) == 1
     assert req_album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
 
 
@@ -587,3 +590,54 @@ def test_link_finder_does_not_retry_secondary_after_emfile(lidatube_module, monk
     handler._link_finder(req_album)
 
     secondary_search_mock.assert_not_called()
+
+
+def test_close_ytmusic_client_closes_underlying_session(lidatube_module):
+    """_close_ytmusic_client must close the requests.Session inside _session."""
+    handler = build_data_handler(lidatube_module)
+
+    closed = []
+
+    class FakeSession:
+        def close(self):
+            closed.append(1)
+
+    class FakeYTMusic:
+        _session = FakeSession()
+
+    handler._close_ytmusic_client(FakeYTMusic())
+    assert len(closed) == 1
+
+
+def test_close_ytmusic_client_handles_none(lidatube_module):
+    """_close_ytmusic_client must not raise when passed None."""
+    handler = build_data_handler(lidatube_module)
+    handler._close_ytmusic_client(None)  # should not raise
+
+
+def test_ytmusic_session_closed_after_album_search(lidatube_module, monkeypatch):
+    """The YTMusic session must be closed after _get_album_links even on success."""
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+
+    closed = []
+
+    class FakeYTMusic:
+        class _session:
+            @staticmethod
+            def close():
+                closed.append(1)
+
+        def search(self, query, filter, limit):
+            return []
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", FakeYTMusic)
+
+    req_album = {
+        "artist": "X", "album_name": "Y", "track_count": 1, "missing_count": 1,
+        "missing_tracks": [{"link": "", "track_title": "T", "artist": "X", "title_of_link": ""}],
+        "status": "",
+    }
+    handler._get_album_links(req_album, "X", "Y", "x", "y", "X - Y")
+
+    assert len(closed) == 1
