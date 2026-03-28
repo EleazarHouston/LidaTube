@@ -53,6 +53,7 @@ class DataHandler:
         self.ytdlp_status = "idle"
         self.ytdlp_stop_event = threading.Event()
         self.fd_exhaustion_event = threading.Event()
+        self._ytmusic_semaphore = threading.Semaphore(2)
         self.ytdlp_in_progress_flag = False
         self.index = 0
         self.percent_completion = 0
@@ -724,6 +725,7 @@ class DataHandler:
 
     def _link_finder(self, req_album):
         ytmusic = None
+        semaphore_acquired = False
         try:
             self.general_logger.warning(f'Searching for: {req_album["artist"]} - {req_album["album_name"]}')
             artist = req_album["artist"]
@@ -735,6 +737,8 @@ class DataHandler:
             cleaned_album = _general.string_cleaner(album_name).lower()
 
             self._wait_if_fd_pressure()
+            self._ytmusic_semaphore.acquire()
+            semaphore_acquired = True
             ytmusic = YTMusic()
 
             if number_tracks_in_album == number_of_missing_tracks:
@@ -767,6 +771,8 @@ class DataHandler:
                 threading.Thread(target=self._signal_fd_exhaustion, daemon=True).start()
         finally:
             self._close_ytmusic_client(ytmusic)
+            if semaphore_acquired:
+                self._ytmusic_semaphore.release()
 
     def _get_album_links(self, req_album, artist, album_name, cleaned_artist, cleaned_album, query_text, ytmusic):
         try:

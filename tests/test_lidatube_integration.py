@@ -51,6 +51,7 @@ def build_data_handler(module):
     handler.ytdlp_status = "idle"
     handler.ytdlp_stop_event = threading.Event()
     handler.fd_exhaustion_event = threading.Event()
+    handler._ytmusic_semaphore = threading.Semaphore(2)
     handler.ytdlp_in_progress_flag = False
     handler.streaming_mode = False
     handler.clients_connected_counter = 0
