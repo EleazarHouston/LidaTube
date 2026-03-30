@@ -172,6 +172,17 @@
             <label for="minimum-match-ratio">Minimum Match Ratio (%):</label>
             <input type="text" class="form-control" id="minimum-match-ratio" placeholder="Minimum Match Ratio(%)">
           </div>
+          <div class="form-group-modal my-3">
+            <label>Cookies File:</label>
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <span id="cookies-status-badge" class="badge bg-secondary">Checking...</span>
+            </div>
+            <div class="input-group">
+              <input type="file" class="form-control" id="cookies-file-input" accept=".txt">
+              <button class="btn btn-primary" type="button" id="upload-cookies-btn">Upload</button>
+              <button class="btn btn-danger" type="button" id="delete-cookies-btn">Delete</button>
+            </div>
+          </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>

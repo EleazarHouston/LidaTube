@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 import youtubesearchpython
 from ytmusicapi import YTMusic
-from flask import Flask, render_template
+from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO
 import yt_dlp
 import concurrent.futures
@@ -1009,6 +1009,34 @@ data_handler = DataHandler()
 @app.route("/")
 def home():
     return render_template("base.html")
+
+
+@app.route("/cookies_status")
+def cookies_status():
+    exists = data_handler.config.cookies_path is not None and os.path.exists(data_handler.config.cookies_path)
+    return jsonify({"exists": exists})
+
+
+@app.route("/upload_cookies", methods=["POST"])
+def upload_cookies():
+    if "cookies_file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    f = request.files["cookies_file"]
+    if not f.filename:
+        return jsonify({"error": "No file selected"}), 400
+    cookies_path = os.path.join(data_handler.config.CONFIG_FOLDER, "cookies.txt")
+    f.save(cookies_path)
+    data_handler.config.cookies_path = cookies_path
+    return jsonify({"message": "Cookies file uploaded successfully"})
+
+
+@app.route("/delete_cookies", methods=["DELETE"])
+def delete_cookies():
+    cookies_path = os.path.join(data_handler.config.CONFIG_FOLDER, "cookies.txt")
+    if os.path.exists(cookies_path):
+        os.remove(cookies_path)
+    data_handler.config.cookies_path = None
+    return jsonify({"message": "Cookies file deleted"})
 
 
 @socketio.on("lidarr_get_wanted")

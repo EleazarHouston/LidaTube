@@ -21,6 +21,10 @@ const lidarr_api_key = document.getElementById("lidarr-api-key");
 const sleep_interval = document.getElementById("sleep-interval");
 const sync_schedule = document.getElementById("sync-schedule");
 const minimum_match_ratio = document.getElementById("minimum-match-ratio");
+const cookies_status_badge = document.getElementById("cookies-status-badge");
+const cookies_file_input = document.getElementById("cookies-file-input");
+const upload_cookies_btn = document.getElementById("upload-cookies-btn");
+const delete_cookies_btn = document.getElementById("delete-cookies-btn");
 var socket = io();
 
 lidarr_progress_bar.style.width = "0%";
@@ -135,8 +139,53 @@ reset_lidarr.addEventListener('click', function () {
     get_wanted_lidarr.disabled = false;
 });
 
+function update_cookies_status() {
+    fetch('/cookies_status')
+        .then(r => r.json())
+        .then(data => {
+            if (data.exists) {
+                cookies_status_badge.textContent = 'File present';
+                cookies_status_badge.className = 'badge bg-success';
+            } else {
+                cookies_status_badge.textContent = 'No file';
+                cookies_status_badge.className = 'badge bg-secondary';
+            }
+        });
+}
+
+upload_cookies_btn.addEventListener('click', function () {
+    const file = cookies_file_input.files[0];
+    if (!file) {
+        show_toast('Upload Error', 'Please select a cookies.txt file first.');
+        return;
+    }
+    const form_data = new FormData();
+    form_data.append('cookies_file', file);
+    fetch('/upload_cookies', { method: 'POST', body: form_data })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                show_toast('Upload Error', data.error);
+            } else {
+                show_toast('Cookies', data.message);
+                cookies_file_input.value = '';
+                update_cookies_status();
+            }
+        });
+});
+
+delete_cookies_btn.addEventListener('click', function () {
+    fetch('/delete_cookies', { method: 'DELETE' })
+        .then(r => r.json())
+        .then(data => {
+            show_toast('Cookies', data.message);
+            update_cookies_status();
+        });
+});
+
 config_modal.addEventListener('show.bs.modal', function (event) {
     socket.emit("load_settings");
+    update_cookies_status();
     function handle_settings_loaded(settings) {
         lidarr_address.value = settings.lidarr_address;
         lidarr_api_key.value = settings.lidarr_api_key;
