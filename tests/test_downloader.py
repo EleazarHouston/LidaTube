@@ -1,8 +1,8 @@
 import threading
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, call
 
-from downloader import Downloader
+from downloader import Downloader, RATE_LIMIT_BACKOFF_SECONDS
 
 
 @pytest.fixture
@@ -130,3 +130,79 @@ def test_download_logs_completion_on_success(dl):
         dl.download("https://example.com/vid", "test_file")
 
     dl.logger.warning.assert_any_call("DL Complete: https://example.com/vid")
+
+
+# --- rate-limit backoff ---
+
+RATE_LIMIT_ERR = Exception(
+    "ERROR: [youtube] abc: Video unavailable. "
+    "The current session has been rate-limited by YouTube for up to an hour."
+)
+
+
+def test_download_retries_after_rate_limit_and_succeeds(dl, stop_event):
+    call_count = 0
+
+    def side_effect(links):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RATE_LIMIT_ERR
+
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False):
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = side_effect
+        result = dl.download("https://example.com/vid", "test_file")
+
+    assert result is True
+    assert call_count == 2
+
+
+def test_download_returns_false_after_all_retries_exhausted(dl, stop_event):
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False):
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = RATE_LIMIT_ERR
+        result = dl.download("https://example.com/vid", "test_file")
+
+    assert result is False
+    assert mock_instance.download.call_count == len(RATE_LIMIT_BACKOFF_SECONDS) + 1
+
+
+def test_download_waits_backoff_between_rate_limit_retries(dl, stop_event):
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False) as mock_wait:
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = RATE_LIMIT_ERR
+        dl.download("https://example.com/vid", "test_file")
+
+    wait_durations = [c.args[0] for c in mock_wait.call_args_list]
+    assert wait_durations == RATE_LIMIT_BACKOFF_SECONDS
+
+
+def test_download_stops_during_rate_limit_backoff_if_stop_event_set(dl, stop_event):
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=True):
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = RATE_LIMIT_ERR
+        result = dl.download("https://example.com/vid", "test_file")
+
+    assert result is False
+    assert mock_instance.download.call_count == 1
+
+
+def test_download_logs_warning_before_each_retry(dl, stop_event):
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False):
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = RATE_LIMIT_ERR
+        dl.download("https://example.com/vid", "test_file")
+
+    warning_calls = [str(c) for c in dl.logger.warning.call_args_list]
+    assert any("rate" in w.lower() for w in warning_calls)

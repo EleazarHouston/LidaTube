@@ -58,6 +58,13 @@ def add_metadata(logger, song, req_album, full_file_path):
         logger.error(f"Error adding metadata for {full_file_path}: {e}")
 
 
+def is_rate_limit_error(error):
+    """Return True if the error indicates YouTube has rate-limited the session."""
+    if error is None:
+        return False
+    return "rate-limited" in str(error).lower()
+
+
 def is_resource_exhaustion_error(error):
     if error is None:
         return False

@@ -1,7 +1,7 @@
 from unittest.mock import Mock
 
 import _general
-from _general import is_resource_exhaustion_error
+from _general import is_resource_exhaustion_error, is_rate_limit_error
 
 
 def test_convert_to_lidarr_format_replaces_problematic_characters():
@@ -166,3 +166,30 @@ def test_is_resource_exhaustion_error_handles_recursive_exception_graph():
     err.__cause__ = err
 
     assert is_resource_exhaustion_error(err) is False
+
+
+# --- is_rate_limit_error ---
+
+
+def test_is_rate_limit_error_none_returns_false():
+    assert is_rate_limit_error(None) is False
+
+
+def test_is_rate_limit_error_detects_rate_limited_phrase():
+    err = Exception(
+        "ERROR: [youtube] abc123: Video unavailable. "
+        "The current session has been rate-limited by YouTube for up to an hour."
+    )
+    assert is_rate_limit_error(err) is True
+
+
+def test_is_rate_limit_error_case_insensitive():
+    assert is_rate_limit_error(Exception("Rate-Limited by YouTube")) is True
+
+
+def test_is_rate_limit_error_returns_false_for_unrelated_error():
+    assert is_rate_limit_error(Exception("network error")) is False
+
+
+def test_is_rate_limit_error_returns_false_for_oserror():
+    assert is_rate_limit_error(OSError(2, "No such file or directory")) is False

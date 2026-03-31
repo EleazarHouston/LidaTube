@@ -1,6 +1,9 @@
 import logging
 import tempfile
 import yt_dlp
+import _general
+
+RATE_LIMIT_BACKOFF_SECONDS = [60, 180, 600]
 
 
 class Downloader:
@@ -11,16 +14,29 @@ class Downloader:
 
     def download(self, link, file_name):
         """Download audio from link. Returns True on success, False on failure."""
-        try:
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                ydl_opts = self._get_ydl_opts(file_name, temp_dir)
-                with yt_dlp.YoutubeDL(ydl_opts) as downloader:
-                    downloader.download([link])
+        for attempt in range(len(RATE_LIMIT_BACKOFF_SECONDS) + 1):
+            if attempt > 0:
+                backoff = RATE_LIMIT_BACKOFF_SECONDS[attempt - 1]
+                self.logger.warning(
+                    f"Rate-limited by YouTube — waiting {backoff}s before retry "
+                    f"{attempt}/{len(RATE_LIMIT_BACKOFF_SECONDS)}: {link}"
+                )
+                if self.stop_event.wait(backoff):
+                    return False
+            try:
+                with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+                    ydl_opts = self._get_ydl_opts(file_name, temp_dir)
+                    with yt_dlp.YoutubeDL(ydl_opts) as downloader:
+                        downloader.download([link])
                 self.logger.warning(f"DL Complete: {link}")
                 return True
-        except Exception as e:
-            self.logger.error(f"Error downloading song: {link}. Error: {e}")
-            return False
+            except Exception as e:
+                if _general.is_rate_limit_error(e) and attempt < len(RATE_LIMIT_BACKOFF_SECONDS):
+                    self.logger.warning(f"Rate limit detected on attempt {attempt + 1}: {e}")
+                    continue
+                self.logger.error(f"Error downloading song: {link}. Error: {e}")
+                return False
+        return False  # all retries exhausted
 
     def _get_ydl_opts(self, file_name, temp_dir):
         opts = {
