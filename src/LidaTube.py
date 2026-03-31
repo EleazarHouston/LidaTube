@@ -44,14 +44,7 @@ class DataHandler:
         self.lidarr_status = "idle"
         self.lidarr_stop_event = threading.Event()
         self.lidarr_scan_guard = threading.Lock()
-        self.lidarr_scan_progress = {
-            "phase": "Idle",
-            "pages_scanned": 0,
-            "albums_discovered": 0,
-            "albums_processed": 0,
-            "albums_total": 0,
-            "percent": 0,
-        }
+        self.lidarr_scan_progress = self._default_lidarr_scan_progress()
 
         # Download state
         self.ytdlp_items = []
@@ -114,8 +107,10 @@ class DataHandler:
             self.config.minimum_match_ratio = float(data["minimum_match_ratio"])
             self.config.sync_schedule = AppConfig.parse_sync_schedule(data["sync_schedule"])
             self.config.save()
+            socketio.emit("new_toast_msg", {"title": "Settings", "message": "Settings saved successfully"})
         except Exception as e:
             self.general_logger.error(f"Failed to update settings: {e}")
+            socketio.emit("new_toast_msg", {"title": "Settings Error", "message": str(e)})
 
     # --- Scheduler ---
 
@@ -160,6 +155,16 @@ class DataHandler:
 
     # --- Lidarr scan state helpers ---
 
+    def _default_lidarr_scan_progress(self):
+        return {
+            "phase": "Idle",
+            "pages_scanned": 0,
+            "albums_discovered": 0,
+            "albums_processed": 0,
+            "albums_total": 0,
+            "percent": 0,
+        }
+
     def _set_lidarr_scan_progress(self, **kwargs):
         self.lidarr_scan_progress.update(kwargs)
 
@@ -175,10 +180,13 @@ class DataHandler:
 
     # --- Lidarr cache ---
 
+    def _lidarr_cache_path(self):
+        return os.path.join(self.config.CONFIG_FOLDER, "lidarr_cache.json")
+
     def _save_lidarr_cache(self):
         try:
             import json
-            cache_path = os.path.join(self.config.CONFIG_FOLDER, "lidarr_cache.json")
+            cache_path = self._lidarr_cache_path()
             tmp_path = cache_path + ".tmp"
             with open(tmp_path, "w") as f:
                 json.dump({"lidarr_items": self.lidarr_items, "lidarr_scan_progress": self.lidarr_scan_progress}, f)
@@ -190,7 +198,7 @@ class DataHandler:
     def _load_lidarr_cache(self):
         try:
             import json
-            cache_path = os.path.join(self.config.CONFIG_FOLDER, "lidarr_cache.json")
+            cache_path = self._lidarr_cache_path()
             if os.path.exists(cache_path):
                 with open(cache_path, "r") as f:
                     cache = json.load(f)
@@ -202,6 +210,16 @@ class DataHandler:
                 self.general_logger.warning(f"Loaded {len(self.lidarr_items)} albums from Lidarr cache")
         except Exception as e:
             self.general_logger.error(f"Error loading Lidarr cache: {e}")
+
+    def _clear_lidarr_cache(self):
+        removed = 0
+        cache_path = self._lidarr_cache_path()
+        for path in (cache_path, cache_path + ".tmp"):
+            if os.path.exists(path):
+                os.remove(path)
+                removed += 1
+        self.general_logger.warning(f"Cleared {removed} Lidarr cache file(s)")
+        return removed
 
     # --- Lidarr wanted albums ---
 
@@ -467,11 +485,32 @@ class DataHandler:
                 response.close()
 
     def reset_lidarr(self):
-        self.lidarr_stop_event.set()
-        for future in self.lidarr_futures:
-            if not future.done():
-                future.cancel()
-        self.lidarr_items = []
+        cache_cleanup_error = None
+        cache_removed_count = 0
+        try:
+            self.lidarr_stop_event.set()
+            for future in self.lidarr_futures:
+                if not future.done():
+                    future.cancel()
+            self.lidarr_futures = []
+            self.lidarr_items = []
+            self.lidarr_status = "idle"
+            self.lidarr_scan_progress = self._default_lidarr_scan_progress()
+            cache_removed_count = self._clear_lidarr_cache()
+            self.general_logger.warning("Lidarr reset complete")
+        except Exception as e:
+            cache_cleanup_error = str(e)
+            self.general_logger.error(f"Lidarr reset failed: {e}")
+        finally:
+            self._emit_lidarr_update()
+            if cache_cleanup_error:
+                socketio.emit("new_toast_msg", {"title": "Lidarr Reset Error", "message": cache_cleanup_error})
+            else:
+                if cache_removed_count:
+                    msg = f"Reset complete. Cleared {cache_removed_count} cache file(s)."
+                else:
+                    msg = "Reset complete. No cache files were present."
+                socketio.emit("new_toast_msg", {"title": "Lidarr Reset", "message": msg})
 
     # --- Download queue ---
 
@@ -680,12 +719,18 @@ class DataHandler:
             for future in self.ytdlp_futures:
                 if not future.done():
                     future.cancel()
+            self.ytdlp_futures = []
             self.ytdlp_items = []
+            self.ytdlp_status = "idle"
+            self.ytdlp_in_progress_flag = False
+            self.index = 0
             self.percent_completion = 0
         except Exception as e:
             self.general_logger.error(f"Error Stopping yt_dlp: {e}")
+            socketio.emit("new_toast_msg", {"title": "Download Reset Error", "message": str(e)})
         else:
             self.general_logger.warning("Reset Complete")
+            socketio.emit("new_toast_msg", {"title": "Downloads Reset", "message": "Download queue cleared"})
         finally:
             self._emit_ytdlp_update()
 

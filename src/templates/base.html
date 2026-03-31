@@ -30,7 +30,7 @@
     <div class="container-fluid bg-dark">
       <div class="top-bar d-flex justify-content-between align-items-center">
         <h1 class="title text-center text-light flex-grow-1 my-1 ps-2 ms-5" id="return-to-top">LidaTube</h1>
-        <button class="btn btn-link text-light" id="settings-button" data-bs-toggle="modal"
+        <button class="btn btn-link text-light" id="settings-button" data-bs-toggle="modal" aria-label="Open settings"
           data-bs-target="#config-modal">
           <i class="fa fa-gear fa-2x"></i>
         </button>
@@ -58,8 +58,8 @@
                   aria-hidden="true"></span>
                 Refresh
               </button>
-              <button class="btn btn-warning w-100" id="stop-lidarr-btn">Stop</button>
-              <button class="btn btn-danger w-100" id="reset-lidarr-btn">Reset</button>
+              <button class="btn btn-warning w-100" id="stop-lidarr-btn" aria-label="Stop Lidarr refresh">Stop</button>
+              <button class="btn btn-danger w-100" id="reset-lidarr-btn" aria-label="Reset Lidarr data">Reset</button>
             </div>
             <div class="container non-scrollable my-1 p-0" id="select-all">
               <div id="lidarr-progress-status-bar" class="progress">
@@ -107,14 +107,15 @@
                 <span class="spinner-border spinner-border-sm d-none" id="ytdlp-spinner" role="status"
                   aria-hidden="true"></span>
                 Download</button>
-              <button class="btn btn-warning w-100 " id="stop-ytdlp-btn">Stop</button>
-              <button class="btn btn-danger w-100 " id="reset-ytdlp-btn">Reset</button>
+              <button class="btn btn-warning w-100 " id="stop-ytdlp-btn" aria-label="Stop downloads">Stop</button>
+              <button class="btn btn-danger w-100 " id="reset-ytdlp-btn" aria-label="Reset download queue">Reset</button>
             </div>
             <div class="container non-scrollable my-1 p-0" id="progress-bar">
               <div id="ytdlp-progress-status-bar" class="progress">
-                <div class="progress-bar-striped bg-success" role="progressbar" aria-valuenow="100" aria-valuemin="0"
-                  aria-valuemax="100"></div>
+                <div id="ytdlp-progress-status-bar-inner" class="progress-bar progress-bar-striped bg-primary" role="progressbar" aria-valuenow="0" aria-valuemin="0"
+                  aria-valuemax="100" style="width: 0%">0%</div>
               </div>
+              <div id="ytdlp-status-text" class="small text-muted mt-1">Idle</div>
             </div>
             <div class="container scrollable p-0">
               <div class="table">

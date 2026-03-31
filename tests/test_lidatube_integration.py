@@ -640,6 +640,7 @@ def test_load_settings_emits_current_config(lidatube_module, monkeypatch):
 
 def test_update_settings_parses_sync_schedule_and_saves(lidatube_module, monkeypatch):
     handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
     parse_mock = Mock(return_value=[3, 9])
     monkeypatch.setattr(lidatube_module.AppConfig, "parse_sync_schedule", parse_mock)
 
@@ -662,8 +663,9 @@ def test_update_settings_parses_sync_schedule_and_saves(lidatube_module, monkeyp
     handler.config.save.assert_called_once()
 
 
-def test_update_settings_logs_error_on_bad_payload(lidatube_module):
+def test_update_settings_logs_error_on_bad_payload(lidatube_module, monkeypatch):
     handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
 
     handler.update_settings({"lidarr_address": "http://missing-keys"})
 
@@ -883,6 +885,7 @@ def test_stop_ytdlp_cancels_pending_futures_and_marks_unprocessed(lidatube_modul
 
 def test_reset_ytdlp_clears_queue_and_completion(lidatube_module, monkeypatch):
     handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
     monkeypatch.setattr(handler, "_emit_ytdlp_update", Mock())
 
     class FakeFuture:
@@ -904,7 +907,65 @@ def test_reset_ytdlp_clears_queue_and_completion(lidatube_module, monkeypatch):
 
     assert future.cancel_called is True
     assert handler.ytdlp_items == []
+    assert handler.ytdlp_status == "idle"
+    assert handler.index == 0
     assert handler.percent_completion == 0
+
+
+def test_reset_lidarr_clears_cache_and_restores_idle_state(lidatube_module, monkeypatch, tmp_path):
+    handler = build_data_handler(lidatube_module)
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+    monkeypatch.setattr(handler, "_emit_lidarr_update", Mock())
+
+    cache_path = tmp_path / "lidarr_cache.json"
+    cache_path.write_text(json.dumps({"lidarr_items": [{"artist": "A"}]}))
+    handler.config.CONFIG_FOLDER = str(tmp_path)
+
+    class FakeFuture:
+        def __init__(self, done_state=False):
+            self._done_state = done_state
+            self.cancel_called = False
+
+        def done(self):
+            return self._done_state
+
+        def cancel(self):
+            self.cancel_called = True
+
+    pending = FakeFuture(done_state=False)
+    completed = FakeFuture(done_state=True)
+    handler.lidarr_futures = [pending, completed]
+    handler.lidarr_items = [{"artist": "Artist", "album_name": "Album", "missing_tracks": []}]
+    handler.lidarr_status = "busy"
+    handler.lidarr_scan_progress = {
+        "phase": "Fetching missing tracks",
+        "pages_scanned": 4,
+        "albums_discovered": 10,
+        "albums_processed": 8,
+        "albums_total": 10,
+        "percent": 80,
+    }
+
+    handler.reset_lidarr()
+
+    assert handler.lidarr_stop_event.is_set() is True
+    assert pending.cancel_called is True
+    assert completed.cancel_called is False
+    assert handler.lidarr_futures == []
+    assert handler.lidarr_items == []
+    assert handler.lidarr_status == "idle"
+    assert handler.lidarr_scan_progress == {
+        "phase": "Idle",
+        "pages_scanned": 0,
+        "albums_discovered": 0,
+        "albums_processed": 0,
+        "albums_total": 0,
+        "percent": 0,
+    }
+    assert cache_path.exists() is False
+    handler._emit_lidarr_update.assert_called_once()
+    assert any(call.args[0] == "new_toast_msg" and call.args[1]["title"] == "Lidarr Reset" for call in emit_mock.call_args_list)
 
 
 def test_apply_album_track_links_returns_true_when_stop_is_set(lidatube_module):
