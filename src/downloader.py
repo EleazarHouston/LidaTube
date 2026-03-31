@@ -43,7 +43,10 @@ class Downloader:
             ],
         }
         if self.config.cookies_path:
+            self.logger.warning(f"Using cookies file: {self.config.cookies_path}")
             opts["cookiefile"] = self.config.cookies_path
+        else:
+            self.logger.warning("No cookies file configured")
         return opts
 
     def _progress_hook(self, d):

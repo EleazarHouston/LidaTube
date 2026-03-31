@@ -1024,7 +1024,7 @@ def upload_cookies():
     f = request.files["cookies_file"]
     if not f.filename:
         return jsonify({"error": "No file selected"}), 400
-    cookies_path = os.path.join(data_handler.config.CONFIG_FOLDER, "cookies.txt")
+    cookies_path = os.path.abspath(os.path.join(data_handler.config.CONFIG_FOLDER, "cookies.txt"))
     f.save(cookies_path)
     data_handler.config.cookies_path = cookies_path
     return jsonify({"message": "Cookies file uploaded successfully"})
