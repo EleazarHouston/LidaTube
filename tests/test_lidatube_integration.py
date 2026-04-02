@@ -1,4 +1,5 @@
 import importlib
+import io
 import json
 import os
 import sys
@@ -83,6 +84,92 @@ def build_data_handler(module):
     handler.downloader = Mock()
 
     return handler
+
+
+@pytest.fixture
+def app_client(lidatube_module):
+    lidatube_module.app.config["TESTING"] = True
+    with lidatube_module.app.test_client() as client:
+        yield client, lidatube_module
+
+
+class TestCookiesRoutes:
+    def test_status_no_file(self, app_client):
+        client, module = app_client
+        module.data_handler.config.cookies_path = None
+        resp = client.get("/cookies_status")
+        assert resp.status_code == 200
+        assert resp.get_json()["exists"] is False
+
+    def test_status_file_exists(self, app_client):
+        client, module = app_client
+        cookies_file = os.path.join(module.data_handler.config.CONFIG_FOLDER, "cookies.txt")
+        with open(cookies_file, "w") as f:
+            f.write("cookie data")
+        module.data_handler.config.cookies_path = os.path.abspath(cookies_file)
+        resp = client.get("/cookies_status")
+        assert resp.status_code == 200
+        assert resp.get_json()["exists"] is True
+
+    def test_upload_saves_as_cookies_txt(self, app_client):
+        client, module = app_client
+        data = {"cookies_file": (io.BytesIO(b"cookie data"), "my_exported_cookies")}
+        resp = client.post("/upload_cookies", data=data, content_type="multipart/form-data")
+        assert resp.status_code == 200
+        expected_path = os.path.abspath(os.path.join(module.data_handler.config.CONFIG_FOLDER, "cookies.txt"))
+        assert os.path.exists(expected_path)
+        assert module.data_handler.config.cookies_path == expected_path
+
+    def test_upload_any_filename_accepted(self, app_client):
+        client, module = app_client
+        for filename in ("cookies.txt", "my_cookies", "export.bin", "netscape_cookies.txt"):
+            data = {"cookies_file": (io.BytesIO(b"cookie data"), filename)}
+            resp = client.post("/upload_cookies", data=data, content_type="multipart/form-data")
+            assert resp.status_code == 200, f"Upload failed for filename: {filename}"
+
+    def test_upload_no_file_returns_400(self, app_client):
+        client, module = app_client
+        resp = client.post("/upload_cookies", data={}, content_type="multipart/form-data")
+        assert resp.status_code == 400
+
+    def test_delete_removes_file_and_clears_path(self, app_client):
+        client, module = app_client
+        cookies_file = os.path.join(module.data_handler.config.CONFIG_FOLDER, "cookies.txt")
+        with open(cookies_file, "w") as f:
+            f.write("cookie data")
+        module.data_handler.config.cookies_path = os.path.abspath(cookies_file)
+        resp = client.delete("/delete_cookies")
+        assert resp.status_code == 200
+        assert not os.path.exists(cookies_file)
+        assert module.data_handler.config.cookies_path is None
+
+    def test_delete_when_no_file_still_succeeds(self, app_client):
+        client, module = app_client
+        module.data_handler.config.cookies_path = None
+        resp = client.delete("/delete_cookies")
+        assert resp.status_code == 200
+        assert module.data_handler.config.cookies_path is None
+
+    def test_delete_then_reupload(self, app_client):
+        client, module = app_client
+        cookies_file = os.path.join(module.data_handler.config.CONFIG_FOLDER, "cookies.txt")
+        with open(cookies_file, "w") as f:
+            f.write("old cookies")
+        module.data_handler.config.cookies_path = os.path.abspath(cookies_file)
+
+        client.delete("/delete_cookies")
+        assert module.data_handler.config.cookies_path is None
+
+        data = {"cookies_file": (io.BytesIO(b"new cookies"), "fresh_export")}
+        resp = client.post("/upload_cookies", data=data, content_type="multipart/form-data")
+        assert resp.status_code == 200
+        assert module.data_handler.config.cookies_path is not None
+        assert os.path.exists(module.data_handler.config.cookies_path)
+        with open(module.data_handler.config.cookies_path) as f:
+            assert f.read() == "new cookies"
+
+        status_resp = client.get("/cookies_status")
+        assert status_resp.get_json()["exists"] is True
 
 
 class FakeResponse:
