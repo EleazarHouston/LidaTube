@@ -14,6 +14,8 @@ class Downloader:
 
     def download(self, link, file_name):
         """Download audio from link. Returns True on success, False on failure."""
+        if self.stop_event.is_set():
+            return False
         for attempt in range(len(RATE_LIMIT_BACKOFF_SECONDS) + 1):
             if attempt > 0:
                 backoff = RATE_LIMIT_BACKOFF_SECONDS[attempt - 1]
@@ -43,6 +45,7 @@ class Downloader:
             "logger": self.logger,
             "ffmpeg_location": "/usr/bin/ffmpeg",
             "format": "bestaudio",
+            "socket_timeout": 30,
             "outtmpl": f"{file_name}.%(ext)s",
             "paths": {"home": self.config.download_folder, "temp": temp_dir},
             "quiet": False,

@@ -554,7 +554,8 @@ class DataHandler:
             active_futures = set()
             self.general_logger.warning(f"Master queue started: {len(self.ytdlp_items)} item(s), thread_limit={self.config.thread_limit}")
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.thread_limit) as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.thread_limit)
+            try:
                 while not self.ytdlp_stop_event.is_set():
                     # Submit new items up to thread_limit
                     while submitted_up_to < len(self.ytdlp_items) and len(active_futures) < self.config.thread_limit:
@@ -575,6 +576,8 @@ class DataHandler:
                         timeout=1.0,
                         return_when=concurrent.futures.FIRST_COMPLETED,
                     )
+            finally:
+                executor.shutdown(wait=False)
 
             if self.ytdlp_stop_event.is_set():
                 self.ytdlp_status = "stopped"

@@ -62,7 +62,8 @@ def is_rate_limit_error(error):
     """Return True if the error indicates YouTube has rate-limited the session."""
     if error is None:
         return False
-    return "rate-limited" in str(error).lower()
+    msg = str(error).lower()
+    return "rate-limited" in msg or "sign in to confirm" in msg
 
 
 def is_resource_exhaustion_error(error):

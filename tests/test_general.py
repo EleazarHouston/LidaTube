@@ -193,3 +193,15 @@ def test_is_rate_limit_error_returns_false_for_unrelated_error():
 
 def test_is_rate_limit_error_returns_false_for_oserror():
     assert is_rate_limit_error(OSError(2, "No such file or directory")) is False
+
+
+def test_is_rate_limit_error_detects_bot_confirmation_prompt():
+    err = Exception(
+        "ERROR: [youtube] ABDkTs9k3ag: Sign in to confirm you're not a bot. "
+        "Use --cookies-from-browser or --cookies for the authentication."
+    )
+    assert is_rate_limit_error(err) is True
+
+
+def test_is_rate_limit_error_bot_confirmation_case_insensitive():
+    assert is_rate_limit_error(Exception("SIGN IN TO CONFIRM YOU'RE NOT A BOT")) is True

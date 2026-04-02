@@ -196,6 +196,19 @@ def test_download_stops_during_rate_limit_backoff_if_stop_event_set(dl, stop_eve
     assert mock_instance.download.call_count == 1
 
 
+def test_ydl_opts_includes_socket_timeout(dl):
+    opts = dl._get_ydl_opts("file", "/tmp")
+    assert "socket_timeout" in opts
+
+
+def test_download_returns_false_immediately_if_stop_event_already_set(dl, stop_event):
+    stop_event.set()
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
+        result = dl.download("https://example.com/vid", "test_file")
+    mock_ydl_class.assert_not_called()
+    assert result is False
+
+
 def test_download_logs_warning_before_each_retry(dl, stop_event):
     with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
          patch.object(stop_event, "wait", return_value=False):
