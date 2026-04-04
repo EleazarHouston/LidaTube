@@ -4,6 +4,8 @@ import yt_dlp
 import _general
 
 RATE_LIMIT_BACKOFF_SECONDS = [60, 180, 600]
+CONSECUTIVE_UNAVAILABLE_THRESHOLD = 5
+UNAVAILABLE_BACKOFF_SECONDS = 60
 
 
 class Downloader:
@@ -11,6 +13,7 @@ class Downloader:
         self.config = config
         self.stop_event = stop_event
         self.logger = logger or logging.getLogger(__name__)
+        self._consecutive_unavailable = 0
 
     def download(self, link, file_name):
         """Download audio from link. Returns True on success, False on failure."""
@@ -31,12 +34,21 @@ class Downloader:
                     with yt_dlp.YoutubeDL(ydl_opts) as downloader:
                         downloader.download([link])
                 self.logger.warning(f"DL Complete: {link}")
+                self._consecutive_unavailable = 0
                 return True
             except Exception as e:
                 if _general.is_rate_limit_error(e) and attempt < len(RATE_LIMIT_BACKOFF_SECONDS):
                     self.logger.warning(f"Rate limit detected on attempt {attempt + 1}: {e}")
                     continue
                 self.logger.error(f"Error downloading song: {link}. Error: {e}")
+                if _general.is_unavailable_error(e):
+                    self._consecutive_unavailable += 1
+                    if self._consecutive_unavailable >= CONSECUTIVE_UNAVAILABLE_THRESHOLD:
+                        self.logger.warning(
+                            f"Back off after {self._consecutive_unavailable} in a row."
+                        )
+                        self._consecutive_unavailable = 0
+                        self.stop_event.wait(UNAVAILABLE_BACKOFF_SECONDS)
                 return False
         return False  # all retries exhausted
 

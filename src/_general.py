@@ -66,6 +66,14 @@ def is_rate_limit_error(error):
     return "rate-limited" in msg or "sign in to confirm" in msg
 
 
+def is_unavailable_error(error):
+    """Return True if the error indicates a video is unavailable (may be rate-limiting in disguise)."""
+    if error is None:
+        return False
+    msg = str(error).lower()
+    return "video unavailable" in msg and "this content" in msg
+
+
 def is_resource_exhaustion_error(error):
     if error is None:
         return False

@@ -2,7 +2,7 @@ import threading
 import pytest
 from unittest.mock import Mock, patch, MagicMock, call
 
-from downloader import Downloader, RATE_LIMIT_BACKOFF_SECONDS
+from downloader import Downloader, RATE_LIMIT_BACKOFF_SECONDS, CONSECUTIVE_UNAVAILABLE_THRESHOLD, UNAVAILABLE_BACKOFF_SECONDS
 
 
 @pytest.fixture
@@ -207,6 +207,89 @@ def test_download_returns_false_immediately_if_stop_event_already_set(dl, stop_e
         result = dl.download("https://example.com/vid", "test_file")
     mock_ydl_class.assert_not_called()
     assert result is False
+
+
+# --- consecutive unavailable backoff ---
+
+UNAVAILABLE_ERR = Exception(
+    "ERROR: [youtube] 4egsH0KuNeE: Video unavailable. This content isn't available."
+)
+
+
+def test_consecutive_unavailable_counter_starts_at_zero(dl):
+    assert dl._consecutive_unavailable == 0
+
+
+def test_unavailable_error_increments_consecutive_counter(dl):
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = UNAVAILABLE_ERR
+        dl.download("https://example.com/vid", "test_file")
+    assert dl._consecutive_unavailable == 1
+
+
+def test_success_resets_consecutive_unavailable_counter(dl):
+    dl._consecutive_unavailable = 3
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        dl.download("https://example.com/vid", "test_file")
+    assert dl._consecutive_unavailable == 0
+
+
+def test_non_unavailable_error_does_not_increment_counter(dl):
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = Exception("some other network error")
+        dl.download("https://example.com/vid", "test_file")
+    assert dl._consecutive_unavailable == 0
+
+
+def test_consecutive_unavailable_triggers_backoff_at_threshold(dl, stop_event):
+    dl._consecutive_unavailable = CONSECUTIVE_UNAVAILABLE_THRESHOLD - 1
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False) as mock_wait:
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = UNAVAILABLE_ERR
+        dl.download("https://example.com/vid", "test_file")
+    mock_wait.assert_called_once_with(UNAVAILABLE_BACKOFF_SECONDS)
+
+
+def test_consecutive_unavailable_counter_resets_after_backoff(dl, stop_event):
+    dl._consecutive_unavailable = CONSECUTIVE_UNAVAILABLE_THRESHOLD - 1
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False):
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = UNAVAILABLE_ERR
+        dl.download("https://example.com/vid", "test_file")
+    assert dl._consecutive_unavailable == 0
+
+
+def test_consecutive_unavailable_below_threshold_does_not_trigger_backoff(dl, stop_event):
+    dl._consecutive_unavailable = CONSECUTIVE_UNAVAILABLE_THRESHOLD - 2
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False) as mock_wait:
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = UNAVAILABLE_ERR
+        dl.download("https://example.com/vid", "test_file")
+    mock_wait.assert_not_called()
+
+
+def test_backoff_logs_warning_at_threshold(dl, stop_event):
+    dl._consecutive_unavailable = CONSECUTIVE_UNAVAILABLE_THRESHOLD - 1
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False):
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = UNAVAILABLE_ERR
+        dl.download("https://example.com/vid", "test_file")
+    warning_calls = [str(c) for c in dl.logger.warning.call_args_list]
+    assert any("in a row" in w.lower() for w in warning_calls)
 
 
 def test_download_logs_warning_before_each_retry(dl, stop_event):

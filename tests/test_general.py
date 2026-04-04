@@ -205,3 +205,28 @@ def test_is_rate_limit_error_detects_bot_confirmation_prompt():
 
 def test_is_rate_limit_error_bot_confirmation_case_insensitive():
     assert is_rate_limit_error(Exception("SIGN IN TO CONFIRM YOU'RE NOT A BOT")) is True
+
+
+# --- is_unavailable_error ---
+
+
+def test_is_unavailable_error_none_returns_false():
+    assert _general.is_unavailable_error(None) is False
+
+
+def test_is_unavailable_error_detects_youtube_unavailable_message():
+    err = Exception("ERROR: [youtube] 4egsH0KuNeE: Video unavailable. This content isn't available.")
+    assert _general.is_unavailable_error(err) is True
+
+
+def test_is_unavailable_error_case_insensitive():
+    assert _general.is_unavailable_error(Exception("VIDEO UNAVAILABLE. THIS CONTENT ISN'T AVAILABLE.")) is True
+
+
+def test_is_unavailable_error_returns_false_for_rate_limit_error():
+    err = Exception("The current session has been rate-limited by YouTube for up to an hour.")
+    assert _general.is_unavailable_error(err) is False
+
+
+def test_is_unavailable_error_returns_false_for_unrelated_error():
+    assert _general.is_unavailable_error(Exception("network timeout")) is False
