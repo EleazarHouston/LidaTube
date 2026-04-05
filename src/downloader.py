@@ -37,7 +37,7 @@ class Downloader:
                 self._consecutive_unavailable = 0
                 return True
             except Exception as e:
-                if _general.is_rate_limit_error(e) and attempt < len(RATE_LIMIT_BACKOFF_SECONDS):
+                if (_general.is_rate_limit_error(e) or _general.is_empty_file_error(e)) and attempt < len(RATE_LIMIT_BACKOFF_SECONDS):
                     self.logger.warning(f"Rate limit detected on attempt {attempt + 1}: {e}")
                     continue
                 self.logger.error(f"Error downloading song: {link}. Error: {e}")

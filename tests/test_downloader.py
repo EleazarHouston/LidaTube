@@ -302,3 +302,64 @@ def test_download_logs_warning_before_each_retry(dl, stop_event):
 
     warning_calls = [str(c) for c in dl.logger.warning.call_args_list]
     assert any("rate" in w.lower() for w in warning_calls)
+
+
+# --- empty file error backoff ---
+
+EMPTY_FILE_ERR = Exception("ERROR: The downloaded file is empty")
+
+
+def test_download_retries_after_empty_file_and_succeeds(dl, stop_event):
+    call_count = 0
+
+    def side_effect(links):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise EMPTY_FILE_ERR
+
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False):
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = side_effect
+        result = dl.download("https://example.com/vid", "test_file")
+
+    assert result is True
+    assert call_count == 2
+
+
+def test_download_returns_false_after_all_empty_file_retries_exhausted(dl, stop_event):
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False):
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = EMPTY_FILE_ERR
+        result = dl.download("https://example.com/vid", "test_file")
+
+    assert result is False
+    assert mock_instance.download.call_count == len(RATE_LIMIT_BACKOFF_SECONDS) + 1
+
+
+def test_download_stops_during_empty_file_backoff_if_stop_event_set(dl, stop_event):
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=True):
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = EMPTY_FILE_ERR
+        result = dl.download("https://example.com/vid", "test_file")
+
+    assert result is False
+    assert mock_instance.download.call_count == 1
+
+
+def test_download_waits_backoff_between_empty_file_retries(dl, stop_event):
+    with patch("downloader.yt_dlp.YoutubeDL") as mock_ydl_class, \
+         patch.object(stop_event, "wait", return_value=False) as mock_wait:
+        mock_instance = MagicMock()
+        mock_ydl_class.return_value.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = EMPTY_FILE_ERR
+        dl.download("https://example.com/vid", "test_file")
+
+    wait_durations = [c.args[0] for c in mock_wait.call_args_list]
+    assert wait_durations == RATE_LIMIT_BACKOFF_SECONDS

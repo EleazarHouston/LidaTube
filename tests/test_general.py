@@ -230,3 +230,28 @@ def test_is_unavailable_error_returns_false_for_rate_limit_error():
 
 def test_is_unavailable_error_returns_false_for_unrelated_error():
     assert _general.is_unavailable_error(Exception("network timeout")) is False
+
+
+# --- is_empty_file_error ---
+
+
+def test_is_empty_file_error_none_returns_false():
+    assert _general.is_empty_file_error(None) is False
+
+
+def test_is_empty_file_error_detects_yt_dlp_message():
+    err = Exception("ERROR: The downloaded file is empty")
+    assert _general.is_empty_file_error(err) is True
+
+
+def test_is_empty_file_error_case_insensitive():
+    assert _general.is_empty_file_error(Exception("the downloaded file is empty")) is True
+
+
+def test_is_empty_file_error_returns_false_for_unrelated_error():
+    assert _general.is_empty_file_error(Exception("network timeout")) is False
+
+
+def test_is_empty_file_error_returns_false_for_rate_limit_error():
+    err = Exception("The current session has been rate-limited by YouTube for up to an hour.")
+    assert _general.is_empty_file_error(err) is False

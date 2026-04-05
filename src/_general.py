@@ -74,6 +74,13 @@ def is_unavailable_error(error):
     return "video unavailable" in msg and "this content" in msg
 
 
+def is_empty_file_error(error):
+    """Return True if yt_dlp reports the downloaded file is empty (soft throttle by YouTube)."""
+    if error is None:
+        return False
+    return "the downloaded file is empty" in str(error).lower()
+
+
 def is_resource_exhaustion_error(error):
     if error is None:
         return False
