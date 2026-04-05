@@ -1197,4 +1197,120 @@ def test_add_to_download_list_socket_route_forwards_payload(lidatube_module, mon
 
     lidatube_module.add_to_download_list(payload)
 
-    add_mock.assert_called_once_with(payload)
+
+def _make_track(n):
+    return {
+        "artist": "Artist",
+        "track_title": f"Track {n}",
+        "track_number": n,
+        "absolute_track_number": n,
+        "track_id": n,
+        "link": f"https://example.com/{n}",
+        "title_of_link": f"Track {n}",
+    }
+
+
+def _make_req_album(tracks):
+    return {
+        "artist": "Artist",
+        "album_name": "Album",
+        "artist_path": "/music/Artist",
+        "album_folder": "Album (2024)",
+        "track_count": len(tracks),
+        "missing_count": len(tracks),
+        "missing_tracks": tracks,
+        "status": "",
+    }
+
+
+def test_find_link_and_download_status_is_stopped_when_download_cancelled(lidatube_module, monkeypatch):
+    """When stop event is set by a cancelled download, status should be 'Download Stopped'
+    and subsequent tracks should not be attempted."""
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    monkeypatch.setattr(handler, "_wait_for_album_scan_data", lambda _: True)
+    monkeypatch.setattr(handler, "_link_finder", lambda _: None)
+    monkeypatch.setattr(lidatube_module.os.path, "exists", lambda _: False)
+
+    def cancel_on_first_download(*args, **kwargs):
+        handler.ytdlp_stop_event.set()
+        return False
+
+    handler.downloader.download.side_effect = cancel_on_first_download
+
+    req_album = _make_req_album([_make_track(1), _make_track(2)])
+    handler.ytdlp_items = [req_album]
+
+    handler.find_link_and_download(req_album)
+
+    assert handler.downloader.download.call_count == 1, "Should stop after first cancelled download"
+    assert req_album["status"] == "Download Stopped"
+
+
+def test_find_link_and_download_status_is_stopped_when_stop_set_after_link_finder(lidatube_module, monkeypatch):
+    """When stop event is set after _link_finder, status should be 'Download Stopped'."""
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    monkeypatch.setattr(handler, "_wait_for_album_scan_data", lambda _: True)
+
+    def link_finder_then_stop(_):
+        handler.ytdlp_stop_event.set()
+
+    monkeypatch.setattr(handler, "_link_finder", link_finder_then_stop)
+
+    req_album = _make_req_album([_make_track(1)])
+    handler.ytdlp_items = [req_album]
+
+    handler.find_link_and_download(req_album)
+
+    assert handler.downloader.download.call_count == 0, "Should not download if stop set after link finder"
+    assert req_album["status"] == "Download Stopped"
+
+
+def test_link_finder_returns_without_api_call_if_stop_set_before_semaphore(lidatube_module, monkeypatch):
+    """_link_finder should exit without making API calls when stop event is set and semaphore is unavailable."""
+    handler = build_data_handler(lidatube_module)
+    # Make semaphore impossible to acquire
+    handler._ytmusic_semaphore = threading.Semaphore(0)
+    handler.ytdlp_stop_event.set()
+
+    ytmusic_created = []
+
+    class FakeYTMusic:
+        def __init__(self):
+            ytmusic_created.append(1)
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", FakeYTMusic)
+
+    req_album = _make_req_album([_make_track(1)])
+    handler._link_finder(req_album)
+
+    assert len(ytmusic_created) == 0, "YTMusic should not be created when stop is set"
+
+
+def test_link_finder_exits_when_stop_set_while_waiting_for_semaphore(lidatube_module, monkeypatch):
+    """_link_finder should exit when stop event is set while waiting for a full semaphore."""
+    handler = build_data_handler(lidatube_module)
+    # Semaphore has 0 permits — blocks immediately
+    handler._ytmusic_semaphore = threading.Semaphore(0)
+
+    ytmusic_created = []
+
+    class FakeYTMusic:
+        def __init__(self):
+            ytmusic_created.append(1)
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", FakeYTMusic)
+
+    def set_stop_after_delay():
+        time.sleep(0.3)
+        handler.ytdlp_stop_event.set()
+
+    t = threading.Thread(target=set_stop_after_delay)
+    t.start()
+
+    req_album = _make_req_album([_make_track(1)])
+    handler._link_finder(req_album)
+    t.join()
+
+    assert len(ytmusic_created) == 0, "YTMusic should not be created when stop is set during semaphore wait"

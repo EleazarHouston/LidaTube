@@ -629,6 +629,7 @@ class DataHandler:
 
             self._link_finder(req_album)
             if self.ytdlp_stop_event.is_set():
+                req_album["status"] = "Download Stopped"
                 return
 
             req_album["status"] = "Starting Download"
@@ -642,7 +643,7 @@ class DataHandler:
 
             for song in song_links:
                 if self.ytdlp_stop_event.is_set():
-                    return
+                    break
 
                 title = song["title_of_link"]
                 link = song["link"]
@@ -668,9 +669,11 @@ class DataHandler:
                             )
                         self.ytdlp_stop_event.wait(self.config.sleep_interval)
                         if self.ytdlp_stop_event.is_set():
-                            return
+                            break
                     else:
                         error_count += 1
+                        if self.ytdlp_stop_event.is_set():
+                            break
 
                 song_processed_count = grabbed_count + error_count + existing_count
                 req_album["status"] = f"Processed: {song_processed_count} of {total_req}"
@@ -895,8 +898,12 @@ class DataHandler:
             cleaned_album = _general.string_cleaner(album_name).lower()
 
             self._wait_if_fd_pressure()
-            self._ytmusic_semaphore.acquire()
-            semaphore_acquired = True
+            while not self.ytdlp_stop_event.is_set():
+                if self._ytmusic_semaphore.acquire(timeout=0.5):
+                    semaphore_acquired = True
+                    break
+            if not semaphore_acquired:
+                return
             ytmusic = YTMusic()
 
             if number_tracks_in_album == number_of_missing_tracks:
