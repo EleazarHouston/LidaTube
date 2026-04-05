@@ -52,7 +52,7 @@ def test_ydl_opts_includes_embed_thumbnail_postprocessor(dl):
 
 def test_ydl_opts_sets_bestaudio_format(dl):
     opts = dl._get_ydl_opts("file", "/tmp")
-    assert opts["format"] == "bestaudio"
+    assert opts["format"] == "bestaudio/best"
 
 
 def test_ydl_opts_sets_output_template(dl):

@@ -56,7 +56,7 @@ class Downloader:
         opts = {
             "logger": self.logger,
             "ffmpeg_location": "/usr/bin/ffmpeg",
-            "format": "bestaudio",
+            "format": "bestaudio/best",
             "socket_timeout": 30,
             "outtmpl": f"{file_name}.%(ext)s",
             "paths": {"home": self.config.download_folder, "temp": temp_dir},
