@@ -207,6 +207,18 @@ def test_is_rate_limit_error_bot_confirmation_case_insensitive():
     assert is_rate_limit_error(Exception("SIGN IN TO CONFIRM YOU'RE NOT A BOT")) is True
 
 
+def test_is_rate_limit_error_detects_http_429():
+    err = Exception(
+        "ERROR: [youtube] Unable to download webpage: "
+        "HTTP Error 429: Too Many Requests (caused by <HTTPError 429: Too Many Requests>)"
+    )
+    assert is_rate_limit_error(err) is True
+
+
+def test_is_rate_limit_error_detects_429_case_insensitive():
+    assert is_rate_limit_error(Exception("http error 429: too many requests")) is True
+
+
 # --- is_unavailable_error ---
 
 

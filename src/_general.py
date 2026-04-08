@@ -63,7 +63,7 @@ def is_rate_limit_error(error):
     if error is None:
         return False
     msg = str(error).lower()
-    return "rate-limited" in msg or "sign in to confirm" in msg
+    return "rate-limited" in msg or "sign in to confirm" in msg or "429" in msg or "too many requests" in msg
 
 
 def is_unavailable_error(error):
