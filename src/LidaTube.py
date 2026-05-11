@@ -175,6 +175,10 @@ class DataHandler:
         ]
         socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": slim_items, "scan_progress": self.lidarr_scan_progress})
 
+    def _emit_lidarr_progress(self):
+        """Emit only scan progress stats — no data array. Use during tight loops to avoid O(n²) socket traffic."""
+        socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": None, "scan_progress": self.lidarr_scan_progress})
+
     def _emit_ytdlp_update(self):
         socketio.emit("ytdlp_update", {"status": self.ytdlp_status, "data": self.ytdlp_items, "percent_completion": self.percent_completion})
 
@@ -350,7 +354,8 @@ class DataHandler:
                     albums_processed += 1
                     percent = int((albums_processed / total_albums) * 100) if total_albums else 100
                     self._set_lidarr_scan_progress(phase="Fetching missing tracks", albums_processed=albums_processed, percent=percent)
-                    self._emit_lidarr_update()
+                    self._emit_lidarr_progress()
+                self._emit_lidarr_update()
 
             self.lidarr_status = "stopped" if self.lidarr_stop_event.is_set() else "complete"
             if self.lidarr_status == "complete":

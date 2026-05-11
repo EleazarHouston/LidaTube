@@ -356,6 +356,11 @@ socket.on('lidarr_update', (response) => {
     const scan_progress = response.scan_progress || {};
     update_lidarr_progress_bar(status, scan_progress);
 
+    if (response.data === null || response.data === undefined) {
+        set_lidarr_button_states(status, lidarr_table.rows.length);
+        return;
+    }
+
     const items = Array.isArray(response.data) ? response.data : [];
     lidarr_table.innerHTML = '';
 
