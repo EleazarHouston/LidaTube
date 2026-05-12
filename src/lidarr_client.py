@@ -22,9 +22,13 @@ class LidarrClient:
             self._local.session = session
         return self._local.session
 
-    def get_all_artists(self):
+    def get_artists_page(self, page, page_size=1000):
         endpoint = f"{self.config.lidarr_address}/api/v1/artist"
-        params = {"apikey": self.config.lidarr_api_key}
+        params = {
+            "apikey": self.config.lidarr_api_key,
+            "page": page,
+            "pageSize": page_size,
+        }
         return self.session.get(endpoint, params=params, timeout=self.config.lidarr_api_timeout)
 
     def get_wanted_albums(self, page, page_size=1000):

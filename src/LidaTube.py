@@ -243,16 +243,30 @@ class DataHandler:
             )
             self._emit_lidarr_update()
 
-            self.general_logger.warning("Pre-fetching all artists from Lidarr")
+            self.general_logger.warning("Pre-fetching artists from Lidarr")
             self._set_lidarr_scan_progress(phase="Fetching artists")
             self._emit_lidarr_update()
-            artist_response = self.lidarr_client.get_all_artists()
-            try:
-                if artist_response.status_code != 200:
-                    raise RuntimeError(f"Lidarr artist API error {artist_response.status_code}: {artist_response.text}")
-                artist_lookup = {a["id"]: a for a in artist_response.json()}
-            finally:
-                artist_response.close()
+            artist_lookup = {}
+            artist_page = 1
+            while True:
+                response = self.lidarr_client.get_artists_page(artist_page)
+                try:
+                    if response.status_code != 200:
+                        raise RuntimeError(f"Lidarr artist API error {response.status_code}: {response.text}")
+                    data = response.json()
+                finally:
+                    response.close()
+                # Lidarr may return a flat array or a paginated object depending on version
+                if isinstance(data, list):
+                    for a in data:
+                        artist_lookup[a["id"]] = a
+                    break
+                records = data.get("records", [])
+                if not records:
+                    break
+                for a in records:
+                    artist_lookup[a["id"]] = a
+                artist_page += 1
             self.general_logger.warning(f"Fetched {len(artist_lookup)} artists")
 
             page = 1

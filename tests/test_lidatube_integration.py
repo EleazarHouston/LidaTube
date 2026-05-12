@@ -81,7 +81,7 @@ def build_data_handler(module):
 
     # LidarrClient mock
     handler.lidarr_client = Mock()
-    handler.lidarr_client.get_all_artists.return_value = FakeResponse(200, [])
+    handler.lidarr_client.get_artists_page.return_value = FakeResponse(200, [])
     handler.downloader = Mock()
 
     return handler
@@ -229,7 +229,7 @@ def test_get_wanted_albums_from_lidarr_populates_missing_tracks(lidatube_module,
     def fake_get_tracks(album_id):
         return FakeResponse(200, tracks_by_album[album_id])
 
-    handler.lidarr_client.get_all_artists.return_value = FakeResponse(200, [
+    handler.lidarr_client.get_artists_page.return_value = FakeResponse(200, [
         {"id": 10, "artistName": "Alpha", "path": "/music/Alpha"},
         {"id": 20, "artistName": "Zulu", "path": "/music/Zulu"},
     ])
@@ -526,7 +526,7 @@ def test_cache_saved_after_each_page(lidatube_module, monkeypatch):
     def fake_get_wanted(page, page_size=2000):
         return FakeResponse(200, {"records": page_one_records if page == 1 else []})
 
-    handler.lidarr_client.get_all_artists.return_value = FakeResponse(200, [
+    handler.lidarr_client.get_artists_page.return_value = FakeResponse(200, [
         {"id": 1, "artistName": "Artist A", "path": "/music/A"},
     ])
     handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
@@ -812,19 +812,73 @@ def test_get_wanted_albums_handles_non_200_and_emits_toast(lidatube_module, monk
     assert handler.lidarr_status == "complete"
 
 
-def test_get_all_artists_failure_sets_error_status(lidatube_module, monkeypatch):
-    """A non-200 from get_all_artists aborts the scan and sets status to error."""
+def test_artist_prefetch_failure_sets_error_status(lidatube_module, monkeypatch):
+    """Non-200 from get_artists_page aborts the scan and sets status to error."""
     handler = build_data_handler(lidatube_module)
     emit_mock = Mock()
     monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
 
-    handler.lidarr_client.get_all_artists.return_value = FakeResponse(503, None, "Service unavailable")
+    handler.lidarr_client.get_artists_page.return_value = FakeResponse(503, None, "Service unavailable")
 
     handler.get_wanted_albums_from_lidarr()
 
     assert handler.lidarr_status == "error"
     assert handler.lidarr_items == []
     assert any(call.args[0] == "new_toast_msg" for call in emit_mock.call_args_list)
+
+
+def test_artist_prefetch_paginated_response(lidatube_module, monkeypatch):
+    """Artist endpoint returning paginated records object is handled correctly."""
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+
+    pages = {
+        1: {"records": [{"id": 1, "artistName": "Artist A", "path": "/music/A"}]},
+        2: {"records": []},
+    }
+    handler.lidarr_client.get_artists_page.side_effect = lambda page, page_size=1000: FakeResponse(200, pages[page])
+    handler.lidarr_client.get_wanted_albums.return_value = FakeResponse(200, {"records": []})
+
+    handler.get_wanted_albums_from_lidarr()
+
+    assert handler.lidarr_status == "complete"
+    handler.lidarr_client.get_artists_page.assert_called_with(2)
+
+
+def test_artist_prefetch_flat_array_response(lidatube_module, monkeypatch):
+    """Artist endpoint returning a flat array (non-paginated Lidarr builds) is handled correctly."""
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+
+    handler.lidarr_client.get_artists_page.return_value = FakeResponse(200, [
+        {"id": 5, "artistName": "Flat Artist", "path": "/music/flat"},
+    ])
+    handler.lidarr_client.get_wanted_albums.return_value = FakeResponse(200, {"records": [
+        {
+            "id": 99,
+            "title": "Flat Album",
+            "releaseDate": "2020-01-01T00:00:00Z",
+            "genres": [],
+            "artistId": 5,
+            "releases": [{"id": 999}],
+        }
+    ]})
+    handler.lidarr_client.get_tracks_for_album.return_value = FakeResponse(200, [])
+
+    def fake_get_wanted(page, page_size=1000):
+        return FakeResponse(200, {"records": [
+            {"id": 99, "title": "Flat Album", "releaseDate": "2020-01-01T00:00:00Z",
+             "genres": [], "artistId": 5, "releases": [{"id": 999}]}
+        ] if page == 1 else []})
+
+    handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
+
+    handler.get_wanted_albums_from_lidarr()
+
+    # Flat array: get_artists_page should only be called once (no further pages)
+    assert handler.lidarr_client.get_artists_page.call_count == 1
+    assert handler.lidarr_items[0]["artist"] == "Flat Artist"
+    assert handler.lidarr_items[0]["artist_path"] == "/music/flat"
 
 
 def test_get_missing_tracks_retries_after_fd_exhaustion(lidatube_module, monkeypatch):
