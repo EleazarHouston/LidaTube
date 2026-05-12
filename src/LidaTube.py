@@ -243,8 +243,20 @@ class DataHandler:
             )
             self._emit_lidarr_update()
 
+            self.general_logger.warning("Pre-fetching all artists from Lidarr")
+            self._set_lidarr_scan_progress(phase="Fetching artists")
+            self._emit_lidarr_update()
+            artist_response = self.lidarr_client.get_all_artists()
+            try:
+                if artist_response.status_code != 200:
+                    raise RuntimeError(f"Lidarr artist API error {artist_response.status_code}: {artist_response.text}")
+                artist_lookup = {a["id"]: a for a in artist_response.json()}
+            finally:
+                artist_response.close()
+            self.general_logger.warning(f"Fetched {len(artist_lookup)} artists")
+
             page = 1
-            page_size = 2000
+            page_size = 1000
             scan_worker_count = max(1, int(self.config.lidarr_scan_thread_limit))
             self.general_logger.warning(f"Fetching wanted albums (pageSize={page_size}) and missing tracks with {scan_worker_count} worker(s)")
 
@@ -277,16 +289,17 @@ class DataHandler:
                     for album in albums_on_page:
                         if self.lidarr_stop_event.is_set():
                             break
+                        artist = artist_lookup.get(album["artistId"], {})
                         parsed_date = datetime.fromisoformat(album["releaseDate"].replace("Z", "+00:00"))
                         album_year = parsed_date.year
                         album_name = _general.convert_to_lidarr_format(album["title"])
                         album_folder = f"{album_name} ({album_year})"
-                        album_full_path = os.path.join(album["artist"]["path"], album_folder)
+                        album_full_path = os.path.join(artist.get("path", ""), album_folder)
                         album_release_id = album["releases"][0]["id"]
                         new_item = {
                             "artist_id": album["artistId"],
-                            "artist_path": album["artist"]["path"],
-                            "artist": album["artist"]["artistName"],
+                            "artist_path": artist.get("path", ""),
+                            "artist": artist.get("artistName", ""),
                             "album_name": album_name,
                             "album_folder": album_folder,
                             "album_full_path": album_full_path,

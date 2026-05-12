@@ -81,6 +81,7 @@ def build_data_handler(module):
 
     # LidarrClient mock
     handler.lidarr_client = Mock()
+    handler.lidarr_client.get_all_artists.return_value = FakeResponse(200, [])
     handler.downloader = Mock()
 
     return handler
@@ -228,6 +229,10 @@ def test_get_wanted_albums_from_lidarr_populates_missing_tracks(lidatube_module,
     def fake_get_tracks(album_id):
         return FakeResponse(200, tracks_by_album[album_id])
 
+    handler.lidarr_client.get_all_artists.return_value = FakeResponse(200, [
+        {"id": 10, "artistName": "Alpha", "path": "/music/Alpha"},
+        {"id": 20, "artistName": "Zulu", "path": "/music/Zulu"},
+    ])
     handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
     handler.lidarr_client.get_tracks_for_album.side_effect = fake_get_tracks
 
@@ -521,6 +526,9 @@ def test_cache_saved_after_each_page(lidatube_module, monkeypatch):
     def fake_get_wanted(page, page_size=2000):
         return FakeResponse(200, {"records": page_one_records if page == 1 else []})
 
+    handler.lidarr_client.get_all_artists.return_value = FakeResponse(200, [
+        {"id": 1, "artistName": "Artist A", "path": "/music/A"},
+    ])
     handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
     handler.lidarr_client.get_tracks_for_album.return_value = FakeResponse(200, [])
 
@@ -802,6 +810,21 @@ def test_get_wanted_albums_handles_non_200_and_emits_toast(lidatube_module, monk
     assert close_called == [1]
     assert any(call.args[0] == "new_toast_msg" for call in emit_mock.call_args_list)
     assert handler.lidarr_status == "complete"
+
+
+def test_get_all_artists_failure_sets_error_status(lidatube_module, monkeypatch):
+    """A non-200 from get_all_artists aborts the scan and sets status to error."""
+    handler = build_data_handler(lidatube_module)
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+
+    handler.lidarr_client.get_all_artists.return_value = FakeResponse(503, None, "Service unavailable")
+
+    handler.get_wanted_albums_from_lidarr()
+
+    assert handler.lidarr_status == "error"
+    assert handler.lidarr_items == []
+    assert any(call.args[0] == "new_toast_msg" for call in emit_mock.call_args_list)
 
 
 def test_get_missing_tracks_retries_after_fd_exhaustion(lidatube_module, monkeypatch):
