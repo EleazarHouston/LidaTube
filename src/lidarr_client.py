@@ -29,7 +29,10 @@ class LidarrClient:
             "page": page,
             "pageSize": page_size,
         }
-        return self.session.get(endpoint, params=params, timeout=self.config.lidarr_api_timeout)
+        # This endpoint returns all artists in one shot regardless of pageSize;
+        # large libraries need more time than the standard per-request timeout.
+        timeout = max(self.config.lidarr_api_timeout, 600)
+        return self.session.get(endpoint, params=params, timeout=timeout)
 
     def get_wanted_albums(self, page, page_size=1000):
         endpoint = f"{self.config.lidarr_address}/api/v1/wanted/missing"

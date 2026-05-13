@@ -19,6 +19,8 @@ from downloader import Downloader
 
 
 class DataHandler:
+    _ARTIST_RETRY_WAIT = 10  # seconds per attempt; override in tests
+
     def __init__(self):
         logging.basicConfig(level=logging.WARNING, format="%(message)s")
         self.general_logger = logging.getLogger()
@@ -248,14 +250,28 @@ class DataHandler:
             self._emit_lidarr_update()
             artist_lookup = {}
             artist_page = 1
+            artist_max_retries = 3
             while True:
-                response = self.lidarr_client.get_artists_page(artist_page)
-                try:
-                    if response.status_code != 200:
-                        raise RuntimeError(f"Lidarr artist API error {response.status_code}: {response.text}")
-                    data = response.json()
-                finally:
-                    response.close()
+                last_error = None
+                for attempt in range(artist_max_retries):
+                    try:
+                        response = self.lidarr_client.get_artists_page(artist_page)
+                        try:
+                            if response.status_code != 200:
+                                raise RuntimeError(f"Lidarr artist API error {response.status_code}: {response.text}")
+                            data = response.json()
+                        finally:
+                            response.close()
+                        last_error = None
+                        break
+                    except Exception as e:
+                        last_error = e
+                        wait = self._ARTIST_RETRY_WAIT * (attempt + 1)
+                        self.general_logger.warning(f"Artist fetch attempt {attempt + 1}/{artist_max_retries} failed: {e} — retrying in {wait}s")
+                        socketio.emit("new_toast_msg", {"title": f"Artist fetch retry {attempt + 1}/{artist_max_retries}", "message": str(e)})
+                        self._interruptible_sleep(wait)
+                if last_error:
+                    raise last_error
                 # Lidarr may return a flat array or a paginated object depending on version
                 if isinstance(data, list):
                     for a in data:
@@ -868,6 +884,10 @@ class DataHandler:
             self.general_logger.warning("FD back-off cleared — resuming")
         finally:
             lock.release()
+
+    def _interruptible_sleep(self, seconds):
+        """Sleep for up to `seconds`, returning early if the lidarr stop event fires."""
+        self.lidarr_stop_event.wait(timeout=seconds)
 
     def _wait_if_fd_pressure(self):
         """Block while FD back-off is active, then proceed."""

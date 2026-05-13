@@ -812,9 +812,49 @@ def test_get_wanted_albums_handles_non_200_and_emits_toast(lidatube_module, monk
     assert handler.lidarr_status == "complete"
 
 
+def test_artist_prefetch_retries_then_succeeds(lidatube_module, monkeypatch):
+    """Artist fetch retries on failure and succeeds before exhausting attempts."""
+    handler = build_data_handler(lidatube_module)
+    handler._ARTIST_RETRY_WAIT = 0
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+
+    attempts = []
+
+    def fake_get_artists(page, page_size=1000):
+        attempts.append(page)
+        if len(attempts) < 2:
+            raise ConnectionError("timeout")
+        return FakeResponse(200, [{"id": 1, "artistName": "Artist A", "path": "/music/A"}])
+
+    handler.lidarr_client.get_artists_page.side_effect = fake_get_artists
+    handler.lidarr_client.get_wanted_albums.return_value = FakeResponse(200, {"records": []})
+
+    handler.get_wanted_albums_from_lidarr()
+
+    assert handler.lidarr_status == "complete"
+    assert len(attempts) == 2
+    assert len(handler.lidarr_items) == 0
+
+
+def test_artist_prefetch_exhausts_retries_sets_error(lidatube_module, monkeypatch):
+    """Artist fetch sets error status after all retry attempts fail."""
+    handler = build_data_handler(lidatube_module)
+    handler._ARTIST_RETRY_WAIT = 0
+    emit_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+
+    handler.lidarr_client.get_artists_page.side_effect = ConnectionError("timeout")
+
+    handler.get_wanted_albums_from_lidarr()
+
+    assert handler.lidarr_status == "error"
+    assert handler.lidarr_client.get_artists_page.call_count == 3
+
+
 def test_artist_prefetch_failure_sets_error_status(lidatube_module, monkeypatch):
     """Non-200 from get_artists_page aborts the scan and sets status to error."""
     handler = build_data_handler(lidatube_module)
+    handler._ARTIST_RETRY_WAIT = 0
     emit_mock = Mock()
     monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
 
