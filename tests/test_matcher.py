@@ -126,6 +126,7 @@ def test_song_matcher_yt_returns_best_title_match():
 
     match = _matcher.song_matcher_yt(
         minimum_match_ratio=70,
+        artist="Target Artist",
         query_text="Target Artist - Track One",
         search_results=search_results,
     )
@@ -135,29 +136,30 @@ def test_song_matcher_yt_returns_best_title_match():
 
 
 def test_song_matcher_yt_returns_none_for_empty_results():
-    assert _matcher.song_matcher_yt(50, "any query", []) is None
+    assert _matcher.song_matcher_yt(50, "Some Artist", "any query", []) is None
 
 
 def test_song_matcher_yt_regression_uses_combined_rating_not_raw_title(monkeypatch):
     # Regression for a prior bug where best_match_rating tracked title_similarity.
     # In that case, a high raw-title score from an earlier item could block a later
     # item with a better combined score.
-    query_text = "query"
+    artist = "Test Artist"
+    query_text = "Test Artist - query"
     search_results = [
-        {"title": "first", "link": "https://first"},
-        {"title": "second", "link": "https://second"},
+        {"title": "Test Artist - first", "link": "https://first"},
+        {"title": "Test Artist - second", "link": "https://second"},
     ]
 
     monkeypatch.setattr(_matcher._general, "string_cleaner", lambda value: f"clean:{value}")
     monkeypatch.setattr(_matcher, "remove_song_keywords", lambda value: f"trim:{value}")
 
     score_map = {
-        ("query", "first"): 99,
-        ("clean:query", "clean:first"): 30,
-        ("trim:clean:query", "trim:clean:first"): 30,
-        ("query", "second"): 80,
-        ("clean:query", "clean:second"): 90,
-        ("trim:clean:query", "trim:clean:second"): 90,
+        ("Test Artist - query", "Test Artist - first"): 99,
+        ("clean:Test Artist - query", "clean:Test Artist - first"): 30,
+        ("trim:clean:Test Artist - query", "trim:clean:Test Artist - first"): 30,
+        ("Test Artist - query", "Test Artist - second"): 80,
+        ("clean:Test Artist - query", "clean:Test Artist - second"): 90,
+        ("trim:clean:Test Artist - query", "trim:clean:Test Artist - second"): 90,
     }
 
     def fake_ratio(left, right):
@@ -167,12 +169,322 @@ def test_song_matcher_yt_regression_uses_combined_rating_not_raw_title(monkeypat
 
     match = _matcher.song_matcher_yt(
         minimum_match_ratio=50,
+        artist=artist,
         query_text=query_text,
         search_results=search_results,
     )
 
     assert match is not None
     assert match["link"] == "https://second"
+
+
+# --- song_matcher_yt: artist gate ---
+
+def test_song_matcher_yt_rejects_result_when_artist_absent_from_title():
+    search_results = [
+        {"title": "Heat Waves - Piano Cover", "link": "https://wrong"},
+        {"title": "Glass Animals - Heat Waves", "link": "https://right"},
+    ]
+
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=50,
+        artist="Glass Animals",
+        query_text="Glass Animals - Heat Waves",
+        search_results=search_results,
+    )
+
+    assert match is not None
+    assert match["link"] == "https://right"
+
+
+def test_song_matcher_yt_returns_none_when_all_results_fail_artist_gate():
+    search_results = [
+        {"title": "Heat Waves - Piano Cover", "link": "https://a"},
+        {"title": "Heat Waves (Slowed)", "link": "https://b"},
+    ]
+
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=50,
+        artist="Glass Animals",
+        query_text="Glass Animals - Heat Waves",
+        search_results=search_results,
+    )
+
+    assert match is None
+
+
+def test_song_matcher_yt_artist_gate_is_case_insensitive():
+    # Artist comes from Lidarr in mixed case; YouTube titles may be all-lower.
+    # The gate must normalize both sides before the substring check.
+    search_results = [
+        {"title": "glass animals - heat waves", "link": "https://lowercase_title"},
+    ]
+
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=50,
+        artist="Glass Animals",
+        query_text="Glass Animals - Heat Waves",
+        search_results=search_results,
+    )
+
+    assert match is not None
+    assert match["link"] == "https://lowercase_title"
+
+
+def test_song_matcher_yt_glass_animals_regression():
+    # Regression: secondary search grabbed a non-Glass-Animals video because
+    # song_matcher_yt had no artist gate — only title text was scored.
+    search_results = [
+        {"title": "Heat Waves (Emotional Lo-fi Remix)", "link": "https://wrong_1"},
+        {"title": "Heat Waves Cover - Acoustic", "link": "https://wrong_2"},
+        {"title": "Glass Animals - Heat Waves (Official Video)", "link": "https://correct"},
+    ]
+
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=50,
+        artist="Glass Animals",
+        query_text="Glass Animals - Heat Waves",
+        search_results=search_results,
+    )
+
+    assert match is not None
+    assert match["link"] == "https://correct"
+
+
+# --- duration helpers ---
+
+def test_duration_ok_within_tolerance():
+    assert _matcher._duration_ok(expected_ms=214000, candidate_seconds=220, tolerance_seconds=15)
+
+
+def test_duration_ok_outside_tolerance():
+    assert not _matcher._duration_ok(expected_ms=214000, candidate_seconds=260, tolerance_seconds=15)
+
+
+def test_duration_ok_exactly_at_tolerance_boundary():
+    # 214s expected, 229s candidate → delta == 15 → should pass (<=, not <)
+    assert _matcher._duration_ok(expected_ms=214000, candidate_seconds=229, tolerance_seconds=15)
+
+
+def test_duration_ok_skips_gate_when_expected_unknown():
+    # expected_ms=0 means Lidarr didn't provide duration — never gate
+    assert _matcher._duration_ok(expected_ms=0, candidate_seconds=500, tolerance_seconds=15)
+
+
+def test_duration_ok_skips_gate_when_candidate_unknown():
+    # candidate_seconds=0 means source didn't provide duration — never gate
+    assert _matcher._duration_ok(expected_ms=214000, candidate_seconds=0, tolerance_seconds=15)
+
+
+def test_duration_ok_catches_music_video_length():
+    # Drake God's Plan: song=199s, music video=357s → should reject
+    assert not _matcher._duration_ok(expected_ms=199000, candidate_seconds=357, tolerance_seconds=15)
+
+
+def test_parse_duration_string_mm_ss():
+    assert _matcher._parse_duration_string("3:54") == 234
+
+
+def test_parse_duration_string_hh_mm_ss():
+    assert _matcher._parse_duration_string("1:03:21") == 3801
+
+
+def test_parse_duration_string_single_digit_seconds():
+    assert _matcher._parse_duration_string("4:09") == 249
+
+
+def test_parse_duration_string_empty_string():
+    assert _matcher._parse_duration_string("") == 0
+
+
+def test_parse_duration_string_none():
+    assert _matcher._parse_duration_string(None) == 0
+
+
+def test_parse_duration_string_invalid():
+    assert _matcher._parse_duration_string("abc") == 0
+
+
+# --- song_matcher: duration gate ---
+
+def test_song_matcher_rejects_candidate_with_wrong_duration():
+    # Two Drake songs with the same artist but very different durations.
+    # Only the one matching expected duration should be returned.
+    search_results = [
+        {
+            "resultType": "song",
+            "title": "God's Plan",
+            "videoId": "wrong_duration",
+            "artists": [{"name": "Drake"}],
+            "duration_seconds": 357,  # music video length
+        },
+        {
+            "resultType": "song",
+            "title": "God's Plan",
+            "videoId": "correct",
+            "artists": [{"name": "Drake"}],
+            "duration_seconds": 199,  # actual song length
+        },
+    ]
+
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70,
+        artist="Drake",
+        cleaned_artist="drake",
+        song_title="God's Plan",
+        cleaned_song_title="gods plan",
+        search_results=search_results,
+        expected_duration_ms=199000,
+        duration_tolerance_seconds=15,
+    )
+
+    assert match is not None
+    assert match["videoId"] == "correct"
+
+
+def test_song_matcher_passes_when_lidarr_duration_unknown():
+    # expected_duration_ms=0 — Lidarr didn't supply it; all candidates should still be considered
+    search_results = [
+        {
+            "resultType": "song",
+            "title": "God's Plan",
+            "videoId": "vid",
+            "artists": [{"name": "Drake"}],
+            "duration_seconds": 199,
+        },
+    ]
+
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70,
+        artist="Drake",
+        cleaned_artist="drake",
+        song_title="God's Plan",
+        cleaned_song_title="gods plan",
+        search_results=search_results,
+        expected_duration_ms=0,
+        duration_tolerance_seconds=15,
+    )
+
+    assert match is not None
+
+
+def test_song_matcher_passes_when_candidate_duration_absent():
+    # Candidate has no duration_seconds field — should not be rejected
+    search_results = [
+        {
+            "resultType": "song",
+            "title": "God's Plan",
+            "videoId": "vid",
+            "artists": [{"name": "Drake"}],
+        },
+    ]
+
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70,
+        artist="Drake",
+        cleaned_artist="drake",
+        song_title="God's Plan",
+        cleaned_song_title="gods plan",
+        search_results=search_results,
+        expected_duration_ms=199000,
+        duration_tolerance_seconds=15,
+    )
+
+    assert match is not None
+
+
+def test_song_matcher_drake_regression():
+    # Regression: a different Drake song was grabbed instead of the intended one.
+    # Same artist passes text scoring; duration disambiguates.
+    search_results = [
+        {
+            "resultType": "song",
+            "title": "In My Feelings",
+            "videoId": "wrong_song",
+            "artists": [{"name": "Drake"}],
+            "duration_seconds": 218,
+        },
+        {
+            "resultType": "song",
+            "title": "God's Plan",
+            "videoId": "correct",
+            "artists": [{"name": "Drake"}],
+            "duration_seconds": 199,
+        },
+    ]
+
+    match = _matcher.song_matcher(
+        minimum_match_ratio=50,
+        artist="Drake",
+        cleaned_artist="drake",
+        song_title="God's Plan",
+        cleaned_song_title="gods plan",
+        search_results=search_results,
+        expected_duration_ms=199000,
+        duration_tolerance_seconds=15,
+    )
+
+    assert match is not None
+    assert match["videoId"] == "correct"
+
+
+# --- song_matcher_yt: duration gate ---
+
+def test_song_matcher_yt_rejects_music_video_via_duration():
+    # YTS returns the 5:57 music video first; song is 3:19.
+    # Duration filter must reject the video.
+    search_results = [
+        {"title": "Drake - God's Plan", "link": "https://music_video", "duration": "5:57"},
+        {"title": "Drake - God's Plan", "link": "https://song", "duration": "3:19"},
+    ]
+
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=70,
+        artist="Drake",
+        query_text="Drake - God's Plan",
+        search_results=search_results,
+        expected_duration_ms=199000,
+        duration_tolerance_seconds=15,
+    )
+
+    assert match is not None
+    assert match["link"] == "https://song"
+
+
+def test_song_matcher_yt_accepts_ytdlp_int_duration():
+    # YTDLP returns duration as int seconds (not string)
+    search_results = [
+        {"title": "Drake - God's Plan", "webpage_url": "https://correct", "duration": 199},
+    ]
+
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=70,
+        artist="Drake",
+        query_text="Drake - God's Plan",
+        search_results=search_results,
+        expected_duration_ms=199000,
+        duration_tolerance_seconds=15,
+    )
+
+    assert match is not None
+
+
+def test_song_matcher_yt_passes_when_no_duration_in_result():
+    # Result has no duration field — should not be rejected
+    search_results = [
+        {"title": "Drake - God's Plan", "link": "https://nodur"},
+    ]
+
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=70,
+        artist="Drake",
+        query_text="Drake - God's Plan",
+        search_results=search_results,
+        expected_duration_ms=199000,
+        duration_tolerance_seconds=15,
+    )
+
+    assert match is not None
 
 
 def test_album_matcher_skips_non_album_result_types():

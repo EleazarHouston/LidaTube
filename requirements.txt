@@ -9,4 +9,6 @@ ytmusicapi==1.11.5
 yt_dlp[default]==2026.3.17
 unidecode==1.4.0
 thefuzz==0.22.1
+mutagen==1.47.0
+requests==2.32.5
 

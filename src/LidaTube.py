@@ -456,6 +456,7 @@ class DataHandler:
                                     "track_number": track["trackNumber"],
                                     "absolute_track_number": track["absoluteTrackNumber"],
                                     "track_id": track["id"],
+                                    "duration_ms": track.get("duration", 0),
                                     "link": "",
                                     "title_of_link": "",
                                 }
@@ -920,6 +921,9 @@ class DataHandler:
                 missing_track_title = _general.string_cleaner(missing_track["track_title"])
                 song_title = _general.string_cleaner(track["title"])
                 if fuzz.ratio(song_title, missing_track_title) > 90:
+                    candidate_seconds = track.get("durationSeconds") or 0
+                    if not _matcher._duration_ok(missing_track["duration_ms"], candidate_seconds, self.config.duration_tolerance_seconds):
+                        continue
                     self._set_track_link_from_video_id(missing_track, track["videoId"], track["title"])
                     break
         return False
@@ -1032,7 +1036,8 @@ class DataHandler:
                     cleaned_song_title = _general.string_cleaner(song_title).lower()
                     query_text = f'{missing_track["artist"]} - {song_title}'
                     search_results = ytmusic.search(query=query_text, filter="songs", limit=5)
-                    song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results)
+                    song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
+                                                       expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds)
                     if song_match:
                         self.general_logger.warning(f'Track matched: "{song_title}" -> "{song_match["title"]}"')
                         self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"])
@@ -1058,7 +1063,8 @@ class DataHandler:
                     cleaned_song_title = _general.string_cleaner(song_title).lower()
                     query_text = f'{missing_track["artist"]} - {song_title}'
                     search_results = ytmusic.search(query=query_text, filter="songs", limit=20)
-                    song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results)
+                    song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
+                                                       expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds)
                     if song_match:
                         self.general_logger.warning(f'Secondary YTMusic match: "{song_title}" -> "{song_match["title"]}"')
                         self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"])
@@ -1067,7 +1073,8 @@ class DataHandler:
                         self._set_track_link_from_video_id(missing_track, search_results[0]["videoId"], search_results[0]["title"])
                     else:
                         yt_results = self._yt_search(query_text)
-                        song_match = _matcher.song_matcher_yt(self.config.minimum_match_ratio, query_text, yt_results)
+                        song_match = _matcher.song_matcher_yt(self.config.minimum_match_ratio, artist, query_text, yt_results,
+                                                              expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds)
                         if song_match:
                             if self.config.secondary_search == "YTS":
                                 self.general_logger.warning(f'YTS match: "{song_title}" -> "{song_match["title"]}"')

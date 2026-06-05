@@ -56,6 +56,28 @@ def _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
     return None
 
 
+def _parse_duration_string(duration_str):
+    """Parse 'M:SS' or 'H:MM:SS' duration string to total seconds. Returns 0 on any failure."""
+    if not duration_str:
+        return 0
+    try:
+        parts = [int(p) for p in str(duration_str).strip().split(":")]
+        if len(parts) == 2:
+            return parts[0] * 60 + parts[1]
+        if len(parts) == 3:
+            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    except (ValueError, AttributeError):
+        pass
+    return 0
+
+
+def _duration_ok(expected_ms, candidate_seconds, tolerance_seconds):
+    """True if candidate is within tolerance of expected, or if either side is unknown (0)."""
+    if not expected_ms or not candidate_seconds:
+        return True
+    return abs(candidate_seconds - expected_ms / 1000.0) <= tolerance_seconds
+
+
 def remove_album_keywords(text):
     return _remove_keywords(text, ALBUM_KEYWORDS_TO_REMOVE)
 
@@ -98,7 +120,8 @@ def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, clean
     return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
 
 
-def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results, item_wanted_type="song"):
+def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
+                 item_wanted_type="song", expected_duration_ms=0, duration_tolerance_seconds=15):
     if not search_results:
         return None
     best_match_rating = 0
@@ -107,6 +130,10 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
 
     for item in search_results:
         if item["resultType"] != item_wanted_type:
+            continue
+
+        candidate_seconds = item.get("duration_seconds") or 0
+        if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
             continue
 
         artists_string = "".join([x["name"] for x in item["artists"]])
@@ -136,16 +163,30 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
     return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
 
 
-def song_matcher_yt(minimum_match_ratio, query_text, search_results):
+def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
+                    expected_duration_ms=0, duration_tolerance_seconds=15):
     if not search_results:
         return None
     best_match_rating = 0
     best_match_item = None
     cleaned_query_text = _general.string_cleaner(query_text)
     cleaned_query_text_minus_keywords = remove_song_keywords(cleaned_query_text)
+    cleaned_artist = _general.string_cleaner(artist).lower() if artist else ""
 
     for item in search_results:
         title = item.get("title", "")
+
+        # Artist must appear in the video title — hard gate, not a scoring factor.
+        # Prevents covers, remixes, and unrelated videos from passing on title alone.
+        if cleaned_artist and cleaned_artist not in _general.string_cleaner(title).lower():
+            continue
+
+        # Duration gate: YTS provides "M:SS" strings; YTDLP provides int seconds.
+        raw_duration = item.get("duration", 0)
+        candidate_seconds = _parse_duration_string(raw_duration) if isinstance(raw_duration, str) else int(raw_duration or 0)
+        if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
+            continue
+
         title_similarity = fuzz.ratio(query_text, title)
         if query_text in title:
             title_similarity = 100

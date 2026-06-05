@@ -275,7 +275,7 @@ def test_get_song_links_secondary_uses_yt_search_fallback(lidatube_module, monke
         "artist": "Artist",
         "album_name": "Album",
         "missing_tracks": [
-            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
+            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": "", "duration_ms": 0},
         ],
     }
 
@@ -1226,7 +1226,7 @@ def test_get_song_links_uses_fallback_to_top_result(lidatube_module, monkeypatch
         "artist": "Artist",
         "album_name": "Album",
         "missing_tracks": [
-            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
+            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": "", "duration_ms": 0},
         ],
     }
 
@@ -1256,7 +1256,7 @@ def test_get_song_links_secondary_ytdlp_mode_uses_webpage_url(lidatube_module, m
         "artist": "Artist",
         "album_name": "Album",
         "missing_tracks": [
-            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": ""},
+            {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": "", "duration_ms": 0},
         ],
     }
 

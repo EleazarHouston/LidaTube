@@ -23,6 +23,7 @@ class AppConfig:
         "preferred_codec": "mp3",
         "attempt_lidarr_import": False,
         "lidarr_scan_thread_limit": 16,
+        "duration_tolerance_seconds": 15,
     }
 
     _ENV_CONVERTERS = {
@@ -38,6 +39,7 @@ class AppConfig:
         "preferred_codec": str,
         "attempt_lidarr_import": lambda v: v.lower() == "true",
         "lidarr_scan_thread_limit": int,
+        "duration_tolerance_seconds": int,
     }
 
     def __init__(self, logger=None):
