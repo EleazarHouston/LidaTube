@@ -229,30 +229,82 @@ def walk_library(download_folder):
                 yield os.path.join(root, fname)
 
 
-def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, delete_confirmed, verbose):
+FIELDNAMES = ["path", "artist", "album", "title", "track_number", "actual_s", "expected_s", "delta_s", "verdict"]
+
+
+def _load_existing_results(output_path):
+    """Read an existing CSV and return (already_done_paths, suspects_so_far, ok_count)."""
+    already_done = set()
+    suspects = []
+    ok_count = 0
+    if not (output_path and os.path.exists(output_path)):
+        return already_done, suspects, ok_count
+    with open(output_path, newline="") as f:
+        for row in csv.DictReader(f):
+            already_done.add(row["path"])
+            if row["verdict"] == "SUSPECT":
+                suspects.append({
+                    **row,
+                    "actual_s": float(row["actual_s"]),
+                    "expected_s": float(row["expected_s"]),
+                    "delta_s": float(row["delta_s"]),
+                    "track_number": int(row["track_number"]),
+                })
+            elif row["verdict"] == "OK":
+                ok_count += 1
+    return already_done, suspects, ok_count
+
+
+def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, delete_confirmed):
     session = requests.Session()
     cache = {}
-    results = []
     skipped = 0
+
+    already_done, suspects, ok_count = _load_existing_results(output_path)
+    if already_done:
+        print(f"Resuming: {len(already_done)} files already processed, {len(suspects)} suspects found so far.")
 
     files = list(walk_library(download_folder))
     total = len(files)
-    print(f"Scanning {total} audio files in '{download_folder}'...")
+    remaining = [p for p in files if p not in already_done]
+    start_index = len(already_done)
+    print(f"Scanning {len(remaining)} files ({start_index} already done, {total} total) in '{download_folder}'...")
 
-    for i, path in enumerate(files, 1):
-        if i % 50 == 0 or i == total:
-            print(f"  {i}/{total} scanned, {len([r for r in results if r['verdict'] == 'SUSPECT'])} suspects so far...")
-        result = audit_file(path, session, lidarr_url, api_key, tolerance=tolerance, _cache=cache)
-        if result is None:
-            skipped += 1
-        else:
-            results.append(result)
+    csv_file = None
+    csv_writer = None
+    if output_path:
+        is_new = not already_done
+        csv_file = open(output_path, "w" if is_new else "a", newline="")
+        csv_writer = csv.DictWriter(csv_file, fieldnames=FIELDNAMES)
+        if is_new:
+            csv_writer.writeheader()
+            csv_file.flush()
 
-    suspects = [r for r in results if r["verdict"] == "SUSPECT"]
-    ok = [r for r in results if r["verdict"] == "OK"]
+    try:
+        for i, path in enumerate(remaining, start_index + 1):
+            if i % 50 == 0 or i == total:
+                print(f"  {i}/{total} scanned, {len(suspects)} suspects so far...", flush=True)
+
+            result = audit_file(path, session, lidarr_url, api_key, tolerance=tolerance, _cache=cache)
+            if result is None:
+                skipped += 1
+            else:
+                if csv_writer:
+                    csv_writer.writerow(result)
+                    csv_file.flush()
+                if result["verdict"] == "SUSPECT":
+                    suspects.append(result)
+                else:
+                    ok_count += 1
+    finally:
+        if csv_file:
+            csv_file.close()
+
     suspects.sort(key=lambda r: r["delta_s"], reverse=True)
 
-    print(f"\nResults: {len(suspects)} SUSPECT, {len(ok)} OK, {skipped} skipped (no Lidarr match or unknown duration)")
+    print(f"\nResults: {len(suspects)} SUSPECT, {ok_count} OK, {skipped} skipped (no Lidarr match or unknown duration)")
+    if output_path:
+        print(f"Full results in {output_path}")
     print()
 
     if suspects:
@@ -260,19 +312,6 @@ def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, dele
         print("-" * 80)
         for r in suspects:
             print(f"{r['delta_s']:>7.1f}s  {r['expected_s']:>8.1f}s  {r['actual_s']:>6.1f}s  {r['path']}")
-
-    if verbose and ok:
-        print("\nOK files:")
-        for r in ok:
-            print(f"  delta={r['delta_s']:.1f}s  {r['path']}")
-
-    if output_path:
-        with open(output_path, "w", newline="") as f:
-            fieldnames = ["path", "artist", "album", "title", "track_number", "actual_s", "expected_s", "delta_s", "verdict"]
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(results)
-        print(f"\nResults written to {output_path}")
 
     if delete_confirmed and suspects:
         # Extra safety: only offer deletion for files >60s off regardless of --tolerance
@@ -302,7 +341,6 @@ def main():
     parser.add_argument("--tolerance", type=int, default=15, help="Seconds of allowed deviation (default: 15)")
     parser.add_argument("--output", help="Write CSV report to this path")
     parser.add_argument("--delete-confirmed", action="store_true", help="Offer to delete files with delta > 60s")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Also list OK files")
     args = parser.parse_args()
 
     run_audit(
@@ -312,7 +350,6 @@ def main():
         tolerance=args.tolerance,
         output_path=args.output,
         delete_confirmed=args.delete_confirmed,
-        verbose=args.verbose,
     )
 
 
