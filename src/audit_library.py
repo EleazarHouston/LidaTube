@@ -19,6 +19,8 @@ import csv
 import os
 import sys
 
+import time
+
 import requests
 from mutagen.flac import FLAC
 from mutagen.id3 import ID3
@@ -113,39 +115,54 @@ def find_track_in_lidarr(tracks, track_number, title):
 
 
 def _get_json(session, url, params, timeout=120):
-    resp = session.get(url, params=params, timeout=timeout)
-    if resp.status_code == 200:
-        return resp.json()
-    return None
+    """GET JSON with automatic retry on transient connection errors."""
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = session.get(url, params=params, timeout=timeout)
+            if resp.status_code == 200:
+                return resp.json()
+            return None
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(2 ** attempt)  # 1s, then 2s, then raise
+    raise last_err
 
 
-def _find_artist_id(session, lidarr_url, api_key, artist_name):
-    data = _get_json(session, f"{lidarr_url}/api/v1/artist", {"apikey": api_key}, timeout=240)
-    if not data:
-        return None
+def _preload_artists(session, lidarr_url, api_key):
+    """Fetch all artists once and return {name_lower: id} map."""
+    data = _get_json(session, f"{lidarr_url}/api/v1/artist", {"apikey": api_key}, timeout=240) or []
+    return {a.get("artistName", "").lower(): a["id"] for a in data}
+
+
+def _resolve_artist_id(artist_name, artist_map):
+    """Look up artist id in pre-loaded map with fuzzy fallback."""
     cleaned = artist_name.lower()
-    for a in data:
-        if a.get("artistName", "").lower() == cleaned:
-            return a["id"]
-    # Fuzzy fallback
+    if cleaned in artist_map:
+        return artist_map[cleaned]
     best_score, best_id = 0, None
-    for a in data:
-        score = fuzz.ratio(cleaned, a.get("artistName", "").lower())
+    for name, aid in artist_map.items():
+        score = fuzz.ratio(cleaned, name)
         if score > best_score:
-            best_score, best_id = score, a["id"]
+            best_score, best_id = score, aid
     return best_id if best_score >= 80 else None
 
 
-def _find_album_id(session, lidarr_url, api_key, artist_id, album_name):
-    data = _get_json(session, f"{lidarr_url}/api/v1/album", {"apikey": api_key, "artistId": artist_id}, timeout=240)
-    if not data:
-        return None
+def _get_album_id(session, lidarr_url, api_key, artist_id, album_name, album_cache):
+    """Find album id, caching the full album list per artist so repeated albums don't re-fetch."""
+    if artist_id not in album_cache:
+        data = _get_json(session, f"{lidarr_url}/api/v1/album", {"apikey": api_key, "artistId": artist_id}, timeout=240) or []
+        album_cache[artist_id] = {a.get("title", "").lower(): a["id"] for a in data}
+    albums = album_cache[artist_id]
     cleaned = album_name.lower()
+    if cleaned in albums:
+        return albums[cleaned]
     best_score, best_id = 0, None
-    for a in data:
-        score = fuzz.ratio(cleaned, a.get("title", "").lower())
+    for name, aid in albums.items():
+        score = fuzz.ratio(cleaned, name)
         if score > best_score:
-            best_score, best_id = score, a["id"]
+            best_score, best_id = score, aid
     return best_id if best_score >= 80 else None
 
 
@@ -182,11 +199,15 @@ def audit_file(path, session, lidarr_url, api_key, tolerance=15, _cache=None):
 
     cache_key = (artist_name.lower(), album_name.lower())
     if cache_key not in _cache:
-        artist_id = _find_artist_id(session, lidarr_url, api_key, artist_name)
+        if "__artists__" not in _cache:
+            _cache["__artists__"] = _preload_artists(session, lidarr_url, api_key)
+
+        artist_id = _resolve_artist_id(artist_name, _cache["__artists__"])
         if artist_id is None:
             _cache[cache_key] = []
         else:
-            album_id = _find_album_id(session, lidarr_url, api_key, artist_id, album_name)
+            album_cache = _cache.setdefault("__albums__", {})
+            album_id = _get_album_id(session, lidarr_url, api_key, artist_id, album_name, album_cache)
             if album_id is None:
                 _cache[cache_key] = []
             else:
@@ -263,6 +284,14 @@ def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, dele
     already_done, suspects, ok_count = _load_existing_results(output_path)
     if already_done:
         print(f"Resuming: {len(already_done)} files already processed, {len(suspects)} suspects found so far.")
+
+    print("Pre-loading artist list from Lidarr...")
+    try:
+        cache["__artists__"] = _preload_artists(session, lidarr_url, api_key)
+        print(f"  {len(cache['__artists__'])} artists loaded.")
+    except Exception as e:
+        print(f"  Warning: could not pre-load artists ({e}), will fetch on demand.")
+        cache["__artists__"] = {}
 
     files = list(walk_library(download_folder))
     total = len(files)
