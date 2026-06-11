@@ -1,3 +1,4 @@
+import json
 import sys
 import os
 import pytest
@@ -278,3 +279,62 @@ def test_glass_animals_regression_flagged_as_suspect(tmp_path):
 
     assert result is not None
     assert result["verdict"] == "SUSPECT"
+
+
+# ---------------------------------------------------------------------------
+# Cache persistence
+# ---------------------------------------------------------------------------
+
+def _make_sample_cache():
+    return {
+        "__albums__": {1: {"scorpion": 10}, 2: {"dreamland": 20}},
+        ("drake", "scorpion"): [
+            {"trackNumber": 1, "title": "God's Plan", "duration": 199000, "extra_field": "ignored"},
+        ],
+        ("glass animals", "dreamland"): [
+            {"trackNumber": 8, "title": "Heat Waves", "duration": 238000},
+        ],
+    }
+
+
+def test_save_and_load_lidarr_cache_roundtrip(tmp_path):
+    cache_path = str(tmp_path / "lidarr_cache.json")
+    cache = _make_sample_cache()
+    audit_library._save_lidarr_cache(cache, cache_path)
+    assert os.path.exists(cache_path)
+
+    loaded = audit_library._load_lidarr_cache(cache_path)
+    assert loaded["__albums__"] == {1: {"scorpion": 10}, 2: {"dreamland": 20}}
+    assert ("drake", "scorpion") in loaded
+    assert loaded[("drake", "scorpion")][0]["title"] == "God's Plan"
+    assert loaded[("drake", "scorpion")][0]["duration"] == 199000
+    assert ("glass animals", "dreamland") in loaded
+
+
+def test_save_lidarr_cache_slims_extra_fields(tmp_path):
+    cache_path = str(tmp_path / "lidarr_cache.json")
+    audit_library._save_lidarr_cache(_make_sample_cache(), cache_path)
+    with open(cache_path) as f:
+        raw = json.load(f)
+    # extra_field should have been stripped
+    saved_track = list(raw["tracks"].values())[0][0]
+    assert "extra_field" not in saved_track
+    assert "title" in saved_track
+
+
+def test_load_lidarr_cache_returns_empty_for_missing_file():
+    result = audit_library._load_lidarr_cache("/nonexistent/path/lidarr_cache.json")
+    assert result == {}
+
+
+def test_load_lidarr_cache_returns_empty_for_corrupt_file(tmp_path):
+    cache_path = tmp_path / "lidarr_cache.json"
+    cache_path.write_text("not valid json {{")
+    result = audit_library._load_lidarr_cache(str(cache_path))
+    assert result == {}
+
+
+def test_save_lidarr_cache_noop_when_path_is_none():
+    cache = _make_sample_cache()
+    # Should not raise
+    audit_library._save_lidarr_cache(cache, None)

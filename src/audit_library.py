@@ -16,9 +16,9 @@ Usage:
 
 import argparse
 import csv
+import json
 import os
 import sys
-
 import time
 
 import requests
@@ -28,6 +28,10 @@ from mutagen.mp3 import MP3
 from thefuzz import fuzz
 
 SUPPORTED_EXTENSIONS = {".mp3", ".flac"}
+
+# Only persist the fields actually used by find_track_in_lidarr / audit_file.
+_TRACK_FIELDS = ("trackNumber", "title", "duration")
+_TRACK_SEP = "|||"
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +244,56 @@ def audit_file(path, session, lidarr_url, api_key, tolerance=15, _cache=None):
 
 
 # ---------------------------------------------------------------------------
+# Lidarr data cache persistence
+# ---------------------------------------------------------------------------
+
+def _save_lidarr_cache(cache, cache_path):
+    """Persist album/track Lidarr data to disk so subsequent runs skip API calls."""
+    if not cache_path:
+        return
+    tracks_data = {}
+    for key, value in cache.items():
+        if isinstance(key, tuple):
+            artist, album = key
+            slim = [{k: t.get(k) for k in _TRACK_FIELDS} for t in value]
+            tracks_data[f"{artist}{_TRACK_SEP}{album}"] = slim
+    data = {
+        "albums": {str(k): v for k, v in cache.get("__albums__", {}).items()},
+        "tracks": tracks_data,
+    }
+    try:
+        with open(cache_path, "w") as f:
+            json.dump(data, f)
+        n_albums = sum(len(v) for v in data["albums"].values())
+        print(f"Saved Lidarr cache: {n_albums} albums, {len(tracks_data)} track lists → {cache_path}")
+    except Exception as e:
+        print(f"Warning: could not save Lidarr cache: {e}")
+
+
+def _load_lidarr_cache(cache_path):
+    """Load previously saved album/track cache; returns {} if missing or corrupt."""
+    if not (cache_path and os.path.exists(cache_path)):
+        return {}
+    try:
+        with open(cache_path) as f:
+            data = json.load(f)
+        cache = {
+            "__albums__": {int(k): v for k, v in data.get("albums", {}).items()},
+        }
+        for composite_key, tracks in data.get("tracks", {}).items():
+            artist, sep, album = composite_key.partition(_TRACK_SEP)
+            if sep:
+                cache[(artist, album)] = tracks
+        n_albums = sum(len(v) for v in cache["__albums__"].values())
+        n_tracks = len(cache) - 1
+        print(f"  Loaded Lidarr cache: {n_albums} albums, {n_tracks} track lists from {cache_path}")
+        return cache
+    except Exception as e:
+        print(f"Warning: could not load Lidarr cache ({e}), starting fresh.")
+        return {}
+
+
+# ---------------------------------------------------------------------------
 # Walk and report
 # ---------------------------------------------------------------------------
 
@@ -276,9 +330,8 @@ def _load_existing_results(output_path):
     return already_done, suspects, ok_count
 
 
-def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, delete_confirmed):
+def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, delete_confirmed, cache_file=None):
     session = requests.Session()
-    cache = {}
     skipped = 0
 
     already_done, suspects, ok_count = _load_existing_results(output_path)
@@ -286,6 +339,7 @@ def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, dele
         print(f"Resuming: {len(already_done)} files already processed, {len(suspects)} suspects found so far.")
 
     print("Pre-loading artist list from Lidarr...")
+    cache = _load_lidarr_cache(cache_file)
     try:
         cache["__artists__"] = _preload_artists(session, lidarr_url, api_key)
         print(f"  {len(cache['__artists__'])} artists loaded.")
@@ -330,6 +384,7 @@ def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, dele
             csv_file.close()
 
     suspects.sort(key=lambda r: r["delta_s"], reverse=True)
+    _save_lidarr_cache(cache, cache_file)
 
     print(f"\nResults: {len(suspects)} SUSPECT, {ok_count} OK, {skipped} skipped (no Lidarr match or unknown duration)")
     if output_path:
@@ -369,6 +424,8 @@ def main():
     parser.add_argument("--download-folder", default="downloads")
     parser.add_argument("--tolerance", type=int, default=15, help="Seconds of allowed deviation (default: 15)")
     parser.add_argument("--output", help="Write CSV report to this path")
+    parser.add_argument("--cache-file", default="lidarr_cache.json",
+                        help="Persist/load Lidarr album+track data to avoid redundant API calls (default: lidarr_cache.json)")
     parser.add_argument("--delete-confirmed", action="store_true", help="Offer to delete files with delta > 60s")
     args = parser.parse_args()
 
@@ -379,6 +436,7 @@ def main():
         tolerance=args.tolerance,
         output_path=args.output,
         delete_confirmed=args.delete_confirmed,
+        cache_file=args.cache_file,
     )
 
 
