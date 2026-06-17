@@ -484,6 +484,44 @@ def test_emit_lidarr_update_strips_missing_tracks(lidatube_module, monkeypatch):
     assert "missing_tracks" not in item
 
 
+def test_emit_lidarr_update_filters_complete_albums(lidatube_module, monkeypatch):
+    """Albums with missing_count=0 and scan_ready=True are excluded from the emit to keep payload small."""
+    handler = build_data_handler(lidatube_module)
+    emitted = {}
+    monkeypatch.setattr(lidatube_module.socketio, "emit", lambda event, data: emitted.update({event: data}))
+
+    handler.lidarr_items = [
+        {"artist": "A", "album_name": "complete", "scan_ready": True, "missing_count": 0, "missing_tracks": []},
+        {"artist": "B", "album_name": "has_missing", "scan_ready": True, "missing_count": 2, "missing_tracks": []},
+        {"artist": "C", "album_name": "still_scanning", "scan_ready": False, "missing_count": 0, "missing_tracks": []},
+    ]
+    handler._emit_lidarr_update()
+
+    data = emitted["lidarr_update"]["data"]
+    names = [item["album_name"] for item in data]
+    assert "complete" not in names
+    assert "has_missing" in names
+    assert "still_scanning" in names
+
+
+def test_emit_lidarr_update_includes_index_and_total_count(lidatube_module, monkeypatch):
+    """Each emitted item carries its original lidarr_items index; total_count reflects full list size."""
+    handler = build_data_handler(lidatube_module)
+    emitted = {}
+    monkeypatch.setattr(lidatube_module.socketio, "emit", lambda event, data: emitted.update({event: data}))
+
+    handler.lidarr_items = [
+        {"artist": "A", "album_name": "complete", "scan_ready": True, "missing_count": 0, "missing_tracks": []},
+        {"artist": "B", "album_name": "has_missing", "scan_ready": True, "missing_count": 1, "missing_tracks": []},
+    ]
+    handler._emit_lidarr_update()
+
+    payload = emitted["lidarr_update"]
+    assert payload["total_count"] == 2
+    assert len(payload["data"]) == 1
+    assert payload["data"][0]["index"] == 1
+
+
 def test_save_lidarr_cache_is_atomic(lidatube_module, monkeypatch, tmp_path):
     """Cache write uses a .tmp file then renames to prevent corruption on kill."""
     handler = build_data_handler(lidatube_module)

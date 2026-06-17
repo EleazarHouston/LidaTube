@@ -23,6 +23,7 @@ const lidarr_api_key = document.getElementById('lidarr-api-key');
 const sleep_interval = document.getElementById('sleep-interval');
 const sync_schedule = document.getElementById('sync-schedule');
 const minimum_match_ratio = document.getElementById('minimum-match-ratio');
+const lidarr_count_text = document.getElementById('lidarr-count-text');
 const cookies_status_badge = document.getElementById('cookies-status-badge');
 const cookies_file_input = document.getElementById('cookies-file-input');
 const upload_cookies_btn = document.getElementById('upload-cookies-btn');
@@ -199,6 +200,7 @@ reset_lidarr.addEventListener('click', function () {
     socket.emit('reset_lidarr');
     lidarr_table.innerHTML = '';
     select_all_checkbox.checked = false;
+    lidarr_count_text.textContent = '';
     update_lidarr_progress_bar('idle', { phase: 'Idle', percent: 0 });
     set_lidarr_button_states('idle', 0);
     show_toast('Lidarr', 'Reset requested. Clearing cached albums/tracks...');
@@ -315,9 +317,9 @@ start_ytdlp.addEventListener('click', function () {
     const checked_indices = [];
     const checkboxes = document.getElementsByName('lidarr_item');
 
-    checkboxes.forEach((checkbox, index) => {
+    checkboxes.forEach((checkbox) => {
         if (checkbox.checked) {
-            checked_indices.push(index);
+            checked_indices.push(parseInt(checkbox.dataset.index, 10));
         }
     });
 
@@ -351,6 +353,10 @@ reset_ytdlp.addEventListener('click', function () {
     show_toast('Downloads', 'Reset requested. Clearing queue...');
 });
 
+socket.on('connect', () => {
+    lidarr_scan_status_text.textContent = 'Loading...';
+});
+
 socket.on('lidarr_update', (response) => {
     const status = response.status || 'idle';
     const scan_progress = response.scan_progress || {};
@@ -362,6 +368,16 @@ socket.on('lidarr_update', (response) => {
     }
 
     const items = Array.isArray(response.data) ? response.data : [];
+    const total_count = response.total_count ?? 0;
+
+    if (total_count > 0 && items.length === 0) {
+        lidarr_count_text.textContent = `All ${total_count.toLocaleString()} albums downloaded`;
+    } else if (total_count > 0) {
+        lidarr_count_text.textContent = `${items.length.toLocaleString()} with missing tracks (${total_count.toLocaleString()} total)`;
+    } else {
+        lidarr_count_text.textContent = '';
+    }
+
     lidarr_table.innerHTML = '';
 
     let all_checked = true;
@@ -380,6 +396,7 @@ socket.on('lidarr_update', (response) => {
         checkbox.id = 'lidarr_' + i;
         checkbox.name = 'lidarr_item';
         checkbox.checked = item.checked;
+        checkbox.dataset.index = item.index ?? i;
         checkbox.addEventListener('change', check_if_all_true);
 
         const label = document.createElement('label');

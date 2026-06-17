@@ -171,11 +171,22 @@ class DataHandler:
         self.lidarr_scan_progress.update(kwargs)
 
     def _emit_lidarr_update(self):
-        slim_items = [
-            {k: v for k, v in item.items() if k != "missing_tracks"}
-            for item in self.lidarr_items
-        ]
-        socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": slim_items, "scan_progress": self.lidarr_scan_progress})
+        # Only send albums that need attention: unscanned (still processing) or have missing tracks.
+        # Fully-downloaded albums (missing_count=0, scan_ready=True) are omitted to keep the
+        # payload small — serialising 90k+ items on every connect blocks the gevent event loop.
+        # Each item carries its original index so the client can reference self.lidarr_items correctly.
+        slim_items = []
+        for i, item in enumerate(self.lidarr_items):
+            if item.get("missing_count", 0) > 0 or not item.get("scan_ready", False):
+                slim = {k: v for k, v in item.items() if k != "missing_tracks"}
+                slim["index"] = i
+                slim_items.append(slim)
+        socketio.emit("lidarr_update", {
+            "status": self.lidarr_status,
+            "data": slim_items,
+            "scan_progress": self.lidarr_scan_progress,
+            "total_count": len(self.lidarr_items),
+        })
 
     def _emit_lidarr_progress(self):
         """Emit only scan progress stats — no data array. Use during tight loops to avoid O(n²) socket traffic."""
