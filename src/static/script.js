@@ -353,10 +353,6 @@ reset_ytdlp.addEventListener('click', function () {
     show_toast('Downloads', 'Reset requested. Clearing queue...');
 });
 
-socket.on('connect', () => {
-    lidarr_scan_status_text.textContent = 'Loading...';
-});
-
 socket.on('lidarr_update', (response) => {
     const status = response.status || 'idle';
     const scan_progress = response.scan_progress || {};
