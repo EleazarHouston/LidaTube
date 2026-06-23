@@ -1,24 +1,289 @@
-.logo{
-    max-height: 50px;
-}
-.cards-row{
-    height: 90vh;
-}
-.scrollable{
-    overflow-y: auto;
-    height: 65vh;
-}
-.thead-sticky {
-    position: sticky;
-    top: 0;
-    z-index: 1;
+/* ============================================================
+   LidaTube — modern UI layer on top of Bootstrap 5
+   Theme-aware via Bootstrap CSS variables (data-bs-theme).
+   ============================================================ */
+
+:root {
+  --lt-radius: 16px;
+  --lt-radius-sm: 10px;
+  --lt-header-h: 56px;
+  --lt-shadow: 0 1px 2px rgba(0, 0, 0, .08), 0 8px 24px rgba(0, 0, 0, .10);
 }
 
-@media screen and (max-width: 600px) {
-    .cards-row{
-        height: 87.5vh;  
-    }
-    .card-body {
-        height: 40vh;  
-    }
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  /* Soft branded gradient backdrop that adapts to the active theme.
+     background-color is a separate declaration so it survives even if a
+     browser can't parse color-mix() in the gradient (e.g. older Safari).
+     No background-attachment: fixed — it forces a repaint every scroll
+     frame on mobile, and the top-anchored gradients look the same without it. */
+  background-color: var(--bs-body-bg);
+  background-image:
+    radial-gradient(1200px 600px at 15% -10%, color-mix(in srgb, var(--bs-primary) 14%, transparent), transparent 60%),
+    radial-gradient(1000px 500px at 100% 0%, color-mix(in srgb, var(--bs-primary) 8%, transparent), transparent 55%);
+  background-repeat: no-repeat;
+  min-height: 100dvh;
+}
+
+/* ---------- Top bar ---------- */
+.sticky-top {
+  z-index: 1030;
+}
+
+.sticky-top .bg-dark {
+  background: color-mix(in srgb, var(--bs-dark) 86%, transparent) !important;
+  -webkit-backdrop-filter: saturate(140%) blur(10px);
+  backdrop-filter: saturate(140%) blur(10px);
+  border-bottom: 1px solid rgba(255, 255, 255, .07);
+}
+
+.top-bar {
+  min-height: var(--lt-header-h);
+}
+
+.title {
+  letter-spacing: .3px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--lt-radius-sm);
+  transition: transform .2s ease, background-color .2s ease;
+}
+
+.icon-btn:hover {
+  transform: rotate(20deg);
+  background-color: rgba(255, 255, 255, .08);
+}
+
+/* ---------- Layout: fill the viewport on desktop, flow on mobile ---------- */
+.card-container {
+  padding-bottom: .5rem;
+}
+
+.cards-row {
+  height: calc(100dvh - var(--lt-header-h) - 1rem);
+}
+
+.cards-row > [class*="col-"] {
+  height: 100%;
+}
+
+/* ---------- Cards ---------- */
+/* style.css loads after Bootstrap, so this wins over .card's default
+   background without !important. No overflow:hidden — card-body padding
+   already keeps content clear of the rounded corners, and clipping here
+   would silently swallow any future dropdown/popover placed inside a card. */
+.card {
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--lt-radius);
+  background: var(--bs-body-bg);
+  box-shadow: var(--lt-shadow);
+}
+
+.card-body {
+  gap: .25rem;
+  /* Bound this flex child (default min-height:auto) so the inner .scrollable
+     can actually shrink and scroll internally instead of pushing the page. */
+  min-height: 0;
+}
+
+.logo {
+  max-height: 44px;
+  width: auto;
+  border-radius: 10px;
+}
+
+.panel-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: .2px;
+}
+
+/* ---------- Action buttons ---------- */
+.btn-group .btn {
+  font-weight: 500;
+  border-radius: var(--lt-radius-sm) !important;
+  transition: transform .12s ease, box-shadow .2s ease, filter .2s ease;
+}
+
+.btn-group {
+  gap: .4rem;
+}
+
+.btn-group .btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .18);
+}
+
+.btn-group .btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn:disabled {
+  opacity: .45;
+}
+
+/* ---------- Progress ---------- */
+.progress {
+  height: .55rem;
+  border-radius: 999px;
+  background: var(--bs-tertiary-bg);
+  overflow: hidden;
+}
+
+.progress-bar {
+  border-radius: 999px;
+  font-size: 0;             /* hide the numeric label; the status text below is clearer */
+  transition: width .4s ease;
+}
+
+#lidarr-scan-status-text,
+#lidarr-count-text,
+#ytdlp-status-text {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Scroll area ---------- */
+.scrollable {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--lt-radius-sm);
+  scrollbar-width: thin;
+  scrollbar-color: var(--bs-secondary) transparent;
+}
+
+.scrollable::-webkit-scrollbar {
+  width: 9px;
+}
+
+.scrollable::-webkit-scrollbar-thumb {
+  background: var(--bs-secondary);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.scrollable::-webkit-scrollbar-thumb:hover {
+  background: var(--bs-secondary-color);
+  background-clip: padding-box;
+}
+
+/* ---------- Tables ---------- */
+.table {
+  margin-bottom: 0;
+  --bs-table-bg: transparent;
+}
+
+.table > :not(caption) > * > * {
+  padding: .6rem .75rem;
+  vertical-align: middle;
+}
+
+.thead-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* Solid header so scrolling rows never bleed through */
+.thead-sticky th {
+  background: var(--bs-tertiary-bg);
+  border-bottom: 2px solid var(--bs-border-color);
+  font-size: .8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--bs-secondary-color);
+}
+
+.table tbody tr {
+  transition: background-color .12s ease;
+}
+
+.table tbody tr:hover {
+  background: color-mix(in srgb, var(--bs-primary) 9%, transparent);
+}
+
+.table .form-check-label {
+  cursor: pointer;
+}
+
+#select-all-checkbox,
+.table .form-check-input {
+  cursor: pointer;
+}
+
+/* ---------- Modal ---------- */
+.modal-content {
+  border-radius: var(--lt-radius);
+  border: 1px solid var(--bs-border-color);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .35);
+}
+
+.modal-header,
+.modal-footer {
+  border-color: var(--bs-border-color);
+}
+
+.form-group-modal label {
+  font-weight: 500;
+  margin-bottom: .25rem;
+}
+
+.theme-toggle svg {
+  opacity: .7;
+}
+
+/* ---------- Toasts ---------- */
+.toast {
+  border-radius: var(--lt-radius-sm);
+  box-shadow: var(--lt-shadow);
+}
+
+/* ---------- Responsive: stack and let the page scroll on small screens ---------- */
+@media (max-width: 767.98px) {
+  .cards-row {
+    height: auto;
+  }
+
+  .cards-row > [class*="col-"] {
+    height: auto;
+  }
+
+  .scrollable {
+    flex: none;
+    height: auto;
+    max-height: 52dvh;
+  }
+
+  .panel-title {
+    font-size: 1.35rem;
+  }
+}
+
+/* ---------- Motion / accessibility ---------- */
+@media (prefers-reduced-motion: reduce) {
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }

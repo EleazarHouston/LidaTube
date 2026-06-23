@@ -4,35 +4,56 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
   <link rel="icon" type="image/x-icon" href="{{url_for('static', filename='logo.png')}}">
-  <link rel="stylesheet" href="{{url_for('static', filename='style.css')}}">
+
+  <!-- Warm up the CDN connections used below -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+
+  <!-- Apply the saved/preferred theme before first paint to avoid a flash -->
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('theme');
+        var theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.setAttribute('data-bs-theme', theme);
+      } catch (e) {
+        document.documentElement.setAttribute('data-bs-theme', 'dark');
+      }
+    })();
+  </script>
+
   <!-- Bootstrap CSS -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
     integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
-  <!-- Bootstrap JS -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.min.js"
-    integrity="sha512-ykZ1QQr0Jy/4ZkvKuqWn4iF3lqPZyij9iRv6sGqLRdTPkY69YX6+7wvVGmsdBbiIfN/8OdsI7HABjvEok6ZopQ=="
-    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <!-- Font Awesome -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
-    integrity="sha512-DTOQO9RWCH3ppGqcWaEA1BIZOC6xxalwEsw9c2QQeAIftl+Vegovlnee1c9QX4TctnWMn13TZye+giMm8e2LwA=="
-    crossorigin="anonymous" referrerpolicy="no-referrer">
-  <!-- Socket IO -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"
+  <link rel="stylesheet" href="{{url_for('static', filename='style.css')}}">
+
+  <!-- App scripts: deferred so they never block first paint, executed in order -->
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"
     integrity="sha512-tE1z+95+lMCGwy+9PnKgUSIeHhvioC9lMlI7rLWU0Ps3XTdjRygLcy4mLuL0JAoK4TLdQEyP0yOl/9dMOqpH/Q=="
     crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <title>Lidatube</title>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.min.js"
+    integrity="sha512-ykZ1QQr0Jy/4ZkvKuqWn4iF3lqPZyij9iRv6sGqLRdTPkY69YX6+7wvVGmsdBbiIfN/8OdsI7HABjvEok6ZopQ=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script defer src="{{url_for('static', filename='script.js')}}"></script>
+
+  <title>LidaTube</title>
 </head>
 
-<body class="bg-dark-subtle">
+<body>
   <!-- Top Bar -->
   <div class="sticky-top">
     <div class="container-fluid bg-dark">
       <div class="top-bar d-flex justify-content-between align-items-center">
         <h1 class="title text-center text-light flex-grow-1 my-1 ps-2 ms-5" id="return-to-top">LidaTube</h1>
-        <button class="btn btn-link text-light" id="settings-button" data-bs-toggle="modal" aria-label="Open settings"
-          data-bs-target="#config-modal">
-          <i class="fa fa-gear fa-2x"></i>
+        <button class="btn btn-link text-light icon-btn" id="settings-button" data-bs-toggle="modal"
+          aria-label="Open settings" data-bs-target="#config-modal">
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
         </button>
       </div>
     </div>
@@ -42,7 +63,7 @@
   <div class="container-fluid mt-2 card-container">
     <div class="row cards-row">
       <div class="col-md-6 col-12 mb-3">
-        <div class="card bg-secondary-subtle h-100" id="lidarr-card">
+        <div class="card h-100" id="lidarr-card">
           <div class="card-body d-flex flex-column">
             <div class="row">
               <div class="col-auto">
@@ -93,7 +114,7 @@
         </div>
       </div>
       <div class="col-md-6 col-12 mb-3">
-        <div class="card bg-secondary-subtle h-100" id="ytdlp-card">
+        <div class="card h-100" id="ytdlp-card">
           <div class="card-body d-flex flex-column">
             <div class="row">
               <div class="col-auto">
@@ -189,11 +210,20 @@
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
           <button type="button" id="save-changes-btn" class="btn btn-primary">Save changes</button>
-          <i class="fa fa-sun"></i>
-          <div class="form-check form-switch">
-            <input class="form-check-input rounded" type="checkbox" id="theme-switch">
+          <div class="theme-toggle d-flex align-items-center gap-2 ms-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="5"></circle>
+              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+            </svg>
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input rounded" type="checkbox" id="theme-switch" aria-label="Toggle dark mode">
+            </div>
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+            </svg>
           </div>
-          <i class="fa fa-moon"></i>
         </div>
       </div>
     </div>
@@ -211,8 +241,6 @@
       <div class="toast-body"></div>
     </div>
   </div>
-
-  <script src="{{url_for('static',filename='script.js')}}"></script>
 </body>
 
 </html>

@@ -174,11 +174,19 @@ select_all_checkbox.addEventListener('change', function () {
     });
 });
 
+// Event delegation: a single listener handles every row checkbox, instead of
+// attaching (and leaking) one listener per row on each table rebuild.
+lidarr_table.addEventListener('change', function (event) {
+    if (event.target && event.target.name === 'lidarr_item') {
+        check_if_all_true();
+    }
+});
+
 get_wanted_lidarr.addEventListener('click', function () {
     if (get_wanted_lidarr.disabled) {
         return;
     }
-    lidarr_table.innerHTML = '';
+    lidarr_table.replaceChildren();
     select_all_checkbox.checked = false;
     set_button_loading(get_wanted_lidarr, lidarr_spinner, true);
     show_toast('Lidarr', 'Refreshing wanted albums and tracks...');
@@ -198,7 +206,7 @@ reset_lidarr.addEventListener('click', function () {
         return;
     }
     socket.emit('reset_lidarr');
-    lidarr_table.innerHTML = '';
+    lidarr_table.replaceChildren();
     select_all_checkbox.checked = false;
     lidarr_count_text.textContent = '';
     update_lidarr_progress_bar('idle', { phase: 'Idle', percent: 0 });
@@ -347,7 +355,7 @@ reset_ytdlp.addEventListener('click', function () {
         return;
     }
     socket.emit('reset_ytdlp');
-    ytdlp_table.innerHTML = '';
+    ytdlp_table.replaceChildren();
     update_progress_bar(0, 'idle');
     set_ytdlp_button_states('idle', 0);
     show_toast('Downloads', 'Reset requested. Clearing queue...');
@@ -374,18 +382,16 @@ socket.on('lidarr_update', (response) => {
         lidarr_count_text.textContent = '';
     }
 
-    lidarr_table.innerHTML = '';
-
+    // Build all rows off-DOM, then attach once, to avoid a reflow per row.
+    const fragment = document.createDocumentFragment();
     let all_checked = true;
     items.forEach((item, i) => {
         if (!item.checked) {
             all_checked = false;
         }
-        const row = lidarr_table.insertRow();
-        const cell1 = row.insertCell(0);
-        const cell2 = row.insertCell(1);
-        const cell3 = row.insertCell(2);
+        const row = document.createElement('tr');
 
+        const cell1 = document.createElement('td');
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.className = 'form-check-input';
@@ -393,18 +399,23 @@ socket.on('lidarr_update', (response) => {
         checkbox.name = 'lidarr_item';
         checkbox.checked = item.checked;
         checkbox.dataset.index = item.index ?? i;
-        checkbox.addEventListener('change', check_if_all_true);
+        cell1.appendChild(checkbox);
 
+        const cell2 = document.createElement('td');
         const label = document.createElement('label');
         label.className = 'form-check-label';
         label.htmlFor = 'lidarr_' + i;
         label.textContent = item.artist + ' - ' + item.album_name;
-
-        cell1.appendChild(checkbox);
         cell2.appendChild(label);
+
+        const cell3 = document.createElement('td');
+        cell3.className = 'text-center';
         cell3.textContent = item.scan_ready === false ? 'Scanning...' : `${item.missing_count}/${item.track_count}`;
-        cell3.classList.add('text-center');
+
+        row.append(cell1, cell2, cell3);
+        fragment.appendChild(row);
     });
+    lidarr_table.replaceChildren(fragment);
 
     select_all_checkbox.checked = items.length > 0 ? all_checked : false;
     set_lidarr_button_states(status, items.length);
@@ -412,16 +423,21 @@ socket.on('lidarr_update', (response) => {
 
 socket.on('ytdlp_update', (response) => {
     const items = Array.isArray(response.data) ? response.data : [];
-    ytdlp_table.innerHTML = '';
+    const fragment = document.createDocumentFragment();
     items.forEach((entry) => {
-        const row = ytdlp_table.insertRow();
-        const cell_item = row.insertCell(0);
-        const cell_item_status = row.insertCell(1);
+        const row = document.createElement('tr');
 
+        const cell_item = document.createElement('td');
         cell_item.textContent = `${entry.artist} - ${entry.album_name}`;
+
+        const cell_item_status = document.createElement('td');
+        cell_item_status.className = 'text-center';
         cell_item_status.textContent = entry.status;
-        cell_item_status.classList.add('text-center');
+
+        row.append(cell_item, cell_item_status);
+        fragment.appendChild(row);
     });
+    ytdlp_table.replaceChildren(fragment);
 
     pending_download_request = false;
     const percent_completion = response.percent_completion || 0;
@@ -453,26 +469,15 @@ function show_toast(header, message) {
     });
 }
 
+// The theme itself is applied before first paint by the inline script in <head>.
+// Here we just keep the toggle switch in sync with whatever ended up active.
 const theme_switch = document.getElementById('theme-switch');
-const saved_theme = localStorage.getItem('theme');
-const saved_switch_position = localStorage.getItem('switchPosition');
+theme_switch.checked = document.documentElement.getAttribute('data-bs-theme') === 'dark';
 
-if (saved_switch_position) {
-    theme_switch.checked = saved_switch_position === 'true';
-}
-
-if (saved_theme) {
-    document.documentElement.setAttribute('data-bs-theme', saved_theme);
-}
-
-theme_switch.addEventListener('click', () => {
-    if (document.documentElement.getAttribute('data-bs-theme') === 'dark') {
-        document.documentElement.setAttribute('data-bs-theme', 'light');
-    } else {
-        document.documentElement.setAttribute('data-bs-theme', 'dark');
-    }
-    localStorage.setItem('theme', document.documentElement.getAttribute('data-bs-theme'));
-    localStorage.setItem('switchPosition', theme_switch.checked);
+theme_switch.addEventListener('change', () => {
+    const next_theme = theme_switch.checked ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-bs-theme', next_theme);
+    localStorage.setItem('theme', next_theme);
 });
 
 update_lidarr_progress_bar('idle', { phase: 'Idle', percent: 0 });
