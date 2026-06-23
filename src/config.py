@@ -23,7 +23,7 @@ class AppConfig:
         "preferred_codec": "mp3",
         "attempt_lidarr_import": False,
         "lidarr_scan_thread_limit": 16,
-        "duration_tolerance_seconds": 15,
+        "duration_tolerance_seconds": 8,
     }
 
     _ENV_CONVERTERS = {
