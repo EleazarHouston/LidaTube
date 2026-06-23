@@ -307,8 +307,12 @@ def walk_library(download_folder):
 FIELDNAMES = ["path", "artist", "album", "title", "track_number", "actual_s", "expected_s", "delta_s", "verdict"]
 
 
-def _load_existing_results(output_path):
-    """Read an existing CSV and return (already_done_paths, suspects_so_far, ok_count)."""
+def _load_existing_results(output_path, reprocess_above=None):
+    """Read an existing CSV and return (already_done_paths, suspects_so_far, ok_count).
+
+    reprocess_above: if set, OK-verdict rows with delta > this value are promoted to
+    suspects so a lower delete-threshold can catch files the previous scan passed.
+    """
     already_done = set()
     suspects = []
     ok_count = 0
@@ -317,24 +321,29 @@ def _load_existing_results(output_path):
     with open(output_path, newline="") as f:
         for row in csv.DictReader(f):
             already_done.add(row["path"])
+            delta = float(row["delta_s"])
+            result = {
+                **row,
+                "actual_s": float(row["actual_s"]),
+                "expected_s": float(row["expected_s"]),
+                "delta_s": delta,
+                "track_number": int(row["track_number"]),
+            }
             if row["verdict"] == "SUSPECT":
-                suspects.append({
-                    **row,
-                    "actual_s": float(row["actual_s"]),
-                    "expected_s": float(row["expected_s"]),
-                    "delta_s": float(row["delta_s"]),
-                    "track_number": int(row["track_number"]),
-                })
-            elif row["verdict"] == "OK":
+                suspects.append(result)
+            elif reprocess_above is not None and delta > reprocess_above:
+                suspects.append(result)
+            else:
                 ok_count += 1
     return already_done, suspects, ok_count
 
 
-def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, delete_confirmed, cache_file=None):
+def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, delete_confirmed, cache_file=None, delete_threshold=60):
     session = requests.Session()
     skipped = 0
 
-    already_done, suspects, ok_count = _load_existing_results(output_path)
+    reprocess = delete_threshold if delete_threshold < tolerance else None
+    already_done, suspects, ok_count = _load_existing_results(output_path, reprocess_above=reprocess)
     if already_done:
         print(f"Resuming: {len(already_done)} files already processed, {len(suspects)} suspects found so far.")
 
@@ -398,19 +407,23 @@ def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, dele
             print(f"{r['delta_s']:>7.1f}s  {r['expected_s']:>8.1f}s  {r['actual_s']:>6.1f}s  {r['path']}")
 
     if delete_confirmed and suspects:
-        # Extra safety: only offer deletion for files >60s off regardless of --tolerance
-        deletable = [r for r in suspects if r["delta_s"] > 60]
+        deletable = [r for r in suspects if r["delta_s"] > delete_threshold]
         if not deletable:
-            print("\nNo files exceed the 60s safety threshold for deletion.")
+            print(f"\nNo files exceed the {delete_threshold}s deletion threshold.")
         else:
-            print(f"\n{len(deletable)} file(s) exceed 60s delta and are candidates for deletion:")
+            print(f"\n{len(deletable)} file(s) exceed {delete_threshold}s delta and are candidates for deletion:")
             for r in deletable:
                 print(f"  [{r['delta_s']:.0f}s off] {r['path']}")
             answer = input(f"Delete these {len(deletable)} file(s)? [y/N] ").strip().lower()
             if answer == "y":
+                deleted = 0
                 for r in deletable:
-                    os.remove(r["path"])
-                    print(f"  Deleted: {r['path']}")
+                    try:
+                        os.remove(r["path"])
+                        deleted += 1
+                    except FileNotFoundError:
+                        pass
+                print(f"  Deleted {deleted} file(s).")
             else:
                 print("Deletion cancelled.")
 
@@ -426,7 +439,10 @@ def main():
     parser.add_argument("--output", help="Write CSV report to this path")
     parser.add_argument("--cache-file", default="lidarr_cache.json",
                         help="Persist/load Lidarr album+track data to avoid redundant API calls (default: lidarr_cache.json)")
-    parser.add_argument("--delete-confirmed", action="store_true", help="Offer to delete files with delta > 60s")
+    parser.add_argument("--delete-threshold", type=int, default=60,
+                        help="Minimum delta in seconds to offer deletion (default: 60). "
+                             "Setting below --tolerance also promotes previously-OK rows from an existing CSV.")
+    parser.add_argument("--delete-confirmed", action="store_true", help="Offer to delete files exceeding --delete-threshold")
     args = parser.parse_args()
 
     run_audit(
@@ -437,6 +453,7 @@ def main():
         output_path=args.output,
         delete_confirmed=args.delete_confirmed,
         cache_file=args.cache_file,
+        delete_threshold=args.delete_threshold,
     )
 
 

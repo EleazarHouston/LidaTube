@@ -282,6 +282,60 @@ def test_glass_animals_regression_flagged_as_suspect(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# _load_existing_results / reprocess_above
+# ---------------------------------------------------------------------------
+
+def _write_csv(path, rows):
+    import csv as _csv
+    with open(path, "w", newline="") as f:
+        writer = _csv.DictWriter(f, fieldnames=audit_library.FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _make_row(path, delta, verdict):
+    return {
+        "path": path, "artist": "A", "album": "B", "title": "T",
+        "track_number": "1", "actual_s": str(200 + delta), "expected_s": "200.0",
+        "delta_s": str(delta), "verdict": verdict,
+    }
+
+
+def test_load_existing_results_default_only_loads_suspects(tmp_path):
+    csv_path = str(tmp_path / "results.csv")
+    _write_csv(csv_path, [
+        _make_row("/a.mp3", 20, "SUSPECT"),
+        _make_row("/b.mp3", 12, "OK"),
+    ])
+    _, suspects, ok_count = audit_library._load_existing_results(csv_path)
+    assert len(suspects) == 1 and suspects[0]["path"] == "/a.mp3"
+    assert ok_count == 1
+
+
+def test_load_existing_results_reprocess_promotes_ok_rows_above_threshold(tmp_path):
+    csv_path = str(tmp_path / "results.csv")
+    _write_csv(csv_path, [
+        _make_row("/a.mp3", 20, "SUSPECT"),
+        _make_row("/b.mp3", 12, "OK"),   # delta 12 > reprocess_above=10 → promoted
+        _make_row("/c.mp3",  8, "OK"),   # delta 8 <= 10 → stays OK
+    ])
+    _, suspects, ok_count = audit_library._load_existing_results(csv_path, reprocess_above=10)
+    paths = {s["path"] for s in suspects}
+    assert "/a.mp3" in paths
+    assert "/b.mp3" in paths
+    assert "/c.mp3" not in paths
+    assert ok_count == 1
+
+
+def test_load_existing_results_reprocess_none_unchanged(tmp_path):
+    csv_path = str(tmp_path / "results.csv")
+    _write_csv(csv_path, [_make_row("/b.mp3", 12, "OK")])
+    _, suspects, ok_count = audit_library._load_existing_results(csv_path, reprocess_above=None)
+    assert suspects == []
+    assert ok_count == 1
+
+
+# ---------------------------------------------------------------------------
 # Cache persistence
 # ---------------------------------------------------------------------------
 
