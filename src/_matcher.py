@@ -37,6 +37,80 @@ SONG_KEYWORDS_TO_REMOVE = [
     "lyric",
 ]
 
+# Version markers that mean "this is NOT the requested recording" — karaoke,
+# instrumental, covers, etc. A candidate is rejected when its markers differ from
+# the request's (see _version_mismatch), so a track that IS legitimately an
+# instrumental still matches its own version but not the plain vocal, and vice versa.
+UNWANTED_VERSION_MARKERS = [
+    "instrumental",
+    "karaoke",
+    "backing track",
+    "made famous by",
+    "originally performed by",
+    "in the style of",
+    "tribute",
+    "a cappella",
+    "acapella",
+    "8d audio",
+    "sped up",
+    "slowed",
+    "nightcore",
+    "cover",
+]
+
+
+def _contains_marker(text, marker):
+    return re.search(r"\b" + re.escape(marker) + r"\b", text) is not None
+
+
+def _version_mismatch(requested_title, candidate_title):
+    """True if request and candidate disagree on any strong version marker.
+
+    Symmetric: grabbing an instrumental/karaoke/cover for a normal request AND
+    grabbing the plain vocal for a request that explicitly wants the instrumental
+    are both rejected. Markers the request itself asks for are allowed through.
+    """
+    req = (requested_title or "").lower()
+    cand = (candidate_title or "").lower()
+    for marker in UNWANTED_VERSION_MARKERS:
+        if _contains_marker(cand, marker) != _contains_marker(req, marker):
+            return True
+    return False
+
+
+def _normalize_min_ratio(minimum_match_ratio):
+    """Accept a 0-100 percentage or a 0-1 fraction; always return the 0-100 scale.
+
+    Guards against a settings value like 0.85 silently disabling the threshold,
+    since match ratings are fuzz.ratio values on a 0-100 scale.
+    """
+    try:
+        ratio = float(minimum_match_ratio)
+    except (TypeError, ValueError):
+        return 0
+    if 0 < ratio <= 1:
+        return ratio * 100
+    return ratio
+
+
+def _artist_in_result(cleaned_artist, item):
+    """True if the artist appears in the candidate's title OR its uploader/channel.
+
+    YouTube 'topic' and VEVO channels often title a track as just the song name,
+    so gating on the title alone drops legitimate official uploads.
+    """
+    if not cleaned_artist:
+        return True
+    parts = [item.get("title", "")]
+    for field in ("uploader", "channel", "uploader_id"):
+        val = item.get(field)
+        if isinstance(val, dict):
+            val = val.get("name", "")
+        if val:
+            parts.append(str(val))
+    haystack = _general.string_cleaner(" ".join(parts)).lower()
+    return cleaned_artist in haystack
+
 
 def _remove_keywords(text, keywords):
     ret = text
@@ -51,7 +125,7 @@ def _normalized_text(text):
 
 
 def _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item):
-    if best_match_rating > minimum_match_ratio:
+    if best_match_rating > _normalize_min_ratio(minimum_match_ratio):
         return best_match_item
     return None
 
@@ -132,6 +206,9 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         if item["resultType"] != item_wanted_type:
             continue
 
+        if _version_mismatch(song_title, item["title"]):
+            continue
+
         candidate_seconds = item.get("duration_seconds") or 0
         if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
             continue
@@ -176,9 +253,14 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
     for item in search_results:
         title = item.get("title", "")
 
-        # Artist must appear in the video title — hard gate, not a scoring factor.
-        # Prevents covers, remixes, and unrelated videos from passing on title alone.
-        if cleaned_artist and cleaned_artist not in _general.string_cleaner(title).lower():
+        # Artist must appear in the title OR the uploader/channel — hard gate, not
+        # a scoring factor. Prevents covers and unrelated videos from passing on
+        # title alone, while still allowing topic/VEVO uploads titled as just the song.
+        if not _artist_in_result(cleaned_artist, item):
+            continue
+
+        # Reject karaoke/instrumental/cover cuts the request did not ask for.
+        if _version_mismatch(query_text, title):
             continue
 
         # Duration gate: YTS provides "M:SS" strings; YTDLP provides int seconds.

@@ -1,3 +1,5 @@
+import pytest
+
 import _matcher
 
 
@@ -514,6 +516,215 @@ def test_album_matcher_skips_non_album_result_types():
 
     assert match is not None
     assert match["browseId"] == "expected"
+
+
+# --- minimum_match_ratio scale normalization ---
+
+def test_normalize_min_ratio_treats_fraction_as_percentage():
+    assert _matcher._normalize_min_ratio(0.85) == 85
+    assert _matcher._normalize_min_ratio(0.9) == 90
+
+
+def test_normalize_min_ratio_leaves_percentage_scale_unchanged():
+    assert _matcher._normalize_min_ratio(90) == 90
+    assert _matcher._normalize_min_ratio(50) == 50
+
+
+def test_normalize_min_ratio_one_is_full_scale():
+    assert _matcher._normalize_min_ratio(1) == 100
+
+
+def test_song_matcher_yt_fraction_min_ratio_rejects_poor_match():
+    # 0.85 must behave like 85 (not "any score above 0.85"), so a weak title
+    # match is rejected instead of grabbed as best-of-garbage.
+    search_results = [
+        {"title": "Target Artist - Completely Unrelated Filler Words Here", "link": "https://weak"},
+    ]
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=0.85,
+        artist="Target Artist",
+        query_text="Target Artist - Heat Waves",
+        search_results=search_results,
+    )
+    assert match is None
+
+
+# --- asymmetric version gate (karaoke / instrumental / cover) ---
+
+def test_song_matcher_rejects_instrumental_when_not_requested():
+    search_results = [
+        {
+            "resultType": "song",
+            "title": "A Past Embrace (Instrumental)",
+            "videoId": "instr",
+            "artists": [{"name": "156/Silence"}],
+            "duration_seconds": 200,
+        },
+    ]
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70,
+        artist="156/Silence",
+        cleaned_artist="156silence",
+        song_title="A Past Embrace",
+        cleaned_song_title="a past embrace",
+        search_results=search_results,
+        expected_duration_ms=200000,
+    )
+    assert match is None
+
+
+def test_song_matcher_prefers_studio_over_instrumental():
+    search_results = [
+        {
+            "resultType": "song",
+            "title": "A Past Embrace (Instrumental)",
+            "videoId": "instr",
+            "artists": [{"name": "156/Silence"}],
+            "duration_seconds": 200,
+        },
+        {
+            "resultType": "song",
+            "title": "A Past Embrace",
+            "videoId": "studio",
+            "artists": [{"name": "156/Silence"}],
+            "duration_seconds": 200,
+        },
+    ]
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70,
+        artist="156/Silence",
+        cleaned_artist="156silence",
+        song_title="A Past Embrace",
+        cleaned_song_title="a past embrace",
+        search_results=search_results,
+        expected_duration_ms=200000,
+    )
+    assert match is not None
+    assert match["videoId"] == "studio"
+
+
+def test_song_matcher_accepts_instrumental_when_requested():
+    # If Lidarr's track IS the instrumental, the marker is in the request too — allow it.
+    search_results = [
+        {
+            "resultType": "song",
+            "title": "A Past Embrace (Instrumental)",
+            "videoId": "instr",
+            "artists": [{"name": "156/Silence"}],
+            "duration_seconds": 200,
+        },
+    ]
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70,
+        artist="156/Silence",
+        cleaned_artist="156silence",
+        song_title="A Past Embrace (Instrumental)",
+        cleaned_song_title="a past embrace instrumental",
+        search_results=search_results,
+        expected_duration_ms=200000,
+    )
+    assert match is not None
+    assert match["videoId"] == "instr"
+
+
+def test_song_matcher_rejects_vocal_when_instrumental_requested():
+    # Seen: "FIRE (INSTRUMENTAL)" -> "Fire". Symmetric gate: don't grab the
+    # plain vocal when Lidarr's track explicitly wants the instrumental.
+    search_results = [
+        {
+            "resultType": "song",
+            "title": "Fire",
+            "videoId": "vocal",
+            "artists": [{"name": "Some Artist"}],
+            "duration_seconds": 180,
+        },
+    ]
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70,
+        artist="Some Artist",
+        cleaned_artist="some artist",
+        song_title="FIRE (INSTRUMENTAL)",
+        cleaned_song_title="fire instrumental",
+        search_results=search_results,
+        expected_duration_ms=180000,
+    )
+    assert match is None
+
+
+@pytest.mark.parametrize("song_title, bad_title", [
+    ("The Embassy Waltz", "The Embassy Waltz (Instrumental)"),        # seen
+    ("I'm the Man", "I'm The Man (Instrumental)"),                     # seen (Anthrax)
+    ("1 Thing (album version)", "1 Thing (Instrumental)"),            # seen (Amerie)
+    ("Changes (instrumental)", "Keep Ya Head Up"),                    # seen: wrong song + version
+    ("Trapped (instrumental mix)", "My Block (Nitty Remix)"),        # seen: wrong song + version
+])
+def test_song_matcher_seen_bad_matches_now_rejected(song_title, bad_title):
+    # Each of these was actually downloaded from a YTMusic "song" result.
+    # The only candidate is the wrong one, so the desired outcome is None
+    # (no download) rather than the bad grab.
+    search_results = [
+        {
+            "resultType": "song",
+            "title": bad_title,
+            "videoId": "bad",
+            "artists": [{"name": "Requested Artist"}],
+            "duration_seconds": 200,
+        },
+    ]
+    match = _matcher.song_matcher(
+        minimum_match_ratio=85,
+        artist="Requested Artist",
+        cleaned_artist="requested artist",
+        song_title=song_title,
+        cleaned_song_title=song_title.lower(),
+        search_results=search_results,
+        expected_duration_ms=200000,
+    )
+    assert match is None
+
+
+def test_song_matcher_yt_rejects_karaoke_when_not_requested():
+    search_results = [
+        {"title": "Good Enough (Originally Performed by Anita Baker) (Karaoke Version)", "link": "https://kar"},
+    ]
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=50,
+        artist="Anita Baker",
+        query_text="Anita Baker - Good Enough",
+        search_results=search_results,
+    )
+    assert match is None
+
+
+# --- song_matcher_yt: artist may be in the uploader/channel, not the title ---
+
+def test_song_matcher_yt_accepts_artist_in_uploader_channel():
+    search_results = [
+        {"title": "Heat Waves", "uploader": "Glass Animals - Topic", "link": "https://topic"},
+    ]
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=50,
+        artist="Glass Animals",
+        query_text="Glass Animals - Heat Waves",
+        search_results=search_results,
+    )
+    assert match is not None
+    assert match["link"] == "https://topic"
+
+
+def test_song_matcher_yt_accepts_artist_in_dict_channel():
+    # YTS returns channel as a dict {"name": ...}
+    search_results = [
+        {"title": "Heat Waves", "channel": {"name": "Glass Animals"}, "link": "https://yts"},
+    ]
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=50,
+        artist="Glass Animals",
+        query_text="Glass Animals - Heat Waves",
+        search_results=search_results,
+    )
+    assert match is not None
+    assert match["link"] == "https://yts"
 
 
 def test_song_matcher_breaks_early_on_perfect_score(monkeypatch):
