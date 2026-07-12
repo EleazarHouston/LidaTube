@@ -178,6 +178,30 @@ def _get_tracks(session, lidarr_url, api_key, album_id):
 # Per-file audit
 # ---------------------------------------------------------------------------
 
+def lookup_lidarr_tracks(artist_name, album_name, session, lidarr_url, api_key, _cache):
+    """Return the Lidarr track list for an artist/album, caching per (artist, album).
+
+    Returns [] when the artist or album can't be resolved.
+    """
+    cache_key = (artist_name.lower(), album_name.lower())
+    if cache_key not in _cache:
+        if "__artists__" not in _cache:
+            _cache["__artists__"] = _preload_artists(session, lidarr_url, api_key)
+
+        artist_id = _resolve_artist_id(artist_name, _cache["__artists__"])
+        if artist_id is None:
+            _cache[cache_key] = []
+        else:
+            album_cache = _cache.setdefault("__albums__", {})
+            album_id = _get_album_id(session, lidarr_url, api_key, artist_id, album_name, album_cache)
+            if album_id is None:
+                _cache[cache_key] = []
+            else:
+                _cache[cache_key] = _get_tracks(session, lidarr_url, api_key, album_id)
+
+    return _cache[cache_key]
+
+
 def audit_file(path, session, lidarr_url, api_key, tolerance=15, _cache=None):
     """
     Audit a single audio file against Lidarr expected duration.
@@ -201,23 +225,7 @@ def audit_file(path, session, lidarr_url, api_key, tolerance=15, _cache=None):
     track_number = tags.get("track_number")
     title = tags.get("title", "")
 
-    cache_key = (artist_name.lower(), album_name.lower())
-    if cache_key not in _cache:
-        if "__artists__" not in _cache:
-            _cache["__artists__"] = _preload_artists(session, lidarr_url, api_key)
-
-        artist_id = _resolve_artist_id(artist_name, _cache["__artists__"])
-        if artist_id is None:
-            _cache[cache_key] = []
-        else:
-            album_cache = _cache.setdefault("__albums__", {})
-            album_id = _get_album_id(session, lidarr_url, api_key, artist_id, album_name, album_cache)
-            if album_id is None:
-                _cache[cache_key] = []
-            else:
-                _cache[cache_key] = _get_tracks(session, lidarr_url, api_key, album_id)
-
-    tracks = _cache[cache_key]
+    tracks = lookup_lidarr_tracks(artist_name, album_name, session, lidarr_url, api_key, _cache)
     track = find_track_in_lidarr(tracks, track_number, title)
     if track is None:
         return None
