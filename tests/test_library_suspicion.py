@@ -116,6 +116,30 @@ def test_provenance_strong_marker_flags_karaoke_not_in_request():
     assert ls.provenance_has_strong_marker(prov, expected_title="Good Enough")
 
 
+def test_provenance_strong_marker_flags_official_karaoke_lyric_video():
+    # Real true positive: Hayley Williams tracks grabbed as karaoke lyric videos.
+    prov = {"description": "The official karaoke lyric video for “Zissou” by Hayley Williams", "comment": "", "purl": ""}
+    assert ls.provenance_has_strong_marker(prov, expected_title="Zissou")
+
+
+def test_provenance_strong_marker_flags_parenthetical_instrumental():
+    # Real true positive: "Crime Pays (Instrumental (Audio))".
+    prov = {"description": "Freddie Gibbs, Madlib performing Crime Pays (Instrumental (Audio)).", "comment": "", "purl": ""}
+    assert ls.provenance_has_strong_marker(prov, expected_title="Crime Pays")
+
+
+def test_provenance_strong_marker_ignores_karaoke_word_in_lyrics():
+    # Real false positive to avoid: boygenius "We're in Love" lyric mentions karaoke.
+    prov = {"description": "so i'll walk to karaoke, sing the song you wrote about me", "comment": "", "purl": ""}
+    assert not ls.provenance_has_strong_marker(prov, expected_title="We're in Love")
+
+
+def test_provenance_strong_marker_ignores_instrumental_break_in_lyrics():
+    # Real false positive to avoid: Alison Wonderland "Ignore" lyric annotation.
+    prov = {"description": "don't hold on, hold on [instrumental break] [verse 2] it isn't easy", "comment": "", "purl": ""}
+    assert not ls.provenance_has_strong_marker(prov, expected_title="Ignore")
+
+
 def test_provenance_strong_marker_allows_when_request_wants_instrumental():
     prov = {"description": "Song (Instrumental)", "comment": "", "purl": ""}
     assert not ls.provenance_has_strong_marker(prov, expected_title="Song (Instrumental)")

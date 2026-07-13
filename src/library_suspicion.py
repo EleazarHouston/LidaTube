@@ -29,15 +29,34 @@ from mutagen.flac import FLAC
 from mutagen.id3 import ID3
 
 import audit_library
-from _matcher import UNWANTED_VERSION_MARKERS
-import re
 
-# Markers safe to scan for inside free-text descriptions. "cover"/"live"/"tribute"
-# are excluded here because they appear too often in ordinary description prose;
-# these remaining ones almost never do unless the upload really is that version.
-_STRONG_DESC_MARKERS = [
-    m for m in UNWANTED_VERSION_MARKERS
-    if m not in ("cover", "tribute")
+# Version *phrases* scanned inside free-text descriptions. Phrases (not bare
+# words) are required because descriptions frequently embed the song's lyrics,
+# where "instrumental break" or "walk to karaoke" appear innocently. A phrase
+# like "official karaoke" or "(instrumental" only shows up when the upload
+# really is that version.
+_VERSION_PHRASES = [
+    "karaoke version",
+    "karaoke lyric",
+    "official karaoke",
+    "(karaoke",
+    "karaoke)",
+    "instrumental version",
+    "(instrumental",
+    "instrumental)",
+    "-instrumental",
+    "instrumental -",
+    "instrumental audio",
+    "instrumental track",
+    "instrumental mix",
+    "instrumental remake",
+    "backing track",
+    "made famous by",
+    "originally performed by",
+    "in the style of",
+    "nightcore",
+    "8d audio",
+    "sped up",
 ]
 
 
@@ -99,16 +118,12 @@ def is_official_art_track(prov):
     return prov.get("description", "").lower().startswith("provided to youtube by")
 
 
-def _contains_marker(text, marker):
-    return re.search(r"\b" + re.escape(marker) + r"\b", text) is not None
-
-
 def provenance_has_strong_marker(prov, expected_title):
-    """True if a strong version marker appears in the provenance but not the request."""
+    """True if a version phrase appears in the provenance but not the request."""
     expected = (expected_title or "").lower()
     haystack = (prov.get("description", "") + " " + prov.get("comment", "")).lower()
-    for marker in _STRONG_DESC_MARKERS:
-        if _contains_marker(haystack, marker) and not _contains_marker(expected, marker):
+    for phrase in _VERSION_PHRASES:
+        if phrase in haystack and phrase not in expected:
             return True
     return False
 
