@@ -952,6 +952,9 @@ class DataHandler:
                 "provenance_bad_version": False,
                 "lidarr_matched": outcome == "matched",
             })
+            accepted_scores = [entry.get("score") for entry in track.get("_match_trace", []) if entry.get("rejected_by") == "accepted" and entry.get("score") is not None]
+            if accepted_scores:
+                suspicion = max(suspicion, int(round(100 - max(accepted_scores))))
             result_id = store.record_track_result(
                 session_id=session_id,
                 artist=track.get("artist", req_album.get("artist")),
@@ -1250,6 +1253,15 @@ def api_no_match():
     limit, offset = page
     order_by_suspicion = request.args.get("order", "suspicion") == "suspicion"
     return jsonify({"items": data_handler.store.list_no_match(order_by_suspicion, limit, offset), "total": data_handler.store.count_no_match()})
+
+
+@app.route("/api/attention")
+def api_attention():
+    page = _page_args()
+    if page is None:
+        return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
+    limit, offset = page
+    return jsonify({"items": data_handler.store.list_attention(limit, offset), "total": data_handler.store.count_attention()})
 
 
 @app.route("/api/track/<int:track_result_id>/evaluations")

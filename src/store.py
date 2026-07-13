@@ -222,6 +222,22 @@ class Store:
             (limit, offset),
         )
 
+    def list_attention(self, limit=100, offset=0, minimum_suspicion=25):
+        return self._fetchall(
+            """
+            SELECT * FROM track_results
+            WHERE outcome = 'no_match' OR (outcome = 'matched' AND suspicion >= ?)
+            ORDER BY suspicion DESC, updated_at DESC, id DESC LIMIT ? OFFSET ?
+            """,
+            (minimum_suspicion, limit, offset),
+        )
+
+    def count_attention(self, minimum_suspicion=25):
+        return self._fetchone(
+            "SELECT COUNT(*) AS count FROM track_results WHERE outcome = 'no_match' OR (outcome = 'matched' AND suspicion >= ?)",
+            (minimum_suspicion,),
+        )["count"]
+
     def get_evaluations(self, track_result_id):
         return self._fetchall(
             "SELECT * FROM evaluations WHERE track_result_id = ? ORDER BY id ASC",

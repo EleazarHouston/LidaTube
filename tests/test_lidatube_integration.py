@@ -116,11 +116,13 @@ class TestPersistenceApiRoutes:
         tracks = client.get(f"/api/sessions/{session_id}/tracks?limit=1&offset=0").get_json()
         no_match = client.get("/api/no_match?limit=1&offset=0&order=suspicion").get_json()
         evaluations = client.get(f"/api/track/{result_id}/evaluations").get_json()
+        attention = client.get("/api/attention?limit=1&offset=0").get_json()
 
         assert sessions["total"] == 1
         assert tracks["items"][0]["id"] == result_id
         assert no_match["items"][0]["suspicion"] == 88
         assert evaluations["items"][0]["rejected_by"] == "version_gate"
+        assert attention["items"][0]["id"] == result_id
 
     def test_override_endpoints_validate_and_round_trip(self, app_client):
         client, _ = app_client
