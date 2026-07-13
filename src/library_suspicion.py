@@ -53,11 +53,21 @@ _VERSION_PHRASES = [
     "backing track",
     "made famous by",
     "originally performed by",
-    "in the style of",
     "nightcore",
     "8d audio",
     "sped up",
 ]
+
+# Phrases in the instrumental family — suppressed when the request itself asks
+# for an instrumental (including abbreviations like "(inst.)" or "strumentale").
+_INSTRUMENTAL_PHRASES = {
+    "instrumental version", "(instrumental", "instrumental)", "-instrumental",
+    "instrumental -", "instrumental audio", "instrumental track",
+    "instrumental mix", "instrumental remake",
+}
+_INSTRUMENTAL_REQUEST_HINTS = (
+    "instrumental", "(inst.", "(inst)", " inst.", "-inst", "strumentale", "instrumentale",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -118,13 +128,21 @@ def is_official_art_track(prov):
     return prov.get("description", "").lower().startswith("provided to youtube by")
 
 
+def _request_wants_instrumental(expected_title):
+    return any(hint in expected_title for hint in _INSTRUMENTAL_REQUEST_HINTS)
+
+
 def provenance_has_strong_marker(prov, expected_title):
     """True if a version phrase appears in the provenance but not the request."""
     expected = (expected_title or "").lower()
     haystack = (prov.get("description", "") + " " + prov.get("comment", "")).lower()
+    wants_instrumental = _request_wants_instrumental(expected)
     for phrase in _VERSION_PHRASES:
-        if phrase in haystack and phrase not in expected:
-            return True
+        if phrase not in haystack or phrase in expected:
+            continue
+        if phrase in _INSTRUMENTAL_PHRASES and wants_instrumental:
+            continue
+        return True
     return False
 
 

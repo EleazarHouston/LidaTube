@@ -145,6 +145,24 @@ def test_provenance_strong_marker_allows_when_request_wants_instrumental():
     assert not ls.provenance_has_strong_marker(prov, expected_title="Song (Instrumental)")
 
 
+def test_provenance_strong_marker_allows_instrumental_abbreviation_request():
+    # Real false positive to avoid: AKMU "Officially Missing You (Inst.)" — the
+    # request abbreviates instrumental, and the grab IS the instrumental.
+    prov = {"description": "officially missing you (instrumental) · bang yedam", "comment": "", "purl": ""}
+    assert not ls.provenance_has_strong_marker(prov, expected_title="Officially Missing You (Inst.)")
+
+
+def test_provenance_strong_marker_allows_italian_strumentale_request():
+    prov = {"description": "see the light (from tangled) (instrumental)", "comment": "", "purl": ""}
+    assert not ls.provenance_has_strong_marker(prov, expected_title="L'incontro (strumentale)")
+
+
+def test_provenance_strong_marker_ignores_in_the_style_of_prose():
+    # Real false positive to avoid: film synopsis "told in the style of nonlinear narrative".
+    prov = {"description": "the film is told in the style of nonlinear narrative", "comment": "", "purl": ""}
+    assert not ls.provenance_has_strong_marker(prov, expected_title="Playing to Win")
+
+
 def test_provenance_strong_marker_ignores_official_description():
     prov = {"description": "Provided to YouTube by Sub Pop Records\n\nBattery Kinzie", "comment": "", "purl": ""}
     assert not ls.provenance_has_strong_marker(prov, expected_title="Battery Kinzie")
