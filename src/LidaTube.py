@@ -974,6 +974,17 @@ class DataHandler:
             track["_track_result_id"] = result_id
             track.pop("_match_trace", None)
 
+    def _apply_saved_overrides(self, req_album):
+        store = getattr(self, "store", None)
+        if store is None:
+            return
+        for track in req_album.get("missing_tracks", []):
+            if track.get("link"):
+                continue
+            override = store.get_override(track.get("track_id"))
+            if override:
+                self._set_track_link(track, override["forced_url"], "Manual override", "yt")
+
     def _count_found_links(self, req_album):
         return sum(1 for x in req_album["missing_tracks"] if x["link"] != "")
 
@@ -1025,6 +1036,7 @@ class DataHandler:
             if not semaphore_acquired:
                 return
             ytmusic = YTMusic()
+            self._apply_saved_overrides(req_album)
 
             if number_tracks_in_album == number_of_missing_tracks:
                 self._get_album_links(req_album, artist, album_name, cleaned_artist, cleaned_album, query_text, ytmusic)

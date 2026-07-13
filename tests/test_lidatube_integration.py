@@ -770,6 +770,17 @@ def test_ytmusic_session_closed_after_album_search(lidatube_module, monkeypatch)
     assert len(closed) == 1
 
 
+def test_saved_override_is_applied_before_album_matching(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    handler.store.get_override.return_value = {"forced_url": "https://youtube.test/watch?v=forced"}
+    album = {"missing_tracks": [{"track_id": 99, "link": "", "title_of_link": ""}]}
+
+    handler._apply_saved_overrides(album)
+
+    assert album["missing_tracks"][0]["link"] == "https://youtube.test/watch?v=forced"
+    assert album["missing_tracks"][0]["title_of_link"] == "Manual override"
+
+
 def test_record_link_results_persists_no_match_trace(lidatube_module, tmp_path):
     from store import Store
 
