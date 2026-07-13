@@ -35,9 +35,6 @@ const socket = io();
 
 let pending_download_request = false;
 let pending_settings_save = false;
-// Until the server sends its first queue snapshot, its state is unknown. In
-// particular, do not present Idle just because the page loaded before SocketIO.
-let has_received_ytdlp_update = false;
 
 function set_button_loading(button, spinner, is_loading) {
     if (spinner) {
@@ -172,10 +169,31 @@ async function fetch_json(url, options) {
     return data;
 }
 
-select_all_checkbox.addEventListener('change', function () {
+// Titles come from Lidarr/YouTube and are rendered via innerHTML in the history
+// and override tables; escape them so a crafted candidate title can't inject markup.
+function escape_html(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+}
+
+select_all_checkbox.addEventListener('change', async function () {
     const is_checked = this.checked;
-    const checkboxes = document.querySelectorAll('input[name="lidarr_item"]');
-    checkboxes.forEach((checkbox) => {
+    // Sync the shared selection set across the whole (virtualized) list, not just
+    // the ~300 rows currently in the DOM. Programmatic .checked does not fire the
+    // delegated change listener, so the set is updated here explicitly.
+    if (is_checked) {
+        try {
+            const query = encodeURIComponent(lidarr_search.value.trim());
+            const page = await fetch_json(`/api/lidarr?ids_only=1&q=${query}`);
+            page.ids.forEach((index) => selected_lidarr_indices.add(index));
+        } catch (error) {
+            show_toast('Lidarr', error.message);
+        }
+    } else {
+        selected_lidarr_indices.clear();
+    }
+    document.querySelectorAll('input[name="lidarr_item"]').forEach((checkbox) => {
         checkbox.checked = is_checked;
     });
 });
@@ -408,16 +426,15 @@ socket.on('ytdlp_update', (response) => {
     ytdlp_table.replaceChildren(fragment);
 
     pending_download_request = false;
-    has_received_ytdlp_update = true;
     const percent_completion = response.percent_completion || 0;
     const actual_status = typeof response.status === 'string' ? response.status : 'loading';
     update_progress_bar(percent_completion, actual_status);
     set_ytdlp_button_states(actual_status, items.length);
 });
 
-async function show_session_tracks(row, sessionId) { const details = row.nextElementSibling; if (details && details.classList.contains('session-details')) { details.remove(); return; } const page = await fetch_json(`/api/sessions/${sessionId}/tracks?limit=200&offset=0`); const detail = document.createElement('tr'); detail.className = 'session-details'; const cell = document.createElement('td'); cell.colSpan = 5; const table = document.createElement('table'); table.className = 'table table-sm mb-0'; page.items.forEach((track) => { const tr=document.createElement('tr'); tr.innerHTML=`<td>${track.track_title}</td><td>${track.outcome}</td><td>${track.suspicion}</td>`; if (track.outcome === 'no_match') { tr.style.cursor='pointer'; tr.title='Show evaluated candidates'; tr.addEventListener('click', async () => { const existing=tr.nextElementSibling; if (existing && existing.classList.contains('evaluation-details')) { existing.remove(); return; } const evaluations=await fetch_json(`/api/track/${track.id}/evaluations`); const detail=document.createElement('tr'); detail.className='evaluation-details'; const detailCell=document.createElement('td'); detailCell.colSpan=3; const evaluationTable=document.createElement('table'); evaluationTable.className='table table-sm table-bordered mb-0'; evaluationTable.innerHTML='<thead><tr><th>Candidate</th><th>Duration</th><th>Score</th><th>Reason</th></tr></thead>'; const body=document.createElement('tbody'); evaluations.items.forEach((e) => { const er=document.createElement('tr'); er.innerHTML=`<td>${e.candidate_title || 'Unknown'}</td><td>${e.candidate_duration_s || '—'}s</td><td>${e.score ?? '—'}</td><td>${e.rejected_by}</td>`; body.appendChild(er); }); if (!evaluations.items.length) body.innerHTML='<tr><td colspan="4">No candidates returned</td></tr>'; evaluationTable.appendChild(body); detailCell.appendChild(evaluationTable); detail.appendChild(detailCell); tr.after(detail); }); } table.appendChild(tr); }); cell.appendChild(table); detail.appendChild(cell); row.after(detail); }
+async function show_session_tracks(row, sessionId) { const details = row.nextElementSibling; if (details && details.classList.contains('session-details')) { details.remove(); return; } const page = await fetch_json(`/api/sessions/${sessionId}/tracks?limit=200&offset=0`); const detail = document.createElement('tr'); detail.className = 'session-details'; const cell = document.createElement('td'); cell.colSpan = 5; const table = document.createElement('table'); table.className = 'table table-sm mb-0'; page.items.forEach((track) => { const tr=document.createElement('tr'); tr.innerHTML=`<td>${escape_html(track.track_title)}</td><td>${escape_html(track.outcome)}</td><td>${track.suspicion}</td>`; if (track.outcome === 'no_match') { tr.style.cursor='pointer'; tr.title='Show evaluated candidates'; tr.addEventListener('click', async () => { const existing=tr.nextElementSibling; if (existing && existing.classList.contains('evaluation-details')) { existing.remove(); return; } const evaluations=await fetch_json(`/api/track/${track.id}/evaluations`); const detail=document.createElement('tr'); detail.className='evaluation-details'; const detailCell=document.createElement('td'); detailCell.colSpan=3; const evaluationTable=document.createElement('table'); evaluationTable.className='table table-sm table-bordered mb-0'; evaluationTable.innerHTML='<thead><tr><th>Candidate</th><th>Duration</th><th>Score</th><th>Reason</th></tr></thead>'; const body=document.createElement('tbody'); evaluations.items.forEach((e) => { const er=document.createElement('tr'); er.innerHTML=`<td>${escape_html(e.candidate_title || 'Unknown')}</td><td>${e.candidate_duration_s || '—'}s</td><td>${e.score ?? '—'}</td><td>${escape_html(e.rejected_by)}</td>`; body.appendChild(er); }); if (!evaluations.items.length) body.innerHTML='<tr><td colspan="4">No candidates returned</td></tr>'; evaluationTable.appendChild(body); detailCell.appendChild(evaluationTable); detail.appendChild(detailCell); tr.after(detail); }); } table.appendChild(tr); }); cell.appendChild(table); detail.appendChild(cell); row.after(detail); }
 async function load_history() { const page = await fetch_json('/api/sessions?limit=100&offset=0'); history_table.replaceChildren(...page.items.map((s) => { const r=document.createElement('tr'); r.innerHTML=`<td>${new Date(s.started_at).toLocaleString()}</td><td>${s.status}</td><td>${s.requested_count}</td><td>${s.matched_count}</td><td>${s.failed_count}</td>`; r.style.cursor='pointer'; r.addEventListener('click', () => show_session_tracks(r, s.id).catch((e) => show_toast('History', e.message))); return r; })); }
-async function load_overrides() { const page = await fetch_json('/api/attention?limit=100&offset=0'); override_table.replaceChildren(...page.items.map((track) => { const r=document.createElement('tr'); const form=document.createElement('form'); form.className='d-flex gap-1'; form.innerHTML='<input class="form-control form-control-sm" required placeholder="https://youtube.com/..."><button class="btn btn-sm btn-primary">Save</button>'; form.addEventListener('submit', async (e) => { e.preventDefault(); await fetch_json('/api/override', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({track_id:track.track_id, forced_url:form.querySelector('input').value})}); show_toast('Override','Saved'); }); r.innerHTML=`<td>${track.artist} - ${track.track_title} <small class="text-muted">(${track.outcome})</small></td><td>${track.suspicion}</td>`; const c=document.createElement('td'); c.appendChild(form); r.appendChild(c); return r; })); }
+async function load_overrides() { const page = await fetch_json('/api/attention?limit=100&offset=0'); override_table.replaceChildren(...page.items.map((track) => { const r=document.createElement('tr'); const form=document.createElement('form'); form.className='d-flex gap-1'; form.innerHTML='<input class="form-control form-control-sm" required placeholder="https://youtube.com/..."><button class="btn btn-sm btn-primary">Save</button>'; form.addEventListener('submit', async (e) => { e.preventDefault(); await fetch_json('/api/override', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({track_id:track.track_id, forced_url:form.querySelector('input').value})}); show_toast('Override','Saved'); }); r.innerHTML=`<td>${escape_html(track.artist)} - ${escape_html(track.track_title)} <small class="text-muted">(${escape_html(track.outcome)})</small></td><td>${track.suspicion}</td>`; const c=document.createElement('td'); c.appendChild(form); r.appendChild(c); return r; })); }
 document.getElementById('history-panel').addEventListener('show.bs.collapse', () => load_history().catch((e) => show_toast('History', e.message)));
 document.getElementById('override-panel').addEventListener('show.bs.collapse', () => load_overrides().catch((e) => show_toast('Override', e.message)));
 

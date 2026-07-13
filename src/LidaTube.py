@@ -1219,24 +1219,37 @@ def _page_args():
     return limit, offset
 
 
-@app.route("/api/lidarr")
-def api_lidarr():
-    page = _page_args()
-    if page is None:
-        return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
-    limit, offset = page
-    query = request.args.get("q", "").strip().lower()
-    items = []
+def _filtered_lidarr_indices(query):
+    """Positional indices of albums that still have missing/pending tracks, filtered by query."""
+    indices = []
     for index, item in enumerate(data_handler.lidarr_items):
         if item.get("missing_count", 0) <= 0 and item.get("scan_ready", False):
             continue
         label = f"{item.get('artist', '')} {item.get('album_name', '')}".lower()
         if query and query not in label:
             continue
+        indices.append(index)
+    return indices
+
+
+@app.route("/api/lidarr")
+def api_lidarr():
+    query = request.args.get("q", "").strip().lower()
+    indices = _filtered_lidarr_indices(query)
+    # ids_only powers "select all" across the virtualized list without loading rows.
+    if request.args.get("ids_only"):
+        return jsonify({"ids": indices, "total": len(indices)})
+    page = _page_args()
+    if page is None:
+        return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
+    limit, offset = page
+    items = []
+    for index in indices[offset:offset + limit]:
+        item = data_handler.lidarr_items[index]
         slim = {key: value for key, value in item.items() if key != "missing_tracks"}
         slim["index"] = index
         items.append(slim)
-    return jsonify({"items": items[offset:offset + limit], "total": len(items)})
+    return jsonify({"items": items, "total": len(indices)})
 
 
 @app.route("/api/sessions")

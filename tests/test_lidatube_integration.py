@@ -145,6 +145,19 @@ class TestPersistenceApiRoutes:
         assert page["items"][0]["album_name"] == "One"
         assert page["items"][0]["index"] == 0
 
+    def test_lidarr_api_ids_only_returns_all_matching_indices(self, app_client):
+        client, module = app_client
+        module.data_handler.lidarr_items = [
+            {"artist": "Artist", "album_name": "One", "missing_count": 1, "track_count": 2, "scan_ready": True},
+            {"artist": "Artist", "album_name": "Complete", "missing_count": 0, "track_count": 2, "scan_ready": True},
+            {"artist": "Other", "album_name": "Two", "missing_count": 1, "track_count": 1, "scan_ready": True},
+        ]
+        # ids_only must return every filtered index (for select-all), not just a page.
+        data = client.get("/api/lidarr?ids_only=1").get_json()
+        assert data["ids"] == [0, 2]
+        assert data["total"] == 2
+        assert client.get("/api/lidarr?ids_only=1&q=other").get_json()["ids"] == [2]
+
     def test_persistence_api_rejects_invalid_pagination(self, app_client):
         client, _ = app_client
         assert client.get("/api/sessions?limit=0").status_code == 400
