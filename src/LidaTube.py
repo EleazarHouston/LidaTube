@@ -13,6 +13,7 @@ import concurrent.futures
 from thefuzz import fuzz
 import _matcher
 import _general
+import library_suspicion
 from config import AppConfig
 from lidarr_client import LidarrClient
 from downloader import Downloader
@@ -943,6 +944,14 @@ class DataHandler:
             if track.get("_track_result_id"):
                 continue
             outcome = "matched" if track.get("link") else "no_match"
+            suspicion, _ = library_suspicion.score_track({
+                "duration_delta_s": None,
+                "expected_known": bool(track.get("duration_ms")),
+                "is_grab": False,
+                "official_art_track": False,
+                "provenance_bad_version": False,
+                "lidarr_matched": outcome == "matched",
+            })
             result_id = store.record_track_result(
                 session_id=session_id,
                 artist=track.get("artist", req_album.get("artist")),
@@ -955,7 +964,7 @@ class DataHandler:
                 link=track.get("link") or None,
                 title_of_link=track.get("title_of_link") or None,
                 matched_via=track.get("_matched_via"),
-                suspicion=track.get("suspicion", 0),
+                suspicion=track.get("suspicion", suspicion),
             )
             if outcome == "no_match":
                 store.record_evaluations(result_id, track.get("_match_trace", []))
@@ -1085,6 +1094,10 @@ class DataHandler:
                 if self.ytdlp_stop_event.is_set():
                     return True
                 if missing_track["link"] == "":
+                    override = self.store.get_override(missing_track.get("track_id")) if getattr(self, "store", None) else None
+                    if override:
+                        self._set_track_link(missing_track, override["forced_url"], "Manual override", "yt")
+                        continue
                     song_title = missing_track["track_title"]
                     cleaned_song_title = _general.string_cleaner(song_title).lower()
                     query_text = f'{missing_track["artist"]} - {song_title}'

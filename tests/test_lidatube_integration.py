@@ -80,6 +80,7 @@ def build_data_handler(module):
     handler.config = cfg
     handler.store = Mock()
     handler.store.start_session.return_value = 1
+    handler.store.get_override.return_value = None
     handler.store.get_session_result_counts.return_value = {"matched_count": 0, "failed_count": 0}
     handler.current_session_id = None
 
