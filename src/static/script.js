@@ -32,6 +32,9 @@ const socket = io();
 
 let pending_download_request = false;
 let pending_settings_save = false;
+// Until the server sends its first queue snapshot, its state is unknown. In
+// particular, do not present Idle just because the page loaded before SocketIO.
+let has_received_ytdlp_update = false;
 
 function set_button_loading(button, spinner, is_loading) {
     if (spinner) {
@@ -113,7 +116,7 @@ function update_progress_bar(percentage, status) {
         ytdlp_status_text.textContent = 'Failed';
     } else {
         ytdlp_progress_bar.classList.add('bg-primary');
-        ytdlp_status_text.textContent = 'Idle';
+        ytdlp_status_text.textContent = 'Loading';
     }
 }
 
@@ -356,7 +359,7 @@ reset_ytdlp.addEventListener('click', function () {
     }
     socket.emit('reset_ytdlp');
     ytdlp_table.replaceChildren();
-    update_progress_bar(0, 'idle');
+    update_progress_bar(0, 'loading');
     set_ytdlp_button_states('idle', 0);
     show_toast('Downloads', 'Reset requested. Clearing queue...');
 });
@@ -440,8 +443,9 @@ socket.on('ytdlp_update', (response) => {
     ytdlp_table.replaceChildren(fragment);
 
     pending_download_request = false;
+    has_received_ytdlp_update = true;
     const percent_completion = response.percent_completion || 0;
-    const actual_status = response.status || 'idle';
+    const actual_status = typeof response.status === 'string' ? response.status : 'loading';
     update_progress_bar(percent_completion, actual_status);
     set_ytdlp_button_states(actual_status, items.length);
 });
@@ -481,6 +485,6 @@ theme_switch.addEventListener('change', () => {
 });
 
 update_lidarr_progress_bar('idle', { phase: 'Idle', percent: 0 });
-update_progress_bar(0, 'idle');
+update_progress_bar(0, 'loading');
 set_lidarr_button_states('idle', 0);
 set_ytdlp_button_states('idle', 0);

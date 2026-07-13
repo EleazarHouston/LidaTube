@@ -16,6 +16,7 @@ import _general
 from config import AppConfig
 from lidarr_client import LidarrClient
 from downloader import Downloader
+from store import Store
 
 
 class DataHandler:
@@ -34,6 +35,8 @@ class DataHandler:
         # Configuration
         self.config = AppConfig(self.general_logger)
         self.config.save()
+        self.store = Store(os.path.join(self.config.CONFIG_FOLDER, "lidatube.db"))
+        self.current_session_id = None
         self._fd_limit = self._get_fd_limit()
         self._fd_pressure_ratio = 0.85
         self._fd_backoff_lock = threading.Lock()
