@@ -249,6 +249,20 @@ class Store:
             (limit, offset),
         )
 
+    def count_sessions(self):
+        return self._fetchone("SELECT COUNT(*) AS count FROM sessions")["count"]
+
+    def count_session_tracks(self, session_id):
+        return self._fetchone("SELECT COUNT(*) AS count FROM track_results WHERE session_id = ?", (session_id,))["count"]
+
+    def count_no_match(self):
+        return self._fetchone("SELECT COUNT(*) AS count FROM track_results WHERE outcome = 'no_match'")["count"]
+
+    def delete_override(self, track_id):
+        with _DB_LOCK:
+            self._connection.execute("DELETE FROM overrides WHERE track_id = ?", (track_id,))
+            self._connection.commit()
+
     def get_session_result_counts(self, session_id):
         row = self._fetchone(
             """

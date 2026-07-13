@@ -98,6 +98,43 @@ def app_client(lidatube_module):
         yield client, lidatube_module
 
 
+class TestPersistenceApiRoutes:
+    def test_sessions_tracks_no_match_and_evaluations_are_paginated(self, app_client):
+        client, module = app_client
+        session_id = module.data_handler.store.start_session(requested_count=1)
+        result_id = module.data_handler.store.record_track_result(
+            session_id=session_id, artist="Artist", album="Album", track_title="Missing",
+            track_number=1, track_id=17, duration_ms=180000, outcome="no_match", suspicion=88,
+        )
+        module.data_handler.store.record_evaluations(result_id, [{
+            "source": "ytmusic", "candidate_title": "Wrong", "candidate_url": "https://example.test/wrong",
+            "candidate_duration_s": 180, "score": 88, "rejected_by": "version_gate",
+        }])
+
+        sessions = client.get("/api/sessions?limit=1&offset=0").get_json()
+        tracks = client.get(f"/api/sessions/{session_id}/tracks?limit=1&offset=0").get_json()
+        no_match = client.get("/api/no_match?limit=1&offset=0&order=suspicion").get_json()
+        evaluations = client.get(f"/api/track/{result_id}/evaluations").get_json()
+
+        assert sessions["total"] == 1
+        assert tracks["items"][0]["id"] == result_id
+        assert no_match["items"][0]["suspicion"] == 88
+        assert evaluations["items"][0]["rejected_by"] == "version_gate"
+
+    def test_override_endpoints_validate_and_round_trip(self, app_client):
+        client, _ = app_client
+        assert client.post("/api/override", json={"track_id": 1}).status_code == 400
+        response = client.post("/api/override", json={"track_id": 17, "forced_url": "https://youtube.test/watch?v=forced", "note": "known good"})
+        assert response.status_code == 201
+        assert client.get("/api/overrides?limit=10&offset=0").get_json()["items"][0]["track_id"] == 17
+        assert client.delete("/api/override/17").status_code == 200
+        assert client.get("/api/overrides?limit=10&offset=0").get_json()["items"] == []
+
+    def test_persistence_api_rejects_invalid_pagination(self, app_client):
+        client, _ = app_client
+        assert client.get("/api/sessions?limit=0").status_code == 400
+
+
 class TestCookiesRoutes:
     def test_status_no_file(self, app_client):
         client, module = app_client

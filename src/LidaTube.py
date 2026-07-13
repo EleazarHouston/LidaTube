@@ -1180,6 +1180,76 @@ def home():
     return render_template("base.html")
 
 
+def _page_args():
+    try:
+        limit = int(request.args.get("limit", 100))
+        offset = int(request.args.get("offset", 0))
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= limit <= 200 or offset < 0:
+        return None
+    return limit, offset
+
+
+@app.route("/api/sessions")
+def api_sessions():
+    page = _page_args()
+    if page is None:
+        return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
+    limit, offset = page
+    return jsonify({"items": data_handler.store.list_sessions(limit, offset), "total": data_handler.store.count_sessions()})
+
+
+@app.route("/api/sessions/<int:session_id>/tracks")
+def api_session_tracks(session_id):
+    page = _page_args()
+    if page is None:
+        return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
+    limit, offset = page
+    return jsonify({"items": data_handler.store.get_session_tracks(session_id, limit, offset), "total": data_handler.store.count_session_tracks(session_id)})
+
+
+@app.route("/api/no_match")
+def api_no_match():
+    page = _page_args()
+    if page is None:
+        return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
+    limit, offset = page
+    order_by_suspicion = request.args.get("order", "suspicion") == "suspicion"
+    return jsonify({"items": data_handler.store.list_no_match(order_by_suspicion, limit, offset), "total": data_handler.store.count_no_match()})
+
+
+@app.route("/api/track/<int:track_result_id>/evaluations")
+def api_track_evaluations(track_result_id):
+    return jsonify({"items": data_handler.store.get_evaluations(track_result_id)})
+
+
+@app.route("/api/overrides")
+def api_overrides():
+    page = _page_args()
+    if page is None:
+        return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
+    limit, offset = page
+    return jsonify({"items": data_handler.store.list_overrides(limit, offset)})
+
+
+@app.route("/api/override", methods=["POST"])
+def api_set_override():
+    data = request.get_json(silent=True) or {}
+    track_id = data.get("track_id")
+    forced_url = data.get("forced_url")
+    if not isinstance(track_id, int) or not isinstance(forced_url, str) or not forced_url.strip():
+        return jsonify({"error": "track_id and forced_url are required"}), 400
+    data_handler.store.set_override(track_id, forced_url.strip(), data.get("note"))
+    return jsonify({"message": "Override saved"}), 201
+
+
+@app.route("/api/override/<int:track_id>", methods=["DELETE"])
+def api_delete_override(track_id):
+    data_handler.store.delete_override(track_id)
+    return jsonify({"message": "Override deleted"})
+
+
 @app.route("/cookies_status")
 def cookies_status():
     exists = data_handler.config.cookies_path is not None and os.path.exists(data_handler.config.cookies_path)
