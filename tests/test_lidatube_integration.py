@@ -130,6 +130,18 @@ class TestPersistenceApiRoutes:
         assert client.delete("/api/override/17").status_code == 200
         assert client.get("/api/overrides?limit=10&offset=0").get_json()["items"] == []
 
+    def test_lidarr_api_pages_and_filters_attention_items(self, app_client):
+        client, module = app_client
+        module.data_handler.lidarr_items = [
+            {"artist": "Artist", "album_name": "One", "missing_count": 1, "track_count": 2, "scan_ready": True},
+            {"artist": "Artist", "album_name": "Complete", "missing_count": 0, "track_count": 2, "scan_ready": True},
+            {"artist": "Other", "album_name": "Two", "missing_count": 1, "track_count": 1, "scan_ready": True},
+        ]
+        page = client.get("/api/lidarr?limit=1&offset=0&q=artist").get_json()
+        assert page["total"] == 1
+        assert page["items"][0]["album_name"] == "One"
+        assert page["items"][0]["index"] == 0
+
     def test_persistence_api_rejects_invalid_pagination(self, app_client):
         client, _ = app_client
         assert client.get("/api/sessions?limit=0").status_code == 400

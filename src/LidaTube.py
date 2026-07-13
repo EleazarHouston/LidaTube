@@ -1191,6 +1191,26 @@ def _page_args():
     return limit, offset
 
 
+@app.route("/api/lidarr")
+def api_lidarr():
+    page = _page_args()
+    if page is None:
+        return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
+    limit, offset = page
+    query = request.args.get("q", "").strip().lower()
+    items = []
+    for index, item in enumerate(data_handler.lidarr_items):
+        if item.get("missing_count", 0) <= 0 and item.get("scan_ready", False):
+            continue
+        label = f"{item.get('artist', '')} {item.get('album_name', '')}".lower()
+        if query and query not in label:
+            continue
+        slim = {key: value for key, value in item.items() if key != "missing_tracks"}
+        slim["index"] = index
+        items.append(slim)
+    return jsonify({"items": items[offset:offset + limit], "total": len(items)})
+
+
 @app.route("/api/sessions")
 def api_sessions():
     page = _page_args()
