@@ -89,6 +89,7 @@
               </div>
               <div id="lidarr-scan-status-text" class="small text-muted mt-1">Loading...</div>
               <div id="lidarr-count-text" class="small text-muted"></div>
+              <input id="lidarr-search" class="form-control form-control-sm mt-1" type="search" placeholder="Filter albums" aria-label="Filter albums">
             </div>
             <div class="container scrollable p-0">
               <div class="table">
@@ -156,6 +157,19 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="container-fluid mb-3">
+    <div class="accordion" id="persistence-accordion">
+      <div class="accordion-item">
+        <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#history-panel">History</button></h2>
+        <div id="history-panel" class="accordion-collapse collapse" data-bs-parent="#persistence-accordion"><div class="accordion-body p-2"><table class="table table-striped" id="history-table"><thead><tr><th>Started</th><th>Status</th><th>Requested</th><th>Matched</th><th>Failed</th></tr></thead><tbody></tbody></table><div id="history-sentinel"></div></div></div>
+      </div>
+      <div class="accordion-item">
+        <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#override-panel">Override</button></h2>
+        <div id="override-panel" class="accordion-collapse collapse" data-bs-parent="#persistence-accordion"><div class="accordion-body p-2"><p class="small text-muted">Tracks needing attention, sorted by suspicion.</p><table class="table table-striped" id="override-table"><thead><tr><th>Track</th><th>Suspicion</th><th>Force YouTube URL</th></tr></thead><tbody></tbody></table><div id="override-sentinel"></div></div></div>
       </div>
     </div>
   </div>

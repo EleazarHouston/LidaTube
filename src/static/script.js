@@ -6,6 +6,9 @@ const lidarr_progress_bar = document.getElementById('lidarr-progress-status-bar-
 const lidarr_scan_status_text = document.getElementById('lidarr-scan-status-text');
 const lidarr_table = document.getElementById('lidarr-table').getElementsByTagName('tbody')[0];
 const select_all_checkbox = document.getElementById('select-all-checkbox');
+const lidarr_search = document.getElementById('lidarr-search');
+const history_table = document.querySelector('#history-table tbody');
+const override_table = document.querySelector('#override-table tbody');
 
 const start_ytdlp = document.getElementById('start-ytdlp-btn');
 const stop_ytdlp = document.getElementById('stop-ytdlp-btn');
@@ -181,6 +184,8 @@ select_all_checkbox.addEventListener('change', function () {
 // attaching (and leaking) one listener per row on each table rebuild.
 lidarr_table.addEventListener('change', function (event) {
     if (event.target && event.target.name === 'lidarr_item') {
+        const index = Number(event.target.dataset.index);
+        if (event.target.checked) selected_lidarr_indices.add(index); else selected_lidarr_indices.delete(index);
         check_if_all_true();
     }
 });
@@ -189,6 +194,7 @@ get_wanted_lidarr.addEventListener('click', function () {
     if (get_wanted_lidarr.disabled) {
         return;
     }
+    selected_lidarr_indices.clear();
     lidarr_table.replaceChildren();
     select_all_checkbox.checked = false;
     set_button_loading(get_wanted_lidarr, lidarr_spinner, true);
@@ -209,6 +215,7 @@ reset_lidarr.addEventListener('click', function () {
         return;
     }
     socket.emit('reset_lidarr');
+    selected_lidarr_indices.clear();
     lidarr_table.replaceChildren();
     select_all_checkbox.checked = false;
     lidarr_count_text.textContent = '';
@@ -325,14 +332,7 @@ start_ytdlp.addEventListener('click', function () {
         return;
     }
 
-    const checked_indices = [];
-    const checkboxes = document.getElementsByName('lidarr_item');
-
-    checkboxes.forEach((checkbox) => {
-        if (checkbox.checked) {
-            checked_indices.push(parseInt(checkbox.dataset.index, 10));
-        }
-    });
+    const checked_indices = Array.from(selected_lidarr_indices);
 
     if (checked_indices.length === 0) {
         show_toast('Downloads', 'Select at least one album before starting download.');
@@ -364,65 +364,30 @@ reset_ytdlp.addEventListener('click', function () {
     show_toast('Downloads', 'Reset requested. Clearing queue...');
 });
 
-socket.on('lidarr_update', (response) => {
-    const status = response.status || 'idle';
-    const scan_progress = response.scan_progress || {};
-    update_lidarr_progress_bar(status, scan_progress);
-
-    if (response.data === null || response.data === undefined) {
-        set_lidarr_button_states(status, lidarr_table.rows.length);
-        return;
-    }
-
-    const items = Array.isArray(response.data) ? response.data : [];
-    const total_count = response.total_count ?? 0;
-
-    if (total_count > 0 && items.length === 0) {
-        lidarr_count_text.textContent = `All ${total_count.toLocaleString()} albums downloaded`;
-    } else if (total_count > 0) {
-        lidarr_count_text.textContent = `${items.length.toLocaleString()} with missing tracks (${total_count.toLocaleString()} total)`;
-    } else {
-        lidarr_count_text.textContent = '';
-    }
-
-    // Build all rows off-DOM, then attach once, to avoid a reflow per row.
-    const fragment = document.createDocumentFragment();
-    let all_checked = true;
-    items.forEach((item, i) => {
-        if (!item.checked) {
-            all_checked = false;
-        }
-        const row = document.createElement('tr');
-
-        const cell1 = document.createElement('td');
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.className = 'form-check-input';
-        checkbox.id = 'lidarr_' + i;
-        checkbox.name = 'lidarr_item';
-        checkbox.checked = item.checked;
-        checkbox.dataset.index = item.index ?? i;
-        cell1.appendChild(checkbox);
-
-        const cell2 = document.createElement('td');
-        const label = document.createElement('label');
-        label.className = 'form-check-label';
-        label.htmlFor = 'lidarr_' + i;
-        label.textContent = item.artist + ' - ' + item.album_name;
-        cell2.appendChild(label);
-
-        const cell3 = document.createElement('td');
-        cell3.className = 'text-center';
-        cell3.textContent = item.scan_ready === false ? 'Scanning...' : `${item.missing_count}/${item.track_count}`;
-
-        row.append(cell1, cell2, cell3);
-        fragment.appendChild(row);
-    });
-    lidarr_table.replaceChildren(fragment);
-
-    select_all_checkbox.checked = items.length > 0 ? all_checked : false;
-    set_lidarr_button_states(status, items.length);
-});
+const selected_lidarr_indices = new Set();
+let lidarr_offset = 0;
+let lidarr_total = 0;
+let lidarr_status = 'idle';
+let lidarr_loading = false;
+let lidarr_search_timer;
+async function load_lidarr_page(reset = false) {
+    if (lidarr_loading || (!reset && lidarr_offset >= lidarr_total && lidarr_total !== 0)) return;
+    lidarr_loading = true;
+    if (reset) { lidarr_offset = 0; lidarr_total = 0; lidarr_table.replaceChildren(); }
+    try {
+        const query = encodeURIComponent(lidarr_search.value.trim());
+        const page = await fetch_json(`/api/lidarr?limit=100&offset=${lidarr_offset}&q=${query}`);
+        const fragment = document.createDocumentFragment();
+        page.items.forEach((item) => { const row=document.createElement('tr'); row.innerHTML=`<td><input class="form-check-input" type="checkbox" name="lidarr_item" data-index="${item.index}" ${selected_lidarr_indices.has(item.index) || item.checked ? 'checked' : ''}></td><td></td><td class="text-center"></td>`; row.children[1].textContent=`${item.artist} - ${item.album_name}`; row.children[2].textContent=item.scan_ready === false ? 'Scanning...' : `${item.missing_count}/${item.track_count}`; fragment.appendChild(row); });
+        lidarr_table.appendChild(fragment); while (lidarr_table.rows.length > 300) lidarr_table.deleteRow(0); lidarr_offset += page.items.length; lidarr_total = page.total;
+        lidarr_count_text.textContent = lidarr_total ? `${lidarr_total.toLocaleString()} with missing tracks` : 'All albums downloaded';
+        set_lidarr_button_states(lidarr_status, lidarr_total);
+    } catch (error) { show_toast('Lidarr', error.message); } finally { lidarr_loading = false; }
+}
+const lidarr_observer = new IntersectionObserver((entries) => { if (entries[0].isIntersecting) load_lidarr_page(); });
+const lidarr_sentinel = document.createElement('div'); lidarr_table.parentElement.appendChild(lidarr_sentinel); lidarr_observer.observe(lidarr_sentinel);
+lidarr_search.addEventListener('input', () => { clearTimeout(lidarr_search_timer); lidarr_search_timer=setTimeout(() => load_lidarr_page(true), 250); });
+socket.on('lidarr_update', (response) => { lidarr_status = response.status || 'idle'; update_lidarr_progress_bar(lidarr_status, response.scan_progress || {}); set_lidarr_button_states(lidarr_status, lidarr_total); if (response.data !== null) load_lidarr_page(true); });
 
 socket.on('ytdlp_update', (response) => {
     const items = Array.isArray(response.data) ? response.data : [];
@@ -449,6 +414,11 @@ socket.on('ytdlp_update', (response) => {
     update_progress_bar(percent_completion, actual_status);
     set_ytdlp_button_states(actual_status, items.length);
 });
+
+async function load_history() { const page = await fetch_json('/api/sessions?limit=100&offset=0'); history_table.replaceChildren(...page.items.map((s) => { const r=document.createElement('tr'); r.innerHTML=`<td>${new Date(s.started_at).toLocaleString()}</td><td>${s.status}</td><td>${s.requested_count}</td><td>${s.matched_count}</td><td>${s.failed_count}</td>`; return r; })); }
+async function load_overrides() { const page = await fetch_json('/api/no_match?limit=100&offset=0&order=suspicion'); override_table.replaceChildren(...page.items.map((track) => { const r=document.createElement('tr'); const form=document.createElement('form'); form.className='d-flex gap-1'; form.innerHTML='<input class="form-control form-control-sm" required placeholder="https://youtube.com/..."><button class="btn btn-sm btn-primary">Save</button>'; form.addEventListener('submit', async (e) => { e.preventDefault(); await fetch_json('/api/override', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({track_id:track.track_id, forced_url:form.querySelector('input').value})}); show_toast('Override','Saved'); }); r.innerHTML=`<td>${track.artist} - ${track.track_title}</td><td>${track.suspicion}</td>`; const c=document.createElement('td'); c.appendChild(form); r.appendChild(c); return r; })); }
+document.getElementById('history-panel').addEventListener('show.bs.collapse', () => load_history().catch((e) => show_toast('History', e.message)));
+document.getElementById('override-panel').addEventListener('show.bs.collapse', () => load_overrides().catch((e) => show_toast('Override', e.message)));
 
 socket.on('new_toast_msg', function (data) {
     show_toast(data.title, data.message);
