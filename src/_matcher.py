@@ -152,6 +152,24 @@ def _duration_ok(expected_ms, candidate_seconds, tolerance_seconds):
     return abs(candidate_seconds - expected_ms / 1000.0) <= tolerance_seconds
 
 
+def _append_trace(trace, source, item, candidate_seconds, score, rejected_by):
+    """Record one candidate decision without changing matcher return contracts."""
+    if trace is None:
+        return
+    video_id = item.get("videoId")
+    candidate_url = item.get("webpage_url") or item.get("link")
+    if not candidate_url and video_id:
+        candidate_url = f"https://www.youtube.com/watch?v={video_id}"
+    trace.append({
+        "source": source,
+        "candidate_title": item.get("title", ""),
+        "candidate_url": candidate_url,
+        "candidate_duration_s": candidate_seconds or 0,
+        "score": score,
+        "rejected_by": rejected_by,
+    })
+
+
 def remove_album_keywords(text):
     return _remove_keywords(text, ALBUM_KEYWORDS_TO_REMOVE)
 
@@ -160,88 +178,81 @@ def remove_song_keywords(text):
     return _remove_keywords(text, SONG_KEYWORDS_TO_REMOVE)
 
 
-def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, cleaned_album, search_results, item_wanted_type="Album"):
+def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, cleaned_album, search_results,
+                  item_wanted_type="Album", trace=None):
     if not search_results:
         return None
     best_match_rating = 0
     best_match_item = None
     for item in search_results:
         if item["type"] != item_wanted_type:
+            _append_trace(trace, "ytmusic", item, 0, None, "not_song_type")
             continue
         raw_album_match_ratio = fuzz.ratio(album_name, item["title"])
         artists_string = "".join([item["artists"][x]["name"] for x in range(1, len(item["artists"]))])
         raw_artist_match_ratio = fuzz.ratio(artist, artists_string)
-
         cleaned_yt_album_name = _normalized_text(item["title"])
         cleaned_album_match_ratio = fuzz.ratio(cleaned_album, cleaned_yt_album_name)
         cleaned_artists_string = _normalized_text(artists_string)
         cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
-
         cleaned_yt_album_title_minus_keywords = remove_album_keywords(cleaned_yt_album_name)
         album_ratio_minus_keywords = fuzz.ratio(cleaned_album, cleaned_yt_album_title_minus_keywords)
-
         cleaned_yt_artist_minus_keywords = remove_album_keywords(cleaned_artists_string)
         artist_ratio_minus_keywords = fuzz.ratio(cleaned_artist, cleaned_yt_artist_minus_keywords)
-
-        combined_rating = (raw_album_match_ratio + raw_artist_match_ratio + cleaned_album_match_ratio + cleaned_artist_match_ratio + album_ratio_minus_keywords + artist_ratio_minus_keywords) / 6
-
-        if combined_rating > best_match_rating:
-            best_match_rating = combined_rating
+        score = (raw_album_match_ratio + raw_artist_match_ratio + cleaned_album_match_ratio + cleaned_artist_match_ratio + album_ratio_minus_keywords + artist_ratio_minus_keywords) / 6
+        _append_trace(trace, "ytmusic", item, 0, score, "accepted" if score > _normalize_min_ratio(minimum_match_ratio) else "below_threshold")
+        if score > best_match_rating:
+            best_match_rating = score
             best_match_item = item
-            if combined_rating == 100:
+            if score == 100:
                 break
-
     return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
 
 
 def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
-                 item_wanted_type="song", expected_duration_ms=0, duration_tolerance_seconds=15):
+                 item_wanted_type="song", expected_duration_ms=0, duration_tolerance_seconds=15, trace=None):
     if not search_results:
         return None
     best_match_rating = 0
     best_match_item = None
     cleaned_song_title_minus_keywords = remove_song_keywords(cleaned_song_title)
+    threshold = _normalize_min_ratio(minimum_match_ratio)
 
     for item in search_results:
-        if item["resultType"] != item_wanted_type:
-            continue
-
-        if _version_mismatch(song_title, item["title"]):
-            continue
-
         candidate_seconds = item.get("duration_seconds") or 0
-        if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
+        if item["resultType"] != item_wanted_type:
+            _append_trace(trace, "ytmusic", item, candidate_seconds, None, "not_song_type")
             continue
-
+        if _version_mismatch(song_title, item["title"]):
+            _append_trace(trace, "ytmusic", item, candidate_seconds, None, "version_gate")
+            continue
+        if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
+            _append_trace(trace, "ytmusic", item, candidate_seconds, None, "duration_gate")
+            continue
         artists_string = "".join([x["name"] for x in item["artists"]])
         raw_artist_match_ratio = fuzz.ratio(artist, artists_string)
         if artist.lower() in artists_string.lower():
             raw_artist_match_ratio = 100
-
         cleaned_artists_string = _normalized_text(artists_string)
         cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
-
         cleaned_yt_song_title = _normalized_text(item["title"])
         cleaned_song_title_ratio = fuzz.ratio(cleaned_song_title, cleaned_yt_song_title)
         if song_title.lower() in item["title"].lower():
             cleaned_song_title_ratio = 100
-
         cleaned_yt_title_minus_keywords = remove_song_keywords(cleaned_yt_song_title)
         cleaned_song_title_minus_keywords_ratio = fuzz.ratio(cleaned_song_title_minus_keywords, cleaned_yt_title_minus_keywords)
-
-        combined_rating = (raw_artist_match_ratio + cleaned_artist_match_ratio + cleaned_song_title_ratio + cleaned_song_title_minus_keywords_ratio) / 4
-
-        if combined_rating > best_match_rating:
-            best_match_rating = combined_rating
+        score = (raw_artist_match_ratio + cleaned_artist_match_ratio + cleaned_song_title_ratio + cleaned_song_title_minus_keywords_ratio) / 4
+        _append_trace(trace, "ytmusic", item, candidate_seconds, score, "accepted" if score > threshold else "below_threshold")
+        if score > best_match_rating:
+            best_match_rating = score
             best_match_item = item
-            if combined_rating == 100:
+            if score == 100:
                 break
-
     return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
 
 
 def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
-                    expected_duration_ms=0, duration_tolerance_seconds=15):
+                    expected_duration_ms=0, duration_tolerance_seconds=15, trace=None):
     if not search_results:
         return None
     best_match_rating = 0
@@ -249,47 +260,37 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
     cleaned_query_text = _general.string_cleaner(query_text)
     cleaned_query_text_minus_keywords = remove_song_keywords(cleaned_query_text)
     cleaned_artist = _general.string_cleaner(artist).lower() if artist else ""
+    threshold = _normalize_min_ratio(minimum_match_ratio)
 
     for item in search_results:
         title = item.get("title", "")
-
-        # Artist must appear in the title OR the uploader/channel — hard gate, not
-        # a scoring factor. Prevents covers and unrelated videos from passing on
-        # title alone, while still allowing topic/VEVO uploads titled as just the song.
-        if not _artist_in_result(cleaned_artist, item):
-            continue
-
-        # Reject karaoke/instrumental/cover cuts the request did not ask for.
-        if _version_mismatch(query_text, title):
-            continue
-
-        # Duration gate: YTS provides "M:SS" strings; YTDLP provides int seconds.
         raw_duration = item.get("duration", 0)
         candidate_seconds = _parse_duration_string(raw_duration) if isinstance(raw_duration, str) else int(raw_duration or 0)
-        if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
+        if not _artist_in_result(cleaned_artist, item):
+            _append_trace(trace, "yt", item, candidate_seconds, None, "artist_gate")
             continue
-
+        if _version_mismatch(query_text, title):
+            _append_trace(trace, "yt", item, candidate_seconds, None, "version_gate")
+            continue
+        if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
+            _append_trace(trace, "yt", item, candidate_seconds, None, "duration_gate")
+            continue
         title_similarity = fuzz.ratio(query_text, title)
         if query_text in title:
             title_similarity = 100
-
         cleaned_title = _general.string_cleaner(title)
         cleaned_title_similarity = fuzz.ratio(cleaned_query_text, cleaned_title)
         if cleaned_query_text in cleaned_title:
             cleaned_title_similarity = 100
-
         cleaned_title_minus_keywords = remove_song_keywords(cleaned_title)
         cleaned_title_minus_keywords_similarity = fuzz.ratio(cleaned_query_text_minus_keywords, cleaned_title_minus_keywords)
         if cleaned_query_text_minus_keywords in cleaned_title_minus_keywords:
             cleaned_title_minus_keywords_similarity = 100
-
-        combined_match_ratio = (title_similarity + cleaned_title_similarity + cleaned_title_minus_keywords_similarity) / 3
-
-        if combined_match_ratio > best_match_rating:
-            best_match_rating = combined_match_ratio
+        score = (title_similarity + cleaned_title_similarity + cleaned_title_minus_keywords_similarity) / 3
+        _append_trace(trace, "yt", item, candidate_seconds, score, "accepted" if score > threshold else "below_threshold")
+        if score > best_match_rating:
+            best_match_rating = score
             best_match_item = item
-
-            if combined_match_ratio == 100:
+            if score == 100:
                 break
-
     return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)

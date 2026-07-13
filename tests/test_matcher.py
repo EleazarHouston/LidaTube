@@ -762,3 +762,67 @@ def test_song_matcher_breaks_early_on_perfect_score(monkeypatch):
     assert match is not None
     assert match["videoId"] == "first"
     assert len(calls) == 4
+
+
+def test_song_matcher_trace_records_duration_and_version_rejections():
+    trace = []
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70,
+        artist="Artist",
+        cleaned_artist="artist",
+        song_title="Target Song",
+        cleaned_song_title="target song",
+        search_results=[
+            {"resultType": "song", "title": "Target Song (Instrumental)", "videoId": "version", "artists": [{"name": "Artist"}], "duration_seconds": 200},
+            {"resultType": "song", "title": "Target Song", "videoId": "duration", "artists": [{"name": "Artist"}], "duration_seconds": 400},
+        ],
+        expected_duration_ms=200000,
+        trace=trace,
+    )
+
+    assert match is None
+    assert [item["rejected_by"] for item in trace] == ["version_gate", "duration_gate"]
+    assert trace[0]["candidate_url"] == "https://www.youtube.com/watch?v=version"
+
+
+def test_song_matcher_yt_trace_records_artist_and_threshold_rejections():
+    trace = []
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=95,
+        artist="Target Artist",
+        query_text="Target Artist - Target Song",
+        search_results=[
+            {"title": "Target Song", "link": "https://example.test/no-artist"},
+            {"title": "Target Artist - Different Completely Unrelated Recording", "link": "https://example.test/weak"},
+        ],
+        trace=trace,
+    )
+
+    assert match is None
+    assert [item["rejected_by"] for item in trace] == ["artist_gate", "below_threshold"]
+
+
+def test_song_matcher_trace_marks_the_selected_candidate_accepted():
+    trace = []
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70,
+        artist="Artist",
+        cleaned_artist="artist",
+        song_title="Target Song",
+        cleaned_song_title="target song",
+        search_results=[
+            {"resultType": "song", "title": "Target Song", "videoId": "accepted", "artists": [{"name": "Artist"}], "duration_seconds": 200},
+        ],
+        expected_duration_ms=200000,
+        trace=trace,
+    )
+
+    assert match is not None
+    assert trace == [{
+        "source": "ytmusic",
+        "candidate_title": "Target Song",
+        "candidate_url": "https://www.youtube.com/watch?v=accepted",
+        "candidate_duration_s": 200,
+        "score": 100.0,
+        "rejected_by": "accepted",
+    }]
