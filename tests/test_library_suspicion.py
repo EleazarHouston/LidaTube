@@ -163,6 +163,30 @@ def test_provenance_strong_marker_ignores_in_the_style_of_prose():
     assert not ls.provenance_has_strong_marker(prov, expected_title="Playing to Win")
 
 
+def test_provenance_strong_marker_ignores_instrumental_deep_in_tracklist():
+    # Real false positive: official upload whose description lists the whole album,
+    # where a DIFFERENT track is the instrumental. Only the first line is the track.
+    desc = ("Provided to YouTube by Apple\n\nHere Comes The Sun (Take 9) · The Beatles\n\nAbbey Road\n\n"
+            "Tracklist:\n01. Come Together\n02. Something\n03. Maxwell's Silver Hammer\n"
+            "04. Oh! Darling\n05. Octopus's Garden\n06. I Want You\n07. Here Comes The Sun\n"
+            "08. Because (take 1 / instrumental) (3:08)\n09. You Never Give Me Your Money")
+    prov = {"description": desc, "comment": "", "purl": ""}
+    assert not ls.provenance_has_strong_marker(prov, expected_title="Here Comes The Sun (Take 9)")
+
+
+def test_provenance_strong_marker_flags_instrumental_in_primary_line():
+    # Genuine instrumental grab: it's named in the first metadata line.
+    prov = {"description": "Provided to YouTube by Universal\n\nParadise (Instrumental) · MEDUZA\n\nParadise",
+            "comment": "", "purl": ""}
+    assert ls.provenance_has_strong_marker(prov, expected_title="Paradise")
+
+
+def test_provenance_strong_marker_ignores_made_famous_by_in_bio():
+    desc = "Song Title · Willie Nelson\n\n" + ("x" * 220) + " popular songs made famous by patsy cline"
+    prov = {"description": desc, "comment": "", "purl": ""}
+    assert not ls.provenance_has_strong_marker(prov, expected_title="He Won't Ever Be Gone")
+
+
 def test_provenance_strong_marker_ignores_official_description():
     prov = {"description": "Provided to YouTube by Sub Pop Records\n\nBattery Kinzie", "comment": "", "purl": ""}
     assert not ls.provenance_has_strong_marker(prov, expected_title="Battery Kinzie")

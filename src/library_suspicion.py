@@ -128,6 +128,13 @@ def is_official_art_track(prov):
     return prov.get("description", "").lower().startswith("provided to youtube by")
 
 
+# Only the primary metadata line matters — "<Title> (Instrumental) · <Artist>" or
+# "The official karaoke lyric video for …" sit at the very start. Scanning further
+# hits album tracklists (another track's "(instrumental)") and artist-bio prose
+# ("made famous by …"), which are false positives.
+_DESC_SCAN_CHARS = 220
+
+
 def _request_wants_instrumental(expected_title):
     return any(hint in expected_title for hint in _INSTRUMENTAL_REQUEST_HINTS)
 
@@ -135,7 +142,8 @@ def _request_wants_instrumental(expected_title):
 def provenance_has_strong_marker(prov, expected_title):
     """True if a version phrase appears in the provenance but not the request."""
     expected = (expected_title or "").lower()
-    haystack = (prov.get("description", "") + " " + prov.get("comment", "")).lower()
+    desc = prov.get("description", "")[:_DESC_SCAN_CHARS]
+    haystack = (desc + " " + prov.get("comment", "")).lower()
     wants_instrumental = _request_wants_instrumental(expected)
     for phrase in _VERSION_PHRASES:
         if phrase not in haystack or phrase in expected:
