@@ -612,6 +612,9 @@ class DataHandler:
     def master_queue(self):
         try:
             self.ytdlp_status = "running"
+            if self.current_session_id is None:
+                requested_count = sum(len(item.get("missing_tracks", [])) for item in self.ytdlp_items)
+                self.current_session_id = self.store.start_session(requested_count=requested_count)
             self.ytdlp_futures = []
             submitted_up_to = 0
             active_futures = set()
@@ -659,6 +662,10 @@ class DataHandler:
             socketio.emit("new_toast_msg", {"title": "Error in Master Queue", "message": str(e)})
 
         finally:
+            if self.current_session_id is not None:
+                counts = self.store.get_session_result_counts(self.current_session_id)
+                self.store.finish_session(self.current_session_id, self.ytdlp_status, **counts)
+                self.current_session_id = None
             self._emit_ytdlp_update()
             socketio.emit("new_toast_msg", {"title": "End of Session", "message": f"Downloading {self.ytdlp_status.capitalize()}"})
 
@@ -917,12 +924,43 @@ class DataHandler:
 
     # --- Link search helpers ---
 
-    def _set_track_link(self, track, link, title):
+    def _set_track_link(self, track, link, title, matched_via=None):
         track["link"] = link
         track["title_of_link"] = title
+        if matched_via:
+            track["_matched_via"] = matched_via
 
-    def _set_track_link_from_video_id(self, track, video_id, title):
-        self._set_track_link(track, f"https://www.youtube.com/watch?v={video_id}", title)
+    def _set_track_link_from_video_id(self, track, video_id, title, matched_via=None):
+        self._set_track_link(track, f"https://www.youtube.com/watch?v={video_id}", title, matched_via)
+
+    def _record_link_results(self, req_album):
+        """Persist final search outcomes after all matching stages have run."""
+        session_id = getattr(self, "current_session_id", None)
+        store = getattr(self, "store", None)
+        if not session_id or store is None:
+            return
+        for track in req_album.get("missing_tracks", []):
+            if track.get("_track_result_id"):
+                continue
+            outcome = "matched" if track.get("link") else "no_match"
+            result_id = store.record_track_result(
+                session_id=session_id,
+                artist=track.get("artist", req_album.get("artist")),
+                album=req_album.get("album_name"),
+                track_title=track.get("track_title"),
+                track_number=track.get("track_number"),
+                track_id=track.get("track_id"),
+                duration_ms=track.get("duration_ms", 0),
+                outcome=outcome,
+                link=track.get("link") or None,
+                title_of_link=track.get("title_of_link") or None,
+                matched_via=track.get("_matched_via"),
+                suspicion=track.get("suspicion", 0),
+            )
+            if outcome == "no_match":
+                store.record_evaluations(result_id, track.get("_match_trace", []))
+            track["_track_result_id"] = result_id
+            track.pop("_match_trace", None)
 
     def _count_found_links(self, req_album):
         return sum(1 for x in req_album["missing_tracks"] if x["link"] != "")
@@ -1005,6 +1043,7 @@ class DataHandler:
             if _general.is_resource_exhaustion_error(e):
                 threading.Thread(target=self._signal_fd_exhaustion, daemon=True).start()
         finally:
+            self._record_link_results(req_album)
             self._close_ytmusic_client(ytmusic)
             if semaphore_acquired:
                 self._ytmusic_semaphore.release()
@@ -1050,11 +1089,12 @@ class DataHandler:
                     cleaned_song_title = _general.string_cleaner(song_title).lower()
                     query_text = f'{missing_track["artist"]} - {song_title}'
                     search_results = ytmusic.search(query=query_text, filter="songs", limit=5)
+                    trace = missing_track.setdefault("_match_trace", [])
                     song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
-                                                       expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds)
+                                                       expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace)
                     if song_match:
                         self.general_logger.warning(f'Track matched: "{song_title}" -> "{song_match["title"]}"')
-                        self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"])
+                        self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"], "ytmusic")
                     elif self.config.fallback_to_top_result and search_results:
                         self.general_logger.warning(f'No match — falling back to top result for: "{song_title}" -> "{search_results[0]["title"]}"')
                         self._set_track_link_from_video_id(missing_track, search_results[0]["videoId"], search_results[0]["title"])
@@ -1077,25 +1117,26 @@ class DataHandler:
                     cleaned_song_title = _general.string_cleaner(song_title).lower()
                     query_text = f'{missing_track["artist"]} - {song_title}'
                     search_results = ytmusic.search(query=query_text, filter="songs", limit=20)
+                    trace = missing_track.setdefault("_match_trace", [])
                     song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
-                                                       expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds)
+                                                       expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace)
                     if song_match:
                         self.general_logger.warning(f'Secondary YTMusic match: "{song_title}" -> "{song_match["title"]}"')
-                        self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"])
+                        self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"], "ytmusic_secondary")
                     elif self.config.fallback_to_top_result and search_results:
                         self.general_logger.warning(f'Secondary fallback to top result: "{song_title}" -> "{search_results[0]["title"]}"')
                         self._set_track_link_from_video_id(missing_track, search_results[0]["videoId"], search_results[0]["title"])
                     else:
                         yt_results = self._yt_search(query_text)
                         song_match = _matcher.song_matcher_yt(self.config.minimum_match_ratio, artist, query_text, yt_results,
-                                                              expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds)
+                                                              expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace)
                         if song_match:
                             if self.config.secondary_search == "YTS":
                                 self.general_logger.warning(f'YTS match: "{song_title}" -> "{song_match["title"]}"')
-                                self._set_track_link(missing_track, song_match["link"], song_match["title"])
+                                self._set_track_link(missing_track, song_match["link"], song_match["title"], "yt")
                             elif self.config.secondary_search == "YTDLP":
                                 self.general_logger.warning(f'YTDLP match: "{song_title}" -> "{song_match["title"]}"')
-                                self._set_track_link(missing_track, song_match["webpage_url"], song_match["title"])
+                                self._set_track_link(missing_track, song_match["webpage_url"], song_match["title"], "yt")
                         else:
                             self.general_logger.warning(f'No match found in secondary search for: "{song_title}"')
 

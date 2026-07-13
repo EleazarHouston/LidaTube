@@ -249,6 +249,18 @@ class Store:
             (limit, offset),
         )
 
+    def get_session_result_counts(self, session_id):
+        row = self._fetchone(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN outcome = 'matched' THEN 1 ELSE 0 END), 0) AS matched_count,
+                COALESCE(SUM(CASE WHEN outcome IN ('no_match', 'error') THEN 1 ELSE 0 END), 0) AS failed_count
+            FROM track_results WHERE session_id = ?
+            """,
+            (session_id,),
+        )
+        return row or {"matched_count": 0, "failed_count": 0}
+
     def _fetchone(self, query, params=()):
         with _DB_LOCK:
             row = self._connection.execute(query, params).fetchone()

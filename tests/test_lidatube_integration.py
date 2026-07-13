@@ -78,6 +78,10 @@ def build_data_handler(module):
     cfg.CONFIG_FOLDER = "config"
     cfg.save = Mock()
     handler.config = cfg
+    handler.store = Mock()
+    handler.store.start_session.return_value = 1
+    handler.store.get_session_result_counts.return_value = {"matched_count": 0, "failed_count": 0}
+    handler.current_session_id = None
 
     # LidarrClient mock
     handler.lidarr_client = Mock()
@@ -712,6 +716,43 @@ def test_ytmusic_session_closed_after_album_search(lidatube_module, monkeypatch)
     handler._link_finder(req_album)
 
     assert len(closed) == 1
+
+
+def test_record_link_results_persists_no_match_trace(lidatube_module, tmp_path):
+    from store import Store
+
+    handler = build_data_handler(lidatube_module)
+    handler.store = Store(tmp_path / "lidatube.db")
+    handler.current_session_id = handler.store.start_session(requested_count=1)
+    album = {
+        "artist": "Artist",
+        "album_name": "Album",
+        "missing_tracks": [{
+            "artist": "Artist",
+            "track_title": "Missing Track",
+            "track_number": 1,
+            "track_id": 42,
+            "duration_ms": 180000,
+            "link": "",
+            "title_of_link": "",
+            "_match_trace": [{
+                "source": "ytmusic",
+                "candidate_title": "Wrong Version",
+                "candidate_url": "https://example.test/wrong",
+                "candidate_duration_s": 180,
+                "score": 91,
+                "rejected_by": "version_gate",
+            }],
+        }],
+    }
+
+    handler._record_link_results(album)
+
+    tracks = handler.store.get_session_tracks(handler.current_session_id)
+    assert tracks[0]["outcome"] == "no_match"
+    assert handler.store.get_evaluations(tracks[0]["id"])[0]["rejected_by"] == "version_gate"
+    assert "_match_trace" not in album["missing_tracks"][0]
+    handler.store.close()
 
 
 def test_connect_emits_updates_and_increments_client_counter(lidatube_module, monkeypatch):
