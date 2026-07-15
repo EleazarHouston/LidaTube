@@ -73,7 +73,7 @@ class LidarrClient:
         self.logger.warning(f'Importing song via Lidarr: {req_album.get("artist", "?")} - {song["track_title"]} ({filename})')
         endpoint = f"{self.config.lidarr_address}/api/v1/manualimport"
         headers = {"X-Api-Key": self.config.lidarr_api_key, "Content-Type": "application/json"}
-        full_file_path = os.path.join(req_album["album_full_path"], filename)
+        full_file_path = self._lidarr_import_path(req_album, filename)
         data = {
             "id": song["track_id"],
             "path": full_file_path,
@@ -90,4 +90,20 @@ class LidarrClient:
             "disableReleaseSwitching": False,
             "rejections": [],
         }
-        return self.session.post(endpoint, json=[data], headers=headers, timeout=self.config.lidarr_api_timeout)
+        # importMode 'move' relocates staged files into the library; harmless for
+        # in-place (legacy) imports where source and destination already coincide.
+        params = {"importMode": "move"}
+        return self.session.post(endpoint, json=[data], params=params, headers=headers, timeout=self.config.lidarr_api_timeout)
+
+    def _lidarr_import_path(self, req_album, filename):
+        """Path (in Lidarr's namespace) of the file to import.
+
+        With lidarr_download_path set, files are staged under that root as
+        <root>/<artist>/<album_folder>/<filename>; otherwise they are already at
+        their final library location (album_full_path).
+        """
+        staging_root = getattr(self.config, "lidarr_download_path", "")
+        if staging_root:
+            artist_str = os.path.basename(req_album["artist_path"].rstrip("/"))
+            return os.path.join(staging_root, artist_str, req_album["album_folder"], filename)
+        return os.path.join(req_album["album_full_path"], filename)
