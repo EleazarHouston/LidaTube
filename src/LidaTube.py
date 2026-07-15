@@ -530,6 +530,35 @@ class DataHandler:
             if response is not None:
                 response.close()
 
+    def import_album(self, req_album):
+        """Import a downloaded album into the library via Lidarr's manual import.
+
+        Scans the album's folder (staging when lidarr_download_path is set, else the
+        in-place library folder), then posts a ManualImport 'move' command using
+        Lidarr's own parsed candidates.
+        """
+        if self.config.lidarr_download_path:
+            artist_str = os.path.basename(req_album["artist_path"].rstrip("/"))
+            folder = os.path.join(self.config.lidarr_download_path, artist_str, req_album["album_folder"])
+        else:
+            folder = req_album["album_full_path"]
+        try:
+            scan = self.lidarr_client.scan_import_candidates(folder)
+            if scan.status_code != 200:
+                self.general_logger.error(f"Import scan failed ({scan.status_code}) for {folder}")
+                return
+            response, count = self.lidarr_client.import_candidates(scan.json(), import_mode="move")
+            if count == 0:
+                self.general_logger.warning(f"No importable files found in {folder}")
+            elif response.status_code in (200, 201):
+                self.general_logger.warning(
+                    f'Import queued for {count} file(s): {req_album["artist"]} - {req_album["album_name"]}'
+                )
+            else:
+                self.general_logger.error(f"Import command failed ({response.status_code}): {response.text}")
+        except Exception as e:
+            self.general_logger.error(f"Error importing album via Lidarr: {e}")
+
     def trigger_lidarr_scan(self):
         response = None
         try:
@@ -732,12 +761,6 @@ class DataHandler:
                     if success:
                         _general.add_metadata(self.general_logger, song, req_album, full_file_path_with_ext)
                         grabbed_count += 1
-                        if self.config.attempt_lidarr_import:
-                            self.attempt_lidarr_song_import(
-                                req_album,
-                                song,
-                                f"{artist_str} - {album_name} - {track_number} - {title_str}.{self.config.preferred_codec}",
-                            )
                         self.ytdlp_stop_event.wait(self.config.sleep_interval)
                         if self.ytdlp_stop_event.is_set():
                             break
@@ -750,6 +773,9 @@ class DataHandler:
                 req_album["status"] = f"Processed: {song_processed_count} of {total_req}"
                 self.percent_completion = 100 * (self.index / len(self.ytdlp_items)) if self.ytdlp_items else 0
                 self._emit_ytdlp_update()
+
+            if self.config.attempt_lidarr_import and grabbed_count > 0 and not self.ytdlp_stop_event.is_set():
+                self.import_album(req_album)
 
             if self.ytdlp_stop_event.is_set():
                 req_album["status"] = "Download Stopped"

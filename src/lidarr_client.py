@@ -95,6 +95,49 @@ class LidarrClient:
         params = {"importMode": "move"}
         return self.session.post(endpoint, json=[data], params=params, headers=headers, timeout=self.config.lidarr_api_timeout)
 
+    def scan_import_candidates(self, folder):
+        """GET Lidarr's parsed import candidates for a folder (it detects quality + tracks)."""
+        endpoint = f"{self.config.lidarr_address}/api/v1/manualimport"
+        headers = {"X-Api-Key": self.config.lidarr_api_key}
+        params = {"folder": folder, "filterExistingFiles": "false"}
+        return self.session.get(endpoint, params=params, headers=headers, timeout=self.config.lidarr_api_timeout)
+
+    @staticmethod
+    def _candidate_to_file(candidate):
+        """Map a manualimport candidate to a ManualImport command file entry, or None."""
+        tracks = candidate.get("tracks") or []
+        artist = candidate.get("artist") or {}
+        album = candidate.get("album") or {}
+        if not tracks or not artist.get("id") or not album.get("id"):
+            return None
+        return {
+            "path": candidate.get("path"),
+            "artistId": artist["id"],
+            "albumId": album["id"],
+            "albumReleaseId": candidate.get("albumReleaseId"),
+            "quality": candidate.get("quality"),
+            "trackIds": [t["id"] for t in tracks],
+            "disableReleaseSwitching": False,
+            "indexerFlags": 0,
+            "additionalFile": False,
+            "replaceExistingFiles": False,
+        }
+
+    def import_candidates(self, candidates, import_mode="move"):
+        """POST a ManualImport command for scanned candidates. Returns (response, file_count).
+
+        This is the flow Lidarr's own UI uses: the candidate carries the detected
+        quality and matched track ids, which a hand-built payload lacks (and which
+        caused imports to be accepted but silently import nothing).
+        """
+        files = [f for f in (self._candidate_to_file(c) for c in candidates) if f]
+        if not files:
+            return None, 0
+        endpoint = f"{self.config.lidarr_address}/api/v1/command"
+        headers = {"X-Api-Key": self.config.lidarr_api_key, "Content-Type": "application/json"}
+        data = {"name": "ManualImport", "importMode": import_mode, "files": files}
+        return self.session.post(endpoint, json=data, headers=headers, timeout=self.config.lidarr_api_timeout), len(files)
+
     def _lidarr_import_path(self, req_album, filename):
         """Path (in Lidarr's namespace) of the file to import.
 

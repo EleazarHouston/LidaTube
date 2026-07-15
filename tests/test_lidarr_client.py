@@ -188,6 +188,45 @@ def test_import_song_staging_uses_lidarr_download_path(client):
     assert payload["path"] == "/media/downloads/lidatube/Artist/Album (2020)/My Song.mp3"
 
 
+def _candidate(**over):
+    c = {
+        "path": "/media/downloads/lidatube/Artist/Album (2020)/track.mp3",
+        "artist": {"id": 5}, "album": {"id": 10}, "albumReleaseId": 100,
+        "quality": {"quality": {"id": 8, "name": "MP3-320"}},
+        "tracks": [{"id": 42, "title": "My Song"}],
+    }
+    c.update(over)
+    return c
+
+
+def test_scan_import_candidates_hits_manualimport_with_folder(client):
+    with patch.object(client.session, "get", return_value=FakeResponse(200, [])) as mock_get:
+        client.scan_import_candidates("/media/downloads/lidatube/Artist/Album (2020)")
+    assert "manualimport" in mock_get.call_args[0][0]
+    assert mock_get.call_args[1]["params"]["folder"] == "/media/downloads/lidatube/Artist/Album (2020)"
+
+
+def test_import_candidates_posts_manualimport_command_with_move(client):
+    with patch.object(client.session, "post", return_value=FakeResponse(201, {})) as mock_post:
+        response, count = client.import_candidates([_candidate()], import_mode="move")
+    assert count == 1 and response.status_code == 201
+    assert "command" in mock_post.call_args[0][0]
+    body = mock_post.call_args[1]["json"]
+    assert body["name"] == "ManualImport" and body["importMode"] == "move"
+    f = body["files"][0]
+    assert f["trackIds"] == [42]
+    assert f["quality"] == {"quality": {"id": 8, "name": "MP3-320"}}
+    assert f["artistId"] == 5 and f["albumId"] == 10 and f["albumReleaseId"] == 100
+
+
+def test_import_candidates_skips_unmatched_candidates(client):
+    # A candidate Lidarr couldn't match (no tracks) must not be imported.
+    with patch.object(client.session, "post", return_value=FakeResponse(201, {})) as mock_post:
+        response, count = client.import_candidates([_candidate(tracks=[])])
+    assert count == 0 and response is None
+    mock_post.assert_not_called()
+
+
 # --- thread-local sessions ---
 
 
