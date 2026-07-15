@@ -24,6 +24,8 @@ class AppConfig:
         "attempt_lidarr_import": False,
         "lidarr_scan_thread_limit": 16,
         "duration_tolerance_seconds": 8,
+        "batch_size": 200,
+        "auto_resume": True,
         # Lidarr-namespace path that maps to LidaTube's download_folder. When set,
         # downloads go to a staging area and are imported into the library via the
         # Lidarr API instead of being written into the library in place. Empty = legacy
@@ -45,6 +47,8 @@ class AppConfig:
         "attempt_lidarr_import": lambda v: v.lower() == "true",
         "lidarr_scan_thread_limit": int,
         "duration_tolerance_seconds": int,
+        "batch_size": int,
+        "auto_resume": lambda v: v.lower() == "true",
         "lidarr_download_path": str,
     }
 

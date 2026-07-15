@@ -29,6 +29,8 @@ def test_defaults_applied(cfg):
     assert cfg.preferred_codec == "mp3"
     assert cfg.attempt_lidarr_import is False
     assert cfg.lidarr_scan_thread_limit == 16
+    assert cfg.batch_size == 200
+    assert cfg.auto_resume is True
 
 
 # --- File persistence ---
@@ -92,6 +94,15 @@ def test_env_float_conversion(tmp_path, monkeypatch):
     monkeypatch.setenv("lidarr_api_timeout", "60.5")
     cfg = AppConfig(Mock())
     assert cfg.lidarr_api_timeout == 60.5
+
+
+def test_env_batch_and_auto_resume(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("batch_size", "25")
+    monkeypatch.setenv("auto_resume", "false")
+    cfg = AppConfig(Mock())
+    assert cfg.batch_size == 25
+    assert cfg.auto_resume is False
 
 
 def test_env_sync_schedule_parsed(tmp_path, monkeypatch):

@@ -6,6 +6,7 @@ lock, which keeps every operation short and safe for both callers.
 """
 
 import os
+import json
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -15,7 +16,9 @@ _DB_LOCK = threading.RLock()
 
 
 class Store:
-    """SQLite-backed persistence for sessions, match results, and overrides."""
+    """SQLite-backed persistence for sessions, queued albums, results, and overrides."""
+
+    QUEUE_STATUSES = ("pending", "in_progress", "done", "error")
 
     def __init__(self, path):
         self.path = os.fspath(path)
@@ -45,6 +48,24 @@ class Store:
                     matched_count INTEGER NOT NULL DEFAULT 0,
                     failed_count INTEGER NOT NULL DEFAULT 0
                 );
+
+                CREATE TABLE IF NOT EXISTS queue_items (
+                    id INTEGER PRIMARY KEY,
+                    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL,
+                    artist_id INTEGER,
+                    album_id INTEGER,
+                    album_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending', 'in_progress', 'done', 'error')),
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_items_session_position
+                    ON queue_items(session_id, position);
+
+                CREATE INDEX IF NOT EXISTS idx_queue_items_session_status_position
+                    ON queue_items(session_id, status, position);
 
                 CREATE TABLE IF NOT EXISTS track_results (
                     id INTEGER PRIMARY KEY,
@@ -125,6 +146,158 @@ class Store:
                 f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?", values
             )
             self._connection.commit()
+
+    def increment_session_requested_count(self, session_id, amount):
+        """Add newly enqueued tracks to a session's requested total."""
+        if not amount:
+            return
+        with _DB_LOCK:
+            self._connection.execute(
+                "UPDATE sessions SET requested_count = requested_count + ? WHERE id = ?",
+                (int(amount), session_id),
+            )
+            self._connection.commit()
+
+    def enqueue_items(self, session_id, items):
+        """Append serialized album dictionaries to a session in stable order."""
+        now = self._now()
+        with _DB_LOCK:
+            row = self._connection.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 AS next_position "
+                "FROM queue_items WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            position = row["next_position"]
+            rows = []
+            for item in items:
+                if isinstance(item, str):
+                    album_json = item
+                    decoded = json.loads(item)
+                else:
+                    decoded = item
+                    album_json = json.dumps(item, separators=(",", ":"))
+                rows.append(
+                    (
+                        session_id,
+                        position,
+                        decoded.get("artist_id"),
+                        decoded.get("album_id"),
+                        album_json,
+                        "pending",
+                        now,
+                    )
+                )
+                position += 1
+
+            if rows:
+                self._connection.executemany(
+                    """
+                    INSERT INTO queue_items (
+                        session_id, position, artist_id, album_id, album_json,
+                        status, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                self._connection.commit()
+            return len(rows)
+
+    def next_batch(self, session_id, limit):
+        """Return the next pending queue rows without changing their status."""
+        limit = max(1, int(limit))
+        return self._fetchall(
+            """
+            SELECT * FROM queue_items
+            WHERE session_id = ? AND status = 'pending'
+            ORDER BY position ASC LIMIT ?
+            """,
+            (session_id, limit),
+        )
+
+    def mark_queue_item(self, queue_item_id, status):
+        if status not in self.QUEUE_STATUSES:
+            raise ValueError(f"Invalid queue status: {status}")
+        with _DB_LOCK:
+            self._connection.execute(
+                "UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ?",
+                (status, self._now(), queue_item_id),
+            )
+            self._connection.commit()
+
+    def mark_queue_items(self, queue_item_ids, status):
+        if status not in self.QUEUE_STATUSES:
+            raise ValueError(f"Invalid queue status: {status}")
+        ids = [int(queue_item_id) for queue_item_id in queue_item_ids]
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        with _DB_LOCK:
+            self._connection.execute(
+                f"UPDATE queue_items SET status = ?, updated_at = ? WHERE id IN ({placeholders})",
+                (status, self._now(), *ids),
+            )
+            self._connection.commit()
+
+    def queue_counts(self, session_id):
+        row = self._fetchone(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+                COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) AS in_progress,
+                COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS done,
+                COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) AS error,
+                COUNT(*) AS total
+            FROM queue_items WHERE session_id = ?
+            """,
+            (session_id,),
+        )
+        return row or {
+            "pending": 0,
+            "in_progress": 0,
+            "done": 0,
+            "error": 0,
+            "total": 0,
+        }
+
+    def resumable_session(self):
+        """Return the newest unfinished session with persisted work remaining."""
+        return self._fetchone(
+            """
+            SELECT s.* FROM sessions AS s
+            WHERE s.status IN ('running', 'interrupted', 'stopped', 'failed')
+              AND EXISTS (
+                  SELECT 1 FROM queue_items AS q
+                  WHERE q.session_id = s.id AND q.status IN ('pending', 'in_progress')
+              )
+            ORDER BY s.started_at DESC, s.id DESC LIMIT 1
+            """
+        )
+
+    def resume_session(self, session_id):
+        """Make crash-time work pending again and reopen a session."""
+        now = self._now()
+        with _DB_LOCK:
+            self._connection.execute(
+                """
+                UPDATE queue_items SET status = 'pending', updated_at = ?
+                WHERE session_id = ? AND status = 'in_progress'
+                """,
+                (now, session_id),
+            )
+            cursor = self._connection.execute(
+                "UPDATE sessions SET status = 'running', ended_at = NULL WHERE id = ?",
+                (session_id,),
+            )
+            self._connection.commit()
+            return cursor.rowcount > 0
+
+    def clear_queue(self, session_id):
+        with _DB_LOCK:
+            cursor = self._connection.execute(
+                "DELETE FROM queue_items WHERE session_id = ?", (session_id,)
+            )
+            self._connection.commit()
+            return cursor.rowcount
 
     def record_track_result(
         self,

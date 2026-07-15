@@ -43,6 +43,8 @@ Certain values can be set via environment variables:
 * __lidarr_api_key__: The API key for Lidarr. Defaults to ``.
 * __lidarr_api_timeout__: Timeout duration for Lidarr API calls. Defaults to `120`.
 * __thread_limit__: Max number of threads to use. Defaults to `1`.
+* __batch_size__: Maximum albums loaded and processed per persisted batch. Defaults to `200`.
+* __auto_resume__: Resume an interrupted persisted queue when LidaTube starts. Defaults to `True`.
 * __lidarr_scan_thread_limit__: Max worker threads used during the initial Lidarr refresh (fetching missing tracks per album). Defaults to `16`.
 * __sleep_interval__: Interval to sleep. Defaults to `0`.
 * __fallback_to_top_result__: Whether to use the top result if no match is found. Defaults to `False`.
@@ -53,6 +55,11 @@ Certain values can be set via environment variables:
 * __preferred_codec__: Preferred codec (mp3). Defaults to `mp3`.
 * __attempt_lidarr_import__: Attempt to import each song directly into Lidarr. Defaults to `False`.
 * __ULIMIT_NOFILE__: Startup target for open file descriptors (set in `init.sh` via `ulimit -n`). Defaults to `8192`.
+
+
+## Download queue recovery
+
+Download selections are stored in `config/lidatube.db` and processed in bounded batches. A worker restart resumes the unfinished session automatically unless `auto_resume` is disabled. **Stop** halts the run and retains pending albums for **Resume**; **Reset** deletes the persisted queue for that session and clears its progress.
 
 
 ## Sync Schedule

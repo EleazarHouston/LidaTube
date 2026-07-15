@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import resource
@@ -61,8 +62,21 @@ class DataHandler:
         ytmusic_parallel = max(1, min(2, int(self.config.thread_limit)))
         self._ytmusic_semaphore = threading.Semaphore(ytmusic_parallel)
         self.ytdlp_in_progress_flag = False
+        self._reset_session_ids = set()
         self.index = 0
         self.percent_completion = 0
+        self.batch_number = 0
+        self.queue_progress = {
+            "session_id": None,
+            "pending": 0,
+            "in_progress": 0,
+            "done": 0,
+            "error": 0,
+            "total": 0,
+            "batch": 0,
+            "matched": 0,
+            "failed": 0,
+        }
 
         self.streaming_mode = False
         self.clients_connected_counter = 0
@@ -79,6 +93,7 @@ class DataHandler:
             ytmusic_parallel,
         )
 
+        self._auto_resume_if_available()
         thread = threading.Thread(target=self.schedule_checker, name="Schedule_Thread")
         thread.daemon = True
         thread.start()
@@ -87,7 +102,8 @@ class DataHandler:
 
     def connect(self):
         self._emit_lidarr_update()
-        socketio.emit("ytdlp_update", {"status": self.ytdlp_status, "data": self.ytdlp_items, "percent_completion": self.percent_completion})
+        self.queue_status()
+        self._emit_ytdlp_update()
         self.clients_connected_counter += 1
 
     def disconnect(self):
@@ -131,18 +147,16 @@ class DataHandler:
                     self.streaming_mode = True
                     self.ytdlp_stop_event.clear()
 
-                    fetch_thread = threading.Thread(target=self.get_wanted_albums_from_lidarr, name="Lidarr_Fetch_Thread")
-                    fetch_thread.daemon = True
-                    fetch_thread.start()
-
                     if not self.ytdlp_in_progress_flag:
                         self.ytdlp_items = []
                         self.percent_completion = 0
                         self.index = 0
-                        self.ytdlp_in_progress_flag = True
-                        dl_thread = threading.Thread(target=self.master_queue, name="Queue_Thread")
-                        dl_thread.daemon = True
-                        dl_thread.start()
+                        self.current_session_id = self.store.start_session(requested_count=0)
+                        self._start_queue_thread(self.current_session_id)
+
+                    fetch_thread = threading.Thread(target=self.get_wanted_albums_from_lidarr, name="Lidarr_Fetch_Thread")
+                    fetch_thread.daemon = True
+                    fetch_thread.start()
 
                     fetch_thread.join()
                     self.streaming_mode = False
@@ -197,7 +211,50 @@ class DataHandler:
         socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": None, "scan_progress": self.lidarr_scan_progress})
 
     def _emit_ytdlp_update(self):
-        socketio.emit("ytdlp_update", {"status": self.ytdlp_status, "data": self.ytdlp_items, "percent_completion": self.percent_completion})
+        # The current batch is bounded; omit its per-track arrays from frequent updates.
+        items = [
+            {
+                "artist": item.get("artist", ""),
+                "album_name": item.get("album_name", ""),
+                "status": item.get("status", ""),
+            }
+            for item in self.ytdlp_items
+        ]
+        socketio.emit(
+            "ytdlp_update",
+            {
+                "status": self.ytdlp_status,
+                "data": items,
+                "percent_completion": self.percent_completion,
+                "queue": dict(self.queue_progress),
+            },
+        )
+
+    def _refresh_queue_progress(self, session_id=None):
+        session_id = session_id or self.current_session_id
+        if session_id is None:
+            return self.queue_progress
+        counts = self.store.queue_counts(session_id)
+        results = self.store.get_session_result_counts(session_id)
+        self.queue_progress = {
+            "session_id": session_id,
+            **counts,
+            "batch": self.batch_number,
+            "matched": results["matched_count"],
+            "failed": results["failed_count"],
+        }
+        completed = counts["done"] + counts["error"]
+        self.percent_completion = 100 * completed / counts["total"] if counts["total"] else 0
+        return self.queue_progress
+
+    def queue_status(self):
+        session_id = self.current_session_id
+        if session_id is None:
+            resumable = self.store.resumable_session()
+            session_id = resumable["id"] if resumable else None
+        if session_id is not None:
+            self._refresh_queue_progress(session_id)
+        return dict(self.queue_progress)
 
     # --- Lidarr cache ---
 
@@ -510,7 +567,13 @@ class DataHandler:
 
         if self.streaming_mode:
             req_album["status"] = "Queued"
-            self.ytdlp_items.append(req_album)
+            if self.current_session_id is None:
+                self.current_session_id = self.store.start_session(requested_count=0)
+                self._start_queue_thread(self.current_session_id)
+            self.store.enqueue_items(self.current_session_id, [req_album])
+            self.store.increment_session_requested_count(
+                self.current_session_id, len(req_album.get("missing_tracks", []))
+            )
 
     # --- Lidarr actions ---
 
@@ -607,82 +670,188 @@ class DataHandler:
 
     # --- Download queue ---
 
+    def _auto_resume_if_available(self):
+        if getattr(self.config, "auto_resume", True):
+            self.resume_ytdlp(emit=False)
+
+    def _start_queue_thread(self, session_id):
+        if self.ytdlp_in_progress_flag:
+            return False
+        self.current_session_id = session_id
+        self.ytdlp_stop_event.clear()
+        self.ytdlp_status = "running"
+        self.ytdlp_in_progress_flag = True
+        thread = threading.Thread(
+            target=self.master_queue,
+            args=(session_id,),
+            name="Queue_Thread",
+            daemon=True,
+        )
+        thread.start()
+        return True
+
+    def resume_ytdlp(self, emit=True):
+        if self.ytdlp_in_progress_flag:
+            return False
+        session = self.store.resumable_session()
+        if session is None:
+            return False
+        self.batch_number = 0
+        self.index = 0
+        self.ytdlp_items = []
+        self.store.resume_session(session["id"])
+        started = self._start_queue_thread(session["id"])
+        if emit:
+            self._refresh_queue_progress(session["id"])
+            self._emit_ytdlp_update()
+        return started
+
     def add_items_to_download(self, data):
+        session_id = None
+        created_session = False
+        added = 0
         try:
+            selected = {
+                int(index) for index in data
+                if isinstance(index, int) and 0 <= index < len(self.lidarr_items)
+            }
+            if not selected:
+                raise ValueError("No valid albums were selected")
+
             self.ytdlp_stop_event.clear()
-            if self.ytdlp_status in ("complete", "stopped"):
+            if self.ytdlp_in_progress_flag and self.current_session_id is not None:
+                session_id = self.current_session_id
+            else:
+                session_id = self.store.start_session(requested_count=0)
+                self.current_session_id = session_id
+                created_session = True
+                self.batch_number = 0
+                self.index = 0
                 self.ytdlp_items = []
                 self.percent_completion = 0
-            added = 0
-            for i in range(len(self.lidarr_items)):
-                if i in data:
-                    self.lidarr_items[i]["status"] = "Queued" if self.lidarr_items[i].get("scan_ready", True) else "Waiting for refresh data"
-                    self.lidarr_items[i]["checked"] = True
-                    self.ytdlp_items.append(self.lidarr_items[i])
-                    added += 1
-                else:
-                    self.lidarr_items[i]["checked"] = False
-            self.general_logger.warning(f"Added {added} album(s) to download queue (queue size: {len(self.ytdlp_items)})")
 
-            if not self.ytdlp_in_progress_flag:
-                self.index = 0
-                self.ytdlp_in_progress_flag = True
-                thread = threading.Thread(target=self.master_queue, name="Queue_Thread")
-                thread.daemon = True
-                thread.start()
+            chunk = []
+            chunk_tracks = 0
+            for index, item in enumerate(self.lidarr_items):
+                item["checked"] = index in selected
+                if not item["checked"]:
+                    continue
+                item["status"] = (
+                    "Queued" if item.get("scan_ready", True)
+                    else "Waiting for refresh data"
+                )
+                chunk.append(item)
+                chunk_tracks += len(item.get("missing_tracks", []))
+                if len(chunk) >= 500:
+                    added += self.store.enqueue_items(session_id, chunk)
+                    self.store.increment_session_requested_count(session_id, chunk_tracks)
+                    chunk = []
+                    chunk_tracks = 0
+                    socketio.sleep(0)
+
+            if chunk:
+                added += self.store.enqueue_items(session_id, chunk)
+                self.store.increment_session_requested_count(session_id, chunk_tracks)
+
+            self._refresh_queue_progress(session_id)
+            self.general_logger.warning(
+                f"Added {added} album(s) to persisted download queue for session {session_id}"
+            )
+
+            if created_session:
+                self._start_queue_thread(session_id)
 
         except Exception as e:
             self.general_logger.error(str(e))
+            if created_session and session_id is not None:
+                self.store.finish_session(session_id, "failed")
+                if self.current_session_id == session_id:
+                    self.current_session_id = None
             socketio.emit("new_toast_msg", {"title": "Error adding new items", "message": str(e)})
 
         finally:
             self._emit_ytdlp_update()
-            socketio.emit("new_toast_msg", {"title": "Download Queue Updated", "message": "New Items added to Queue"})
+            if added:
+                socketio.emit(
+                    "new_toast_msg",
+                    {"title": "Download Queue Updated", "message": f"Added {added} album(s) to queue"},
+                )
 
-    def master_queue(self):
+    def master_queue(self, session_id=None):
+        session_id = session_id or self.current_session_id
         try:
+            if session_id is None:
+                self.ytdlp_status = "complete"
+                self.ytdlp_in_progress_flag = False
+                return
+
+            self.current_session_id = session_id
+            self.store.resume_session(session_id)
             self.ytdlp_status = "running"
-            if self.current_session_id is None:
-                requested_count = sum(len(item.get("missing_tracks", [])) for item in self.ytdlp_items)
-                self.current_session_id = self.store.start_session(requested_count=requested_count)
             self.ytdlp_futures = []
-            submitted_up_to = 0
-            active_futures = set()
-            self.general_logger.warning(f"Master queue started: {len(self.ytdlp_items)} item(s), thread_limit={self.config.thread_limit}")
+            batch_size = max(1, int(getattr(self.config, "batch_size", 200)))
+            self.general_logger.warning(
+                f"Master queue started: session={session_id}, batch_size={batch_size}, "
+                f"thread_limit={self.config.thread_limit}"
+            )
 
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.thread_limit)
-            try:
-                while not self.ytdlp_stop_event.is_set():
-                    # Submit new items up to thread_limit
-                    while submitted_up_to < len(self.ytdlp_items) and len(active_futures) < self.config.thread_limit:
-                        req_album = self.ytdlp_items[submitted_up_to]
-                        f = executor.submit(self.find_link_and_download, req_album)
-                        active_futures.add(f)
-                        self.ytdlp_futures.append(f)
-                        submitted_up_to += 1
+            while not self.ytdlp_stop_event.is_set():
+                batch_rows = self.store.next_batch(session_id, batch_size)
+                if not batch_rows:
+                    if self.streaming_mode:
+                        self.ytdlp_stop_event.wait(0.25)
+                        continue
+                    break
 
-                    if not active_futures:
-                        if self.streaming_mode and self.lidarr_status == "busy":
-                            self.ytdlp_stop_event.wait(0.5)
-                            continue
-                        break
+                self.batch_number += 1
+                self.index = 0
+                self.ytdlp_items = []
+                work_items = []
+                for row in batch_rows:
+                    try:
+                        req_album = json.loads(row["album_json"])
+                    except (TypeError, ValueError):
+                        self.store.mark_queue_item(row["id"], "error")
+                        continue
+                    req_album["_queue_item_id"] = row["id"]
+                    self.ytdlp_items.append(req_album)
+                    work_items.append((row["id"], req_album))
 
-                    done, active_futures = concurrent.futures.wait(
-                        active_futures,
-                        timeout=1.0,
-                        return_when=concurrent.futures.FIRST_COMPLETED,
-                    )
-            finally:
-                executor.shutdown(wait=False)
+                self.store.mark_queue_items(
+                    [queue_item_id for queue_item_id, _ in work_items], "in_progress"
+                )
+                self._refresh_queue_progress(session_id)
+                self._emit_ytdlp_update()
 
-            if self.ytdlp_stop_event.is_set():
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self.config.thread_limit
+                ) as executor:
+                    future_items = {
+                        executor.submit(self._process_queue_item, queue_item_id, req_album): queue_item_id
+                        for queue_item_id, req_album in work_items
+                    }
+                    self.ytdlp_futures = list(future_items)
+                    for future in concurrent.futures.as_completed(future_items):
+                        queue_item_id = future_items[future]
+                        try:
+                            future.result()
+                        except concurrent.futures.CancelledError:
+                            self.store.mark_queue_item(queue_item_id, "pending")
+
+                self._refresh_queue_progress(session_id)
+                self._emit_ytdlp_update()
+                # Yield between bounded batches so the gevent worker can service heartbeats.
+                if not self.ytdlp_stop_event.wait(0.05):
+                    socketio.sleep(0)
+
+            if session_id in self._reset_session_ids:
+                self.ytdlp_status = "idle"
+            elif self.ytdlp_stop_event.is_set():
                 self.ytdlp_status = "stopped"
                 self.general_logger.warning("Downloading Stopped")
-                self.ytdlp_in_progress_flag = False
             else:
                 self.ytdlp_status = "complete"
                 self.general_logger.warning("Downloading Finished")
-                self.ytdlp_in_progress_flag = False
                 if self.config.library_scan_on_completion:
                     self.trigger_lidarr_scan()
 
@@ -692,12 +861,33 @@ class DataHandler:
             socketio.emit("new_toast_msg", {"title": "Error in Master Queue", "message": str(e)})
 
         finally:
-            if self.current_session_id is not None:
-                counts = self.store.get_session_result_counts(self.current_session_id)
-                self.store.finish_session(self.current_session_id, self.ytdlp_status, **counts)
+            self.ytdlp_in_progress_flag = False
+            self._reset_session_ids.discard(session_id)
+            if session_id is not None and self.current_session_id == session_id:
+                self._refresh_queue_progress(session_id)
+                counts = self.store.get_session_result_counts(session_id)
+                self.store.finish_session(session_id, self.ytdlp_status, **counts)
                 self.current_session_id = None
             self._emit_ytdlp_update()
             socketio.emit("new_toast_msg", {"title": "End of Session", "message": f"Downloading {self.ytdlp_status.capitalize()}"})
+
+    def _process_queue_item(self, queue_item_id, req_album):
+        queue_status = "error"
+        try:
+            self.find_link_and_download(req_album)
+            if self.ytdlp_stop_event.is_set():
+                queue_status = "pending"
+            elif req_album.get("status") in ("Download Error", "Refresh data unavailable"):
+                queue_status = "error"
+            else:
+                queue_status = "done"
+        except Exception as e:
+            req_album["status"] = "Download Error"
+            self.general_logger.error(f"Unhandled queue item error: {e}")
+        finally:
+            self.store.mark_queue_item(queue_item_id, queue_status)
+            self._refresh_queue_progress(self.current_session_id)
+            self._emit_ytdlp_update()
 
     def _wait_for_album_scan_data(self, req_album):
         if req_album.get("scan_ready", True):
@@ -771,7 +961,6 @@ class DataHandler:
 
                 song_processed_count = grabbed_count + error_count + existing_count
                 req_album["status"] = f"Processed: {song_processed_count} of {total_req}"
-                self.percent_completion = 100 * (self.index / len(self.ytdlp_items)) if self.ytdlp_items else 0
                 self._emit_ytdlp_update()
 
             if self.config.attempt_lidarr_import and grabbed_count > 0 and not self.ytdlp_stop_event.is_set():
@@ -799,7 +988,6 @@ class DataHandler:
 
         finally:
             self.index += 1
-            self.percent_completion = 100 * (self.index / len(self.ytdlp_items)) if self.ytdlp_items else 0
             self._emit_ytdlp_update()
 
     def stop_ytdlp(self):
@@ -808,8 +996,11 @@ class DataHandler:
             for future in self.ytdlp_futures:
                 if not future.done():
                     future.cancel()
-            for x in self.ytdlp_items[self.index:]:
-                x["status"] = "Download Stopped"
+            for item in self.ytdlp_items:
+                if item.get("status") not in (
+                    "Download Complete", "Album Incomplete", "Download Failed", "Partially Complete"
+                ):
+                    item["status"] = "Download Stopped"
         except Exception as e:
             self.general_logger.error(f"Error Stopping yt_dlp: {e}")
         finally:
@@ -817,17 +1008,36 @@ class DataHandler:
             self._emit_ytdlp_update()
 
     def reset_ytdlp(self):
+        session_id = self.current_session_id or self.queue_progress.get("session_id")
         try:
             self.ytdlp_stop_event.set()
             for future in self.ytdlp_futures:
                 if not future.done():
                     future.cancel()
+            if session_id is not None:
+                self._reset_session_ids.add(session_id)
+                self.store.clear_queue(session_id)
+                counts = self.store.get_session_result_counts(session_id)
+                self.store.finish_session(session_id, "reset", **counts)
+            self.current_session_id = None
             self.ytdlp_futures = []
             self.ytdlp_items = []
             self.ytdlp_status = "idle"
             self.ytdlp_in_progress_flag = False
             self.index = 0
             self.percent_completion = 0
+            self.batch_number = 0
+            self.queue_progress = {
+                "session_id": None,
+                "pending": 0,
+                "in_progress": 0,
+                "done": 0,
+                "error": 0,
+                "total": 0,
+                "batch": 0,
+                "matched": 0,
+                "failed": 0,
+            }
         except Exception as e:
             self.general_logger.error(f"Error Stopping yt_dlp: {e}")
             socketio.emit("new_toast_msg", {"title": "Download Reset Error", "message": str(e)})
@@ -1285,6 +1495,28 @@ def api_sessions():
         return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
     limit, offset = page
     return jsonify({"items": data_handler.store.list_sessions(limit, offset), "total": data_handler.store.count_sessions()})
+
+
+@app.route("/api/queue/status")
+def api_queue_status():
+    return jsonify(data_handler.queue_status())
+
+
+@app.route("/api/session/resume", methods=["POST"])
+def api_session_resume():
+    if data_handler.ytdlp_in_progress_flag:
+        return jsonify({"error": "A download session is already running"}), 409
+    if not data_handler.resume_ytdlp():
+        return jsonify({"error": "No resumable download session exists"}), 404
+    return jsonify(data_handler.queue_status()), 202
+
+
+@app.route("/api/session/stop", methods=["POST"])
+def api_session_stop():
+    if not data_handler.ytdlp_in_progress_flag:
+        return jsonify({"error": "No download session is running"}), 409
+    data_handler.stop_ytdlp()
+    return jsonify({"message": "Stop requested"}), 202
 
 
 @app.route("/api/sessions/<int:session_id>/tracks")

@@ -11,11 +11,13 @@ const history_table = document.querySelector('#history-table tbody');
 const override_table = document.querySelector('#override-table tbody');
 
 const start_ytdlp = document.getElementById('start-ytdlp-btn');
+const resume_ytdlp = document.getElementById('resume-ytdlp-btn');
 const stop_ytdlp = document.getElementById('stop-ytdlp-btn');
 const reset_ytdlp = document.getElementById('reset-ytdlp-btn');
 const ytdlp_spinner = document.getElementById('ytdlp-spinner');
 const ytdlp_progress_bar = document.getElementById('ytdlp-progress-status-bar-inner');
 const ytdlp_status_text = document.getElementById('ytdlp-status-text');
+const ytdlp_queue_text = document.getElementById('ytdlp-queue-text');
 const ytdlp_table = document.getElementById('ytdlp-table').getElementsByTagName('tbody')[0];
 
 const config_modal = document.getElementById('config-modal');
@@ -132,14 +134,24 @@ function set_lidarr_button_states(status, row_count) {
     select_all_checkbox.style.visibility = has_rows ? 'visible' : 'hidden';
 }
 
-function set_ytdlp_button_states(status, row_count) {
+function set_ytdlp_button_states(status, row_count, queue = {}) {
     const is_running = status === 'running';
     const has_rows = row_count > 0;
 
-    start_ytdlp.disabled = is_running || pending_download_request;
+    const has_resumable = !is_running && Number(queue.pending || 0) + Number(queue.in_progress || 0) > 0;
+    start_ytdlp.disabled = is_running || has_resumable || pending_download_request;
+    resume_ytdlp.classList.toggle('d-none', !has_resumable);
+    resume_ytdlp.disabled = !has_resumable;
     stop_ytdlp.disabled = !is_running;
-    reset_ytdlp.disabled = !is_running && !has_rows && status === 'idle';
+    reset_ytdlp.disabled = !is_running && !has_rows && !queue.total && status === 'idle';
     set_button_loading(start_ytdlp, ytdlp_spinner, is_running || pending_download_request);
+}
+
+function update_queue_detail(queue = {}) {
+    const total = Number(queue.total || 0);
+    if (!total) { ytdlp_queue_text.textContent = ''; return; }
+    const completed = Number(queue.done || 0) + Number(queue.error || 0);
+    ytdlp_queue_text.textContent = `Batch ${Number(queue.batch || 0).toLocaleString()} · album ${completed.toLocaleString()} / ${total.toLocaleString()} overall · ${Number(queue.matched || 0).toLocaleString()} matched / ${Number(queue.failed || 0).toLocaleString()} failed`;
 }
 
 function check_if_all_true() {
@@ -363,6 +375,18 @@ start_ytdlp.addEventListener('click', function () {
     socket.emit('add_to_download_list', checked_indices);
 });
 
+resume_ytdlp.addEventListener('click', async function () {
+    if (resume_ytdlp.disabled) return;
+    resume_ytdlp.disabled = true;
+    try {
+        await fetch_json('/api/session/resume', {method: 'POST'});
+        show_toast('Downloads', 'Resuming persisted download queue...');
+    } catch (error) {
+        show_toast('Downloads', error.message);
+        resume_ytdlp.disabled = false;
+    }
+});
+
 stop_ytdlp.addEventListener('click', function () {
     if (stop_ytdlp.disabled) {
         return;
@@ -436,10 +460,12 @@ socket.on('ytdlp_update', (response) => {
     ytdlp_table.replaceChildren(fragment);
 
     pending_download_request = false;
+    const queue = response.queue || {};
     const percent_completion = response.percent_completion || 0;
     const actual_status = typeof response.status === 'string' ? response.status : 'loading';
     update_progress_bar(percent_completion, actual_status);
-    set_ytdlp_button_states(actual_status, items.length);
+    update_queue_detail(queue);
+    set_ytdlp_button_states(actual_status, items.length, queue);
 });
 
 async function show_session_tracks(row, sessionId) { const details = row.nextElementSibling; if (details && details.classList.contains('session-details')) { details.remove(); return; } const page = await fetch_json(`/api/sessions/${sessionId}/tracks?limit=200&offset=0`); const detail = document.createElement('tr'); detail.className = 'session-details'; const cell = document.createElement('td'); cell.colSpan = 5; const table = document.createElement('table'); table.className = 'table table-sm mb-0'; page.items.forEach((track) => { const tr=document.createElement('tr'); tr.innerHTML=`<td>${escape_html(track.track_title)}</td><td>${escape_html(track.outcome)}</td><td>${track.suspicion}</td>`; if (track.outcome === 'no_match') { tr.style.cursor='pointer'; tr.title='Show evaluated candidates'; tr.addEventListener('click', async () => { const existing=tr.nextElementSibling; if (existing && existing.classList.contains('evaluation-details')) { existing.remove(); return; } const evaluations=await fetch_json(`/api/track/${track.id}/evaluations`); const detail=document.createElement('tr'); detail.className='evaluation-details'; const detailCell=document.createElement('td'); detailCell.colSpan=3; const evaluationTable=document.createElement('table'); evaluationTable.className='table table-sm table-bordered mb-0'; evaluationTable.innerHTML='<thead><tr><th>Candidate</th><th>Duration</th><th>Score</th><th>Reason</th></tr></thead>'; const body=document.createElement('tbody'); evaluations.items.forEach((e) => { const er=document.createElement('tr'); er.innerHTML=`<td>${escape_html(e.candidate_title || 'Unknown')}</td><td>${e.candidate_duration_s || '—'}s</td><td>${e.score ?? '—'}</td><td>${escape_html(e.rejected_by)}</td>`; body.appendChild(er); }); if (!evaluations.items.length) body.innerHTML='<tr><td colspan="4">No candidates returned</td></tr>'; evaluationTable.appendChild(body); detailCell.appendChild(evaluationTable); detail.appendChild(detailCell); tr.after(detail); }); } table.appendChild(tr); }); cell.appendChild(table); detail.appendChild(cell); row.after(detail); }

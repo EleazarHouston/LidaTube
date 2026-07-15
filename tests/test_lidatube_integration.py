@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import _matcher
+from store import Store
 
 
 @pytest.fixture
@@ -54,6 +55,19 @@ def build_data_handler(module):
     handler.fd_exhaustion_event = threading.Event()
     handler._ytmusic_semaphore = threading.Semaphore(2)
     handler.ytdlp_in_progress_flag = False
+    handler._reset_session_ids = set()
+    handler.batch_number = 0
+    handler.queue_progress = {
+        "session_id": None,
+        "pending": 0,
+        "in_progress": 0,
+        "done": 0,
+        "error": 0,
+        "total": 0,
+        "batch": 0,
+        "matched": 0,
+        "failed": 0,
+    }
     handler.streaming_mode = False
     handler.clients_connected_counter = 0
     handler.index = 0
@@ -68,6 +82,8 @@ def build_data_handler(module):
     cfg.fallback_to_top_result = False
     cfg.secondary_search = "YTS"
     cfg.thread_limit = 1
+    cfg.batch_size = 2
+    cfg.auto_resume = True
     cfg.lidarr_scan_thread_limit = 8
     cfg.download_folder = "/downloads"
     cfg.preferred_codec = "mp3"
@@ -79,7 +95,18 @@ def build_data_handler(module):
     cfg.save = Mock()
     handler.config = cfg
     handler.store = Mock()
+    handler.store.enqueue_items.side_effect = lambda session_id, items: len(items)
     handler.store.start_session.return_value = 1
+    handler.store.resumable_session.return_value = None
+    handler.store.resume_session.return_value = True
+    handler.store.next_batch.return_value = []
+    handler.store.queue_counts.return_value = {
+        "pending": 0,
+        "in_progress": 0,
+        "done": 0,
+        "error": 0,
+        "total": 0,
+    }
     handler.store.get_override.return_value = None
     handler.store.get_session_result_counts.return_value = {"matched_count": 0, "failed_count": 0}
     handler.current_session_id = None
@@ -157,6 +184,43 @@ class TestPersistenceApiRoutes:
         assert data["ids"] == [0, 2]
         assert data["total"] == 2
         assert client.get("/api/lidarr?ids_only=1&q=other").get_json()["ids"] == [2]
+
+    def test_queue_status_reports_persisted_counts(self, app_client):
+        client, module = app_client
+        session_id = module.data_handler.store.start_session(requested_count=2)
+        module.data_handler.store.enqueue_items(
+            session_id,
+            [{"album_id": 1}, {"album_id": 2}],
+        )
+        first = module.data_handler.store.next_batch(session_id, 1)[0]
+        module.data_handler.store.mark_queue_item(first["id"], "in_progress")
+
+        response = client.get("/api/queue/status")
+
+        assert response.status_code == 200
+        assert response.get_json() == {
+            "session_id": session_id,
+            "pending": 1,
+            "in_progress": 1,
+            "done": 0,
+            "error": 0,
+            "total": 2,
+            "batch": 0,
+            "matched": 0,
+            "failed": 0,
+        }
+
+    def test_resume_and_stop_endpoints_delegate_to_handler(self, app_client, monkeypatch):
+        client, module = app_client
+        monkeypatch.setattr(module.data_handler, "resume_ytdlp", Mock(return_value=True))
+        monkeypatch.setattr(module.data_handler, "queue_status", Mock(return_value={"session_id": 7}))
+        assert client.post("/api/session/resume").status_code == 202
+
+        module.data_handler.ytdlp_in_progress_flag = True
+        stop_mock = Mock()
+        monkeypatch.setattr(module.data_handler, "stop_ytdlp", stop_mock)
+        assert client.post("/api/session/stop").status_code == 202
+        stop_mock.assert_called_once_with()
 
     def test_persistence_api_rejects_invalid_pagination(self, app_client):
         client, _ = app_client
@@ -398,10 +462,12 @@ def test_link_finder_closes_ytmusic_client(lidatube_module, monkeypatch):
     assert len(close_called) == 1
 
 
-def test_streaming_mode_adds_scan_ready_album_to_ytdlp_items(lidatube_module, monkeypatch):
-    """When streaming_mode=True, scan_ready albums are auto-added to ytdlp_items."""
+def test_streaming_mode_persists_scan_ready_album(lidatube_module, monkeypatch):
+    """Streaming albums enter the durable session without growing the memory queue."""
     handler = build_data_handler(lidatube_module)
     handler.streaming_mode = True
+    handler.current_session_id = 1
+    handler.ytdlp_in_progress_flag = True
     monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
 
     album = {
@@ -423,7 +489,9 @@ def test_streaming_mode_adds_scan_ready_album_to_ytdlp_items(lidatube_module, mo
     handler.get_missing_tracks_for_album(album)
 
     assert album["scan_ready"] is True
-    assert album in handler.ytdlp_items
+    assert handler.ytdlp_items == []
+    handler.store.enqueue_items.assert_called_once_with(1, [album])
+    handler.store.increment_session_requested_count.assert_called_once_with(1, 1)
     assert album["status"] == "Queued"
 
 
@@ -481,6 +549,7 @@ def test_master_queue_waits_when_streaming_and_fetch_busy(lidatube_module, monke
     def finish_fetch():
         time.sleep(0.3)
         handler.lidarr_status = "complete"
+        handler.streaming_mode = False
 
     t = threading.Thread(target=finish_fetch)
     t.start()
@@ -492,12 +561,13 @@ def test_master_queue_waits_when_streaming_and_fetch_busy(lidatube_module, monke
     assert handler.ytdlp_in_progress_flag is False
 
 
-def test_master_queue_processes_item_added_during_streaming(lidatube_module, monkeypatch):
-    """Items added to ytdlp_items during streaming are processed by the running master_queue."""
+def test_master_queue_processes_persisted_item_added_during_streaming(lidatube_module, monkeypatch):
+    """The running queue polls persisted albums added by the streaming scanner."""
     handler = build_data_handler(lidatube_module)
     handler.streaming_mode = True
     handler.lidarr_status = "busy"
     handler.ytdlp_in_progress_flag = True
+    handler.current_session_id = 1
     handler.index = 0
     emit_mock = Mock()
     monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
@@ -512,12 +582,21 @@ def test_master_queue_processes_item_added_during_streaming(lidatube_module, mon
     monkeypatch.setattr(handler, "find_link_and_download", fake_find_link_and_download)
 
     album = {"album_name": "Late Album", "status": "Queued", "scan_ready": True}
+    persisted_rows = []
+
+    def next_batch(session_id, limit):
+        if persisted_rows:
+            return [persisted_rows.pop(0)]
+        return []
+
+    handler.store.next_batch.side_effect = next_batch
 
     def add_item_then_finish():
         time.sleep(0.1)
-        handler.ytdlp_items.append(album)
+        persisted_rows.append({"id": 10, "album_json": json.dumps(album)})
         time.sleep(0.2)
         handler.lidarr_status = "complete"
+        handler.streaming_mode = False
 
     t = threading.Thread(target=add_item_then_finish)
     t.start()
@@ -527,6 +606,113 @@ def test_master_queue_processes_item_added_during_streaming(lidatube_module, mon
 
     assert "Late Album" in processed
     assert handler.ytdlp_status == "complete"
+
+
+def test_add_items_persists_selected_albums_without_growing_memory_queue(
+    lidatube_module, monkeypatch
+):
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    monkeypatch.setattr(lidatube_module.socketio, "sleep", Mock())
+    start_mock = Mock(return_value=True)
+    monkeypatch.setattr(handler, "_start_queue_thread", start_mock)
+    handler.lidarr_items = [
+        {
+            "artist": "Artist",
+            "album_name": f"Album {index}",
+            "scan_ready": True,
+            "missing_tracks": [{"track_id": track_id} for track_id in range(index + 1)],
+        }
+        for index in range(3)
+    ]
+
+    handler.add_items_to_download([2, 0])
+
+    assert handler.ytdlp_items == []
+    queued = handler.store.enqueue_items.call_args.args[1]
+    assert [item["album_name"] for item in queued] == ["Album 0", "Album 2"]
+    handler.store.increment_session_requested_count.assert_called_once_with(1, 4)
+    assert [item["checked"] for item in handler.lidarr_items] == [True, False, True]
+    start_mock.assert_called_once_with(1)
+
+
+def test_persisted_batches_resume_after_simulated_restart_without_drops(
+    lidatube_module, monkeypatch, tmp_path
+):
+    class SimulatedWorkerCrash(BaseException):
+        pass
+
+    db_path = tmp_path / "restart.db"
+    session_id = None
+    processed = []
+    observed_batch_sizes = []
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    sleep_mock = Mock()
+    monkeypatch.setattr(lidatube_module.socketio, "sleep", sleep_mock)
+
+    first = build_data_handler(lidatube_module)
+    first.store = Store(db_path)
+    first.config.batch_size = 2
+    first.current_session_id = first.store.start_session(requested_count=5)
+    session_id = first.current_session_id
+    first.store.enqueue_items(
+        session_id,
+        [
+            {"album_id": album_id, "album_name": f"Album {album_id}", "scan_ready": True}
+            for album_id in range(5)
+        ],
+    )
+
+    def process_first(req_album):
+        observed_batch_sizes.append(len(first.ytdlp_items))
+        processed.append(req_album["album_id"])
+        req_album["status"] = "Download Complete"
+
+    monkeypatch.setattr(first, "find_link_and_download", process_first)
+    real_next_batch = first.store.next_batch
+    batch_calls = 0
+
+    def crash_after_one_batch(requested_session_id, limit):
+        nonlocal batch_calls
+        batch_calls += 1
+        if batch_calls == 1:
+            return real_next_batch(requested_session_id, limit)
+        raise SimulatedWorkerCrash()
+
+    monkeypatch.setattr(first.store, "next_batch", crash_after_one_batch)
+    with pytest.raises(SimulatedWorkerCrash):
+        first.master_queue(session_id)
+    first.store.close()
+
+    reopened = Store(db_path)
+    assert reopened.resumable_session()["id"] == session_id
+    assert reopened.queue_counts(session_id) == {
+        "pending": 3,
+        "in_progress": 0,
+        "done": 2,
+        "error": 0,
+        "total": 5,
+    }
+
+    resumed = build_data_handler(lidatube_module)
+    resumed.store = reopened
+    resumed.config.batch_size = 2
+
+    def process_remainder(req_album):
+        observed_batch_sizes.append(len(resumed.ytdlp_items))
+        processed.append(req_album["album_id"])
+        req_album["status"] = "Download Complete"
+
+    monkeypatch.setattr(resumed, "find_link_and_download", process_remainder)
+    resumed.master_queue(session_id)
+
+    assert sorted(processed) == list(range(5))
+    assert len(processed) == len(set(processed))
+    assert max(observed_batch_sizes) <= 2
+    assert reopened.queue_counts(session_id)["done"] == 5
+    assert reopened.list_sessions()[0]["status"] == "complete"
+    assert sleep_mock.called
+    reopened.close()
 
 
 def test_emit_lidarr_update_strips_missing_tracks(lidatube_module, monkeypatch):
@@ -846,7 +1032,12 @@ def test_connect_emits_updates_and_increments_client_counter(lidatube_module, mo
     handler._emit_lidarr_update.assert_called_once()
     emit_mock.assert_any_call(
         "ytdlp_update",
-        {"status": "running", "data": [{"album_name": "A"}], "percent_completion": 25},
+        {
+            "status": "running",
+            "data": [{"artist": "", "album_name": "A", "status": ""}],
+            "percent_completion": 25,
+            "queue": handler.queue_progress,
+        },
     )
     assert handler.clients_connected_counter == 1
 
@@ -1261,6 +1452,8 @@ def test_reset_ytdlp_clears_queue_and_completion(lidatube_module, monkeypatch):
     handler.ytdlp_futures = [future]
     handler.ytdlp_items = [{"status": "Queued"}]
     handler.percent_completion = 42
+    handler.current_session_id = 8
+    handler.queue_progress["session_id"] = 8
 
     handler.reset_ytdlp()
 
@@ -1269,6 +1462,8 @@ def test_reset_ytdlp_clears_queue_and_completion(lidatube_module, monkeypatch):
     assert handler.ytdlp_status == "idle"
     assert handler.index == 0
     assert handler.percent_completion == 0
+    handler.store.clear_queue.assert_called_once_with(8)
+    handler.store.finish_session.assert_called_once_with(8, "reset", matched_count=0, failed_count=0)
 
 
 def test_reset_lidarr_clears_cache_and_restores_idle_state(lidatube_module, monkeypatch, tmp_path):
