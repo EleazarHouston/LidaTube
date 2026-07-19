@@ -603,6 +603,63 @@ def test_song_matcher_prefers_studio_over_instrumental():
     assert match["videoId"] == "studio"
 
 
+# --- "clean" (censored) version handling ---
+
+def test_song_matcher_prefers_explicit_over_clean():
+    # Astronaut in the Ocean regression: the clean cut was grabbed over the original.
+    search_results = [
+        {"resultType": "song", "title": "Astronaut in the Ocean (Clean)", "videoId": "clean",
+         "artists": [{"name": "Masked Wolf"}], "duration_seconds": 132},
+        {"resultType": "song", "title": "Astronaut in the Ocean", "videoId": "explicit",
+         "artists": [{"name": "Masked Wolf"}], "duration_seconds": 132},
+    ]
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70, artist="Masked Wolf", cleaned_artist="masked wolf",
+        song_title="Astronaut in the Ocean", cleaned_song_title="astronaut in the ocean",
+        search_results=search_results, expected_duration_ms=132000,
+    )
+    assert match is not None
+    assert match["videoId"] == "explicit"
+
+
+def test_song_matcher_rejects_clean_when_explicit_requested_and_only_clean_present():
+    search_results = [
+        {"resultType": "song", "title": "Astronaut in the Ocean (Clean Version)", "videoId": "clean",
+         "artists": [{"name": "Masked Wolf"}], "duration_seconds": 132},
+    ]
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70, artist="Masked Wolf", cleaned_artist="masked wolf",
+        song_title="Astronaut in the Ocean", cleaned_song_title="astronaut in the ocean",
+        search_results=search_results, expected_duration_ms=132000,
+    )
+    assert match is None
+
+
+def test_song_matcher_accepts_clean_when_request_wants_clean():
+    search_results = [
+        {"resultType": "song", "title": "Astronaut in the Ocean (Clean)", "videoId": "clean",
+         "artists": [{"name": "Masked Wolf"}], "duration_seconds": 132},
+    ]
+    match = _matcher.song_matcher(
+        minimum_match_ratio=70, artist="Masked Wolf", cleaned_artist="masked wolf",
+        song_title="Astronaut in the Ocean (Clean)", cleaned_song_title="astronaut in the ocean clean",
+        search_results=search_results, expected_duration_ms=132000,
+    )
+    assert match is not None
+    assert match["videoId"] == "clean"
+
+
+def test_clean_marker_does_not_misfire_on_songs_named_clean():
+    # "clean" as part of a real title must NOT be treated as the censored-version marker.
+    assert not _matcher._version_mismatch("Come Clean", "Come Clean")
+    assert not _matcher._version_mismatch("Mr. Clean", "Mr. Clean")
+    assert not _matcher._version_mismatch("Clean", "Clean")
+    # but the qualifier form is caught, asymmetrically
+    assert _matcher._version_mismatch("Astronaut in the Ocean", "Astronaut in the Ocean (Clean)")
+    assert _matcher._version_mismatch("Song", "Song [Clean]")
+    assert not _matcher._version_mismatch("Song (Clean)", "Song (Clean)")
+
+
 def test_song_matcher_accepts_instrumental_when_requested():
     # If Lidarr's track IS the instrumental, the marker is in the request too — allow it.
     search_results = [

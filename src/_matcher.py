@@ -63,18 +63,31 @@ def _contains_marker(text, marker):
     return re.search(r"\b" + re.escape(marker) + r"\b", text) is not None
 
 
+# "Clean" is a censored radio version — treated like the other markers, but only in an
+# explicit qualifier form: "(Clean)", "[Clean]", "Clean Version/Edit/Mix". Never a bare
+# word, so songs legitimately named with "clean" ("Come Clean", "Mr. Clean", Taylor
+# Swift's "Clean") are not mistaken for the censored cut.
+_CLEAN_VERSION_RE = re.compile(r"[\(\[]\s*clean\b|\bclean\s+(?:version|edit|radio\s*edit|mix)\b", re.IGNORECASE)
+
+
+def _has_clean_marker(text):
+    return _CLEAN_VERSION_RE.search(text or "") is not None
+
+
 def _version_mismatch(requested_title, candidate_title):
     """True if request and candidate disagree on any strong version marker.
 
-    Symmetric: grabbing an instrumental/karaoke/cover for a normal request AND
-    grabbing the plain vocal for a request that explicitly wants the instrumental
-    are both rejected. Markers the request itself asks for are allowed through.
+    Symmetric: grabbing an instrumental/karaoke/cover/clean cut for a normal request
+    AND grabbing the plain vocal for a request that explicitly wants that version are
+    both rejected. Markers the request itself asks for are allowed through.
     """
     req = (requested_title or "").lower()
     cand = (candidate_title or "").lower()
     for marker in UNWANTED_VERSION_MARKERS:
         if _contains_marker(cand, marker) != _contains_marker(req, marker):
             return True
+    if _has_clean_marker(cand) != _has_clean_marker(req):
+        return True
     return False
 
 
