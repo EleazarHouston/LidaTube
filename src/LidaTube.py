@@ -366,22 +366,44 @@ class DataHandler:
             total_albums = 0
             albums_processed = 0
             undrained_futures = set()
+            wanted_fetch_incomplete = False
+            last_wanted_error = None
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=scan_worker_count) as executor:
                 while True:
                     if self.lidarr_stop_event.is_set():
                         break
 
-                    response = self.lidarr_client.get_wanted_albums(page, page_size)
-                    try:
-                        if response.status_code != 200:
-                            self.general_logger.error(f"Lidarr Wanted API Error Code: {response.status_code}")
+                    # Retry a failed page before giving up: Lidarr returns 500s when it is
+                    # busy (e.g. a concurrent library rescan), and abandoning the loop there
+                    # silently truncates the wanted list.
+                    wanted_missing_albums = None
+                    for attempt in range(3):
+                        response = self.lidarr_client.get_wanted_albums(page, page_size)
+                        try:
+                            if response.status_code == 200:
+                                wanted_missing_albums = response.json()
+                                break
+                            self.general_logger.error(f"Lidarr Wanted API Error Code: {response.status_code} (page {page}, attempt {attempt + 1}/3)")
                             self.general_logger.error(f"Lidarr Wanted API Error Text: {response.text}")
-                            socketio.emit("new_toast_msg", {"title": f"Lidarr API Error: {response.status_code}", "message": response.text})
-                            break
-                        wanted_missing_albums = response.json()
-                    finally:
-                        response.close()
+                            last_wanted_error = f"{response.status_code}: {response.text[:200]}"
+                        finally:
+                            response.close()
+                        if attempt < 2:
+                            self.lidarr_stop_event.wait(2 ** attempt)
+
+                    if wanted_missing_albums is None:
+                        # Do not present a truncated list as a finished scan.
+                        wanted_fetch_incomplete = True
+                        self.general_logger.error(
+                            f"Aborting wanted-album fetch at page {page}: Lidarr did not return a page after 3 attempts. "
+                            f"The album list is INCOMPLETE ({len(self.lidarr_items)} albums fetched so far)."
+                        )
+                        socketio.emit("new_toast_msg", {
+                            "title": "Lidarr fetch incomplete",
+                            "message": f"Lidarr errored on page {page}; only {len(self.lidarr_items)} albums were fetched. Refresh again to get the rest.",
+                        })
+                        break
 
                     if not wanted_missing_albums["records"]:
                         break
@@ -472,12 +494,22 @@ class DataHandler:
                     self._emit_lidarr_progress()
                 self._emit_lidarr_update()
 
-            self.lidarr_status = "stopped" if self.lidarr_stop_event.is_set() else "complete"
-            if self.lidarr_status == "complete":
+            if self.lidarr_stop_event.is_set():
+                self.lidarr_status = "stopped"
+                self._set_lidarr_scan_progress(phase="Stopped")
+            elif wanted_fetch_incomplete:
+                # The list is truncated — say so instead of reporting a finished scan.
+                self.lidarr_status = "error"
+                self._set_lidarr_scan_progress(
+                    phase=f"Incomplete — Lidarr error on page {page} ({total_albums} albums fetched)",
+                    albums_processed=total_albums, albums_total=total_albums, percent=100,
+                )
+                self.general_logger.error(f"Wanted-album fetch incomplete; last Lidarr error: {last_wanted_error}")
+                self._save_lidarr_cache()
+            else:
+                self.lidarr_status = "complete"
                 self._set_lidarr_scan_progress(phase="Complete", albums_processed=total_albums, albums_total=total_albums, percent=100)
                 self._save_lidarr_cache()
-            elif self.lidarr_status == "stopped":
-                self._set_lidarr_scan_progress(phase="Stopped")
 
         except Exception as e:
             self.general_logger.error(f"Error Getting Missing Albums: {e}")

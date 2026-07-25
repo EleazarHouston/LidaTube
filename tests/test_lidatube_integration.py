@@ -1145,6 +1145,7 @@ def test_get_wanted_albums_handles_non_200_and_emits_toast(lidatube_module, monk
     handler = build_data_handler(lidatube_module)
     emit_mock = Mock()
     monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
+    monkeypatch.setattr(handler.lidarr_stop_event, "wait", lambda *a, **k: False)
 
     close_called = []
     response = FakeResponse(503, {"records": []}, "Service unavailable")
@@ -1153,9 +1154,44 @@ def test_get_wanted_albums_handles_non_200_and_emits_toast(lidatube_module, monk
 
     handler.get_wanted_albums_from_lidarr()
 
-    assert close_called == [1]
+    # The page is retried before giving up, and every response is closed.
+    assert len(close_called) == 3
     assert any(call.args[0] == "new_toast_msg" for call in emit_mock.call_args_list)
-    assert handler.lidarr_status == "complete"
+    # A failed fetch must NOT be reported as a finished scan.
+    assert handler.lidarr_status == "error"
+
+
+def test_wanted_fetch_error_midway_is_not_reported_complete(lidatube_module, monkeypatch):
+    """Regression: Lidarr 500 on page N truncated the album list but reported 'Complete'.
+
+    A busy Lidarr (concurrent rescan) returned 500 on page 26; the loop broke and the
+    partial 25,000-album list was cached as a finished scan, hiding ~64k albums.
+    """
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    monkeypatch.setattr(handler.lidarr_stop_event, "wait", lambda *a, **k: False)
+    monkeypatch.setattr(handler, "get_missing_tracks_for_album", lambda item: None)
+    monkeypatch.setattr(handler, "_save_lidarr_cache", Mock())
+
+    def album(i):
+        return {"artistId": 1, "id": i, "title": f"Album {i}", "releaseDate": "2020-01-01T00:00:00Z",
+                "genres": [], "releases": [{"id": 100 + i}]}
+
+    calls = {"n": 0}
+
+    def fake_get_wanted(page, page_size):
+        calls["n"] += 1
+        if page == 1:
+            return FakeResponse(200, {"records": [album(1), album(2)]})
+        return FakeResponse(500, {}, "Internal Server Error")  # page 2 always fails
+
+    handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
+    handler.get_wanted_albums_from_lidarr()
+
+    assert len(handler.lidarr_items) == 2          # page 1 kept
+    assert handler.lidarr_status == "error"        # not "complete"
+    assert "Incomplete" in handler.lidarr_scan_progress["phase"]
+    assert calls["n"] == 1 + 3                     # page 1, then page 2 retried 3x
 
 
 def test_artist_prefetch_retries_then_succeeds(lidatube_module, monkeypatch):
