@@ -784,6 +784,56 @@ def test_song_matcher_yt_accepts_artist_in_dict_channel():
     assert match["link"] == "https://yts"
 
 
+# --- channel-as-artist fallback (Diggy Diggy Hole regression) ---
+
+def test_song_matcher_yt_channel_fallback_recovers_artist_in_channel():
+    # Real case: the Yogscast original is titled "♪ Diggy Diggy Hole" on channel
+    # "The Yogscast"; the query's artist prefix has nothing to match in the title, so
+    # the normal pass under-scores it. The channel fallback (high threshold) recovers it.
+    search_results = [
+        {"title": "♪ Diggy Diggy Hole", "link": "https://correct", "duration": "4:09",
+         "channel": {"name": "The Yogscast"}},
+        {"title": "Diggy Diggy Hole", "link": "https://cover", "duration": "5:16",
+         "channel": {"name": "Wind Rose"}},
+    ]
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=85, artist="The Yogscast",
+        query_text="The Yogscast - Diggy Diggy Hole", search_results=search_results,
+        expected_duration_ms=246000, duration_tolerance_seconds=15,
+    )
+    assert match is not None
+    assert match["link"] == "https://correct"
+
+
+def test_song_matcher_yt_channel_fallback_still_requires_title_match():
+    # A different song on the right channel must NOT be accepted just because the
+    # channel matches the artist — the title still has to match.
+    search_results = [
+        {"title": "Some Other Yogscast Song", "link": "https://wrong", "duration": "4:00",
+         "channel": {"name": "The Yogscast"}},
+    ]
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=85, artist="The Yogscast",
+        query_text="The Yogscast - Diggy Diggy Hole", search_results=search_results,
+        expected_duration_ms=246000, duration_tolerance_seconds=15,
+    )
+    assert match is None
+
+
+def test_song_matcher_yt_channel_fallback_skips_unrelated_channel():
+    # Channel doesn't match the artist -> fallback must not credit it.
+    search_results = [
+        {"title": "Diggy Diggy Hole", "link": "https://cover", "duration": "4:06",
+         "channel": {"name": "Megaraptor"}},
+    ]
+    match = _matcher.song_matcher_yt(
+        minimum_match_ratio=85, artist="The Yogscast",
+        query_text="The Yogscast - Diggy Diggy Hole", search_results=search_results,
+        expected_duration_ms=246000, duration_tolerance_seconds=15,
+    )
+    assert match is None
+
+
 def test_song_matcher_breaks_early_on_perfect_score(monkeypatch):
     calls = []
 

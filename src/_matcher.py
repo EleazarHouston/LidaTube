@@ -264,6 +264,32 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
     return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
 
 
+def _channel_name(item):
+    for field in ("channel", "uploader", "uploader_id"):
+        val = item.get(field)
+        if isinstance(val, dict):
+            val = val.get("name", "")
+        if val:
+            return str(val)
+    return ""
+
+
+def _yt_title_score(query_text, cleaned_query, cleaned_query_mk, candidate_text):
+    """Three-way fuzzy score of a candidate text against the query, with substring bonuses."""
+    title_similarity = fuzz.ratio(query_text, candidate_text)
+    if query_text in candidate_text:
+        title_similarity = 100
+    cleaned = _general.string_cleaner(candidate_text)
+    cleaned_similarity = fuzz.ratio(cleaned_query, cleaned)
+    if cleaned_query in cleaned:
+        cleaned_similarity = 100
+    cleaned_mk = remove_song_keywords(cleaned)
+    cleaned_mk_similarity = fuzz.ratio(cleaned_query_mk, cleaned_mk)
+    if cleaned_query_mk in cleaned_mk:
+        cleaned_mk_similarity = 100
+    return (title_similarity + cleaned_similarity + cleaned_mk_similarity) / 3
+
+
 def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
                     expected_duration_ms=0, duration_tolerance_seconds=15, trace=None):
     if not search_results:
@@ -274,6 +300,7 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
     cleaned_query_text_minus_keywords = remove_song_keywords(cleaned_query_text)
     cleaned_artist = _general.string_cleaner(artist).lower() if artist else ""
     threshold = _normalize_min_ratio(minimum_match_ratio)
+    gate_cleared = []
 
     for item in search_results:
         title = item.get("title", "")
@@ -288,22 +315,38 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
         if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
             _append_trace(trace, "yt", item, candidate_seconds, None, "duration_gate")
             continue
-        title_similarity = fuzz.ratio(query_text, title)
-        if query_text in title:
-            title_similarity = 100
-        cleaned_title = _general.string_cleaner(title)
-        cleaned_title_similarity = fuzz.ratio(cleaned_query_text, cleaned_title)
-        if cleaned_query_text in cleaned_title:
-            cleaned_title_similarity = 100
-        cleaned_title_minus_keywords = remove_song_keywords(cleaned_title)
-        cleaned_title_minus_keywords_similarity = fuzz.ratio(cleaned_query_text_minus_keywords, cleaned_title_minus_keywords)
-        if cleaned_query_text_minus_keywords in cleaned_title_minus_keywords:
-            cleaned_title_minus_keywords_similarity = 100
-        score = (title_similarity + cleaned_title_similarity + cleaned_title_minus_keywords_similarity) / 3
+        score = _yt_title_score(query_text, cleaned_query_text, cleaned_query_text_minus_keywords, title)
         _append_trace(trace, "yt", item, candidate_seconds, score, "accepted" if score > threshold else "below_threshold")
+        gate_cleared.append((item, title, candidate_seconds))
         if score > best_match_rating:
             best_match_rating = score
             best_match_item = item
             if score == 100:
                 break
-    return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
+
+    match = _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
+    if match is not None:
+        return match
+
+    # Fallback: official/topic uploads credit the artist in the CHANNEL, not the title
+    # (e.g. "♪ Diggy Diggy Hole" on channel "The Yogscast"), so the artist prefix in the
+    # query has nothing to match and the score falls short. Re-score the gate-cleared
+    # candidates with the channel name plugged in for the artist; the title must still
+    # match, so a wrong song on the right channel won't pass.
+    if not cleaned_artist:
+        return None
+    fb_rating = 0
+    fb_item = None
+    for item, title, candidate_seconds in gate_cleared:
+        channel = _channel_name(item)
+        if not channel or cleaned_artist not in _general.string_cleaner(channel).lower():
+            continue
+        augmented = f"{channel} - {title}"
+        score = _yt_title_score(query_text, cleaned_query_text, cleaned_query_text_minus_keywords, augmented)
+        _append_trace(trace, "yt-channel", item, candidate_seconds, score, "accepted" if score > threshold else "below_threshold")
+        if score > fb_rating:
+            fb_rating = score
+            fb_item = item
+            if score == 100:
+                break
+    return _best_match_or_none(fb_rating, minimum_match_ratio, fb_item)
