@@ -1487,11 +1487,13 @@ def _page_args():
     return limit, offset
 
 
-def _filtered_lidarr_indices(query):
+def _filtered_lidarr_indices(query, checked_only=False):
     """Positional indices of albums that still have missing/pending tracks, filtered by query."""
     indices = []
     for index, item in enumerate(data_handler.lidarr_items):
         if item.get("missing_count", 0) <= 0 and item.get("scan_ready", False):
+            continue
+        if checked_only and not item.get("checked", False):
             continue
         label = f"{item.get('artist', '')} {item.get('album_name', '')}".lower()
         if query and query not in label:
@@ -1503,10 +1505,14 @@ def _filtered_lidarr_indices(query):
 @app.route("/api/lidarr")
 def api_lidarr():
     query = request.args.get("q", "").strip().lower()
-    indices = _filtered_lidarr_indices(query)
-    # ids_only powers "select all" across the virtualized list without loading rows.
+    # ids_only powers selection across the virtualized list without loading rows:
+    # plain -> every filtered album (select all); checked_only -> the albums the
+    # server currently has selected, which is the default download set.
     if request.args.get("ids_only"):
+        checked_only = bool(request.args.get("checked_only"))
+        indices = _filtered_lidarr_indices(query, checked_only=checked_only)
         return jsonify({"ids": indices, "total": len(indices)})
+    indices = _filtered_lidarr_indices(query)
     page = _page_args()
     if page is None:
         return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400

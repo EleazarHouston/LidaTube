@@ -194,16 +194,16 @@ select_all_checkbox.addEventListener('change', async function () {
     // Sync the shared selection set across the whole (virtualized) list, not just
     // the ~300 rows currently in the DOM. Programmatic .checked does not fire the
     // delegated change listener, so the set is updated here explicitly.
-    if (is_checked) {
-        try {
-            const query = encodeURIComponent(lidarr_search.value.trim());
-            const page = await fetch_json(`/api/lidarr?ids_only=1&q=${query}`);
-            page.ids.forEach((index) => selected_lidarr_indices.add(index));
-        } catch (error) {
-            show_toast('Lidarr', error.message);
-        }
-    } else {
-        selected_lidarr_indices.clear(); lidarr_seen.clear();
+    try {
+        const query = encodeURIComponent(lidarr_search.value.trim());
+        const page = await fetch_json(`/api/lidarr?ids_only=1&q=${query}`);
+        selected_lidarr_indices.clear();
+        deselected_lidarr_indices.clear();
+        // Record the choice against every filtered album, including unloaded rows.
+        const target = is_checked ? selected_lidarr_indices : deselected_lidarr_indices;
+        page.ids.forEach((index) => target.add(index));
+    } catch (error) {
+        show_toast('Lidarr', error.message);
     }
     document.querySelectorAll('input[name="lidarr_item"]').forEach((checkbox) => {
         checkbox.checked = is_checked;
@@ -215,7 +215,13 @@ select_all_checkbox.addEventListener('change', async function () {
 lidarr_table.addEventListener('change', function (event) {
     if (event.target && event.target.name === 'lidarr_item') {
         const index = Number(event.target.dataset.index);
-        if (event.target.checked) selected_lidarr_indices.add(index); else selected_lidarr_indices.delete(index);
+        if (event.target.checked) {
+            selected_lidarr_indices.add(index);
+            deselected_lidarr_indices.delete(index);
+        } else {
+            deselected_lidarr_indices.add(index);
+            selected_lidarr_indices.delete(index);
+        }
         check_if_all_true();
     }
 });
@@ -224,7 +230,7 @@ get_wanted_lidarr.addEventListener('click', function () {
     if (get_wanted_lidarr.disabled) {
         return;
     }
-    selected_lidarr_indices.clear(); lidarr_seen.clear();
+    selected_lidarr_indices.clear(); deselected_lidarr_indices.clear();
     lidarr_table.replaceChildren();
     select_all_checkbox.checked = false;
     set_button_loading(get_wanted_lidarr, lidarr_spinner, true);
@@ -245,7 +251,7 @@ reset_lidarr.addEventListener('click', function () {
         return;
     }
     socket.emit('reset_lidarr');
-    selected_lidarr_indices.clear(); lidarr_seen.clear();
+    selected_lidarr_indices.clear(); deselected_lidarr_indices.clear();
     lidarr_table.replaceChildren();
     select_all_checkbox.checked = false;
     lidarr_count_text.textContent = '';
@@ -357,12 +363,20 @@ save_changes_button.addEventListener('click', () => {
     }, 1200);
 });
 
-start_ytdlp.addEventListener('click', function () {
+start_ytdlp.addEventListener('click', async function () {
     if (start_ytdlp.disabled) {
         return;
     }
 
-    const checked_indices = Array.from(selected_lidarr_indices);
+    // Resolve against the server so albums that were never scrolled into view are
+    // still queued; using only the rendered rows silently capped runs at one page.
+    let checked_indices;
+    try {
+        checked_indices = await resolve_selected_indices();
+    } catch (error) {
+        show_toast('Downloads', `Could not resolve selection: ${error.message}`);
+        return;
+    }
 
     if (checked_indices.length === 0) {
         show_toast('Downloads', 'Select at least one album before starting download.');
@@ -371,7 +385,7 @@ start_ytdlp.addEventListener('click', function () {
 
     pending_download_request = true;
     set_ytdlp_button_states('idle', ytdlp_table.rows.length);
-    show_toast('Downloads', `Adding ${checked_indices.length} album(s) to queue...`);
+    show_toast('Downloads', `Adding ${checked_indices.length.toLocaleString()} album(s) to queue...`);
     socket.emit('add_to_download_list', checked_indices);
 });
 
@@ -406,11 +420,28 @@ reset_ytdlp.addEventListener('click', function () {
     show_toast('Downloads', 'Reset requested. Clearing queue...');
 });
 
-const selected_lidarr_indices = new Set();
-// Indices already seeded from the server's default `checked` state. Prevents a
-// re-rendered row (pagination/scroll/update) from re-selecting an album the user
-// deselected. Cleared only on an explicit refresh/reset, alongside the selection.
-const lidarr_seen = new Set();
+// Selection is the server's `checked` state plus the user's explicit deltas. Tracking
+// deltas (rather than a set seeded from rendered rows) means Download covers the WHOLE
+// filtered list, not just the ~100 rows scrolled into view.
+const selected_lidarr_indices = new Set();   // explicitly checked by the user
+const deselected_lidarr_indices = new Set(); // explicitly unchecked by the user
+
+function lidarr_row_checked(item) {
+    const i = item.index;
+    if (selected_lidarr_indices.has(i)) return true;
+    if (deselected_lidarr_indices.has(i)) return false;
+    return !!item.checked;
+}
+
+// Resolve the effective selection server-side so unloaded rows are included.
+async function resolve_selected_indices() {
+    const query = encodeURIComponent(lidarr_search.value.trim());
+    const page = await fetch_json(`/api/lidarr?ids_only=1&checked_only=1&q=${query}`);
+    const ids = new Set(page.ids);
+    selected_lidarr_indices.forEach((i) => ids.add(i));
+    deselected_lidarr_indices.forEach((i) => ids.delete(i));
+    return Array.from(ids);
+}
 let lidarr_offset = 0;
 let lidarr_total = 0;
 let lidarr_status = 'idle';
@@ -425,10 +456,7 @@ async function load_lidarr_page(reset = false) {
         const page = await fetch_json(`/api/lidarr?limit=100&offset=${lidarr_offset}&q=${query}`);
         const fragment = document.createDocumentFragment();
         page.items.forEach((item) => {
-            // Seed the selection Set from the server's default `checked` the first time
-            // we see an album, so a default-checked list is actually selected for download.
-            if (!lidarr_seen.has(item.index)) { lidarr_seen.add(item.index); if (item.checked) selected_lidarr_indices.add(item.index); }
-            const is_checked = selected_lidarr_indices.has(item.index);
+            const is_checked = lidarr_row_checked(item);
             const row=document.createElement('tr'); row.innerHTML=`<td><input class="form-check-input" type="checkbox" name="lidarr_item" data-index="${item.index}" ${is_checked ? 'checked' : ''}></td><td></td><td class="text-center"></td>`; row.children[1].textContent=`${item.artist} - ${item.album_name}`; row.children[2].textContent=item.scan_ready === false ? 'Scanning...' : `${item.missing_count}/${item.track_count}`; fragment.appendChild(row);
         });
         lidarr_table.appendChild(fragment); while (lidarr_table.rows.length > 300) lidarr_table.deleteRow(0); lidarr_offset += page.items.length; lidarr_total = page.total;

@@ -185,6 +185,23 @@ class TestPersistenceApiRoutes:
         assert data["total"] == 2
         assert client.get("/api/lidarr?ids_only=1&q=other").get_json()["ids"] == [2]
 
+    def test_lidarr_api_ids_only_checked_filter_drives_default_download_set(self, app_client):
+        """Regression: downloads queued only the ~100 rendered rows.
+
+        The default download set must come from the server's `checked` state across the
+        whole list, not from whichever rows the virtualized table happened to load.
+        """
+        client, module = app_client
+        module.data_handler.lidarr_items = [
+            {"artist": "A", "album_name": "One", "missing_count": 1, "track_count": 2, "scan_ready": True, "checked": True},
+            {"artist": "B", "album_name": "Two", "missing_count": 1, "track_count": 1, "scan_ready": True, "checked": False},
+            {"artist": "C", "album_name": "Three", "missing_count": 3, "track_count": 3, "scan_ready": True, "checked": True},
+        ]
+        assert client.get("/api/lidarr?ids_only=1").get_json()["ids"] == [0, 1, 2]
+        checked = client.get("/api/lidarr?ids_only=1&checked_only=1").get_json()
+        assert checked["ids"] == [0, 2]
+        assert checked["total"] == 2
+
     def test_queue_status_reports_persisted_counts(self, app_client):
         client, module = app_client
         session_id = module.data_handler.store.start_session(requested_count=2)
