@@ -6,6 +6,7 @@ on:
     - cron: "0 23 * * *"
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -20,10 +21,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          # A PAT lets the resulting push trigger the image-build workflow.
-          # Fall back to the built-in token so the updater works without setup.
-          token: ${{ secrets.PAT_TOKEN || github.token }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -89,3 +86,9 @@ jobs:
           git add requirements.txt
           git commit -m "Update yt-dlp version to ${LATEST_VERSION}"
           git push
+
+      - name: Trigger image build
+        if: steps.version.outputs.update_required == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run main.yml --ref main
