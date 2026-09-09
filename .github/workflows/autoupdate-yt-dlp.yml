@@ -1,49 +1,91 @@
 name: autoupdate-yt-dlp
 
-permissions:
-  contents: write
-  
 on:
   workflow_dispatch:
   schedule:
-    - cron: '00 23 * * *'
+    - cron: "0 23 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: autoupdate-yt-dlp
+  cancel-in-progress: false
 
 jobs:
   autoupdate-yt-dlp:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 5
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
-          token: ${{ secrets.PAT_TOKEN }}
+          # A PAT lets the resulting push trigger the image-build workflow.
+          # Fall back to the built-in token so the updater works without setup.
+          token: ${{ secrets.PAT_TOKEN || github.token }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Install pipenv
+      - name: Check for a newer yt-dlp release
+        id: version
+        shell: python
         run: |
-          python -m pip install --upgrade pip
-          pip install pipenv
+          import json
+          import os
+          import pathlib
+          import re
+          import urllib.request
 
-      - name: Install yt-dlp and get version
-        id: check_version
-        run: |
-          pipenv install yt-dlp
-          latest_version=$(pipenv run pip show yt-dlp | grep Version | cut -d' ' -f2)
-          current_version=$(grep -oP "(?<=yt_dlp\[default\]==)\d+(\.\d+)+" requirements.txt || echo "0.0.0")
-          echo "LATEST_VERSION=$latest_version" >> $GITHUB_ENV
-          echo "CURRENT_VERSION=$current_version" >> $GITHUB_ENV
+          requirements = pathlib.Path("requirements.txt")
+          contents = requirements.read_bytes()
+          match = re.search(rb"(?m)^yt_dlp\[default\]==([^\s]+)(?=\r?$)", contents)
+          if match is None:
+              raise SystemExit("Could not find the pinned yt_dlp[default] requirement")
 
-      - name: Compare versions and update requirements.txt if necessary
-        if: ${{ env.LATEST_VERSION != env.CURRENT_VERSION }}
+          with urllib.request.urlopen("https://pypi.org/pypi/yt-dlp/json", timeout=30) as response:
+              latest = json.load(response)["info"]["version"]
+
+          current = match.group(1).decode()
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"current={current}", file=output)
+              print(f"latest={latest}", file=output)
+              print(f"update_required={str(current != latest).lower()}", file=output)
+
+          print(f"Current yt-dlp: {current}")
+          print(f"Latest yt-dlp:  {latest}")
+
+      - name: Update requirements.txt
+        if: steps.version.outputs.update_required == 'true'
+        env:
+          LATEST_VERSION: ${{ steps.version.outputs.latest }}
+        shell: python
         run: |
-          latest_version=${{ env.LATEST_VERSION }}
-          sed -i "s/^yt_dlp\[default\].*/yt_dlp\[default\]==$latest_version/" requirements.txt
-          git config --global user.email "yt-dlp@autoupdate"
-          git config --global user.name "yt-dlp-autoupdate"
+          import os
+          import pathlib
+          import re
+
+          requirements = pathlib.Path("requirements.txt")
+          contents = requirements.read_bytes()
+          updated, replacements = re.subn(
+              rb"(?m)^yt_dlp\[default\]==[^\s]+(?=\r?$)",
+              f"yt_dlp[default]=={os.environ['LATEST_VERSION']}".encode(),
+              contents,
+          )
+          if replacements != 1:
+              raise SystemExit(f"Expected to update one yt-dlp pin, updated {replacements}")
+          requirements.write_bytes(updated)
+
+      - name: Commit and push the updated pin
+        if: steps.version.outputs.update_required == 'true'
+        env:
+          LATEST_VERSION: ${{ steps.version.outputs.latest }}
+        run: |
+          git config user.email "yt-dlp@autoupdate"
+          git config user.name "yt-dlp-autoupdate"
           git add requirements.txt
-          git commit -m "Update yt-dlp version to $latest_version"
+          git commit -m "Update yt-dlp version to ${LATEST_VERSION}"
           git push
