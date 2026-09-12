@@ -1118,3 +1118,18 @@ def test_song_matcher_does_not_credit_artist_hidden_inside_another_word():
     ]
     match = _matcher.song_matcher(85, "Nas", "nas", "Wow", "wow", search_results, expected_duration_ms=189000)
     assert match is None
+
+
+@pytest.mark.parametrize("artist, credited_names", [
+    ("M.I.A.", ["M.I.A."]),
+    ("fun.", ["fun.", "Janelle Monáe"]),
+    ("!!!", ["!!!"]),
+    ("Panic! at the Disco", ["Panic! At The Disco"]),
+])
+def test_artist_credited_handles_names_edged_with_punctuation(artist, credited_names):
+    assert _matcher._artist_credited(_matcher._normalized_text(artist), credited_names)
+
+
+def test_artist_credited_still_requires_whole_name_boundaries_with_punctuation():
+    assert not _matcher._artist_credited(_matcher._normalized_text("M.I.A."), ["M.I.A.M.I."])
+    assert not _matcher._artist_credited("nas", ["Jonas Brothers"])

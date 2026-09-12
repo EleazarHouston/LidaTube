@@ -141,7 +141,8 @@ def _artist_credited(cleaned_artist, artist_names):
     """
     if not cleaned_artist:
         return False
-    pattern = r"\b" + re.escape(cleaned_artist) + r"\b"
+    # Lookarounds rather than \b so names edged with punctuation ("M.I.A.", "fun.", "!!!") still bound correctly.
+    pattern = r"(?<!\w)" + re.escape(cleaned_artist) + r"(?!\w)"
     return any(re.search(pattern, _normalized_text(name)) for name in artist_names)
 
 
