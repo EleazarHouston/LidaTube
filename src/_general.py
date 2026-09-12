@@ -1,4 +1,5 @@
 import re
+import requests
 import unidecode
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TPE2, TYER, TRCK, TCON
 from mutagen.flac import FLAC
@@ -81,24 +82,27 @@ def is_empty_file_error(error):
     return "the downloaded file is empty" in str(error).lower()
 
 
-def is_resource_exhaustion_error(error):
-    if error is None:
-        return False
-    errnos = {23, 24}
+_NETWORK_ERROR_MESSAGES = (
+    "nameresolutionerror",
+    "failed to resolve",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "max retries exceeded",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+)
+
+
+def _walk_exception_chain(error):
     queue = [error]
     visited = set()
     while queue:
         current = queue.pop()
-        current_id = id(current)
-        if current_id in visited:
+        if id(current) in visited:
             continue
-        visited.add(current_id)
-
-        if isinstance(current, OSError) and current.errno in errnos:
-            return True
-        if "no file descriptors available" in str(current).lower():
-            return True
-
+        visited.add(id(current))
+        yield current
         for attr in ("__cause__", "__context__"):
             related = getattr(current, attr, None)
             if related is not None:
@@ -107,4 +111,27 @@ def is_resource_exhaustion_error(error):
             if isinstance(arg, BaseException):
                 queue.append(arg)
 
+
+def is_network_error(error):
+    """Return True for transient connectivity failures (DNS, refused/reset connections, timeouts)."""
+    if error is None:
+        return False
+    for current in _walk_exception_chain(error):
+        if isinstance(current, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+            return True
+        message = str(current).lower()
+        if any(fragment in message for fragment in _NETWORK_ERROR_MESSAGES):
+            return True
+    return False
+
+
+def is_resource_exhaustion_error(error):
+    if error is None:
+        return False
+    errnos = {23, 24}
+    for current in _walk_exception_chain(error):
+        if isinstance(current, OSError) and current.errno in errnos:
+            return True
+        if "no file descriptors available" in str(current).lower():
+            return True
     return False

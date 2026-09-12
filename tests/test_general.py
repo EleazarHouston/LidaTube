@@ -267,3 +267,26 @@ def test_is_empty_file_error_returns_false_for_unrelated_error():
 def test_is_empty_file_error_returns_false_for_rate_limit_error():
     err = Exception("The current session has been rate-limited by YouTube for up to an hour.")
     assert _general.is_empty_file_error(err) is False
+
+
+def test_is_network_error_detects_requests_connection_error():
+    import requests
+
+    assert _general.is_network_error(requests.exceptions.ConnectionError("Failed to resolve 'music.youtube.com'"))
+    assert _general.is_network_error(requests.exceptions.Timeout("read timed out"))
+
+
+def test_is_network_error_follows_exception_cause_chain():
+    try:
+        try:
+            raise OSError("[Errno -3] Temporary failure in name resolution")
+        except OSError as inner:
+            raise RuntimeError("search failed") from inner
+    except RuntimeError as outer:
+        assert _general.is_network_error(outer)
+
+
+def test_is_network_error_ignores_other_errors():
+    assert not _general.is_network_error(None)
+    assert not _general.is_network_error(ValueError("bad json"))
+    assert not _general.is_network_error(OSError(24, "Too many open files"))

@@ -1907,3 +1907,87 @@ def test_link_finder_exits_when_stop_set_while_waiting_for_semaphore(lidatube_mo
     t.join()
 
     assert len(ytmusic_created) == 0, "YTMusic should not be created when stop is set during semaphore wait"
+
+
+def _network_retry_album():
+    return {
+        "artist": "Nanci Griffith",
+        "album_name": "Blue Roses From the Moons",
+        "track_count": 2,
+        "missing_count": 1,
+        "missing_tracks": [{
+            "artist": "Nanci Griffith", "track_title": "Wouldn't That Be Fine", "track_number": 1,
+            "track_id": 7, "duration_ms": 200000, "link": "", "title_of_link": "",
+        }],
+        "status": "",
+    }
+
+
+def test_link_finder_retries_search_after_network_error(lidatube_module, monkeypatch):
+    import requests
+
+    handler = build_data_handler(lidatube_module)
+    handler._SEARCH_RETRY_DELAYS = (0, 0, 0)
+    handler.config.duration_tolerance_seconds = 15
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    calls = []
+
+    class FlakyYTMusic:
+        def search(self, query, filter, limit):
+            calls.append(query)
+            if len(calls) <= 2:
+                raise requests.exceptions.ConnectionError("Failed to resolve 'music.youtube.com'")
+            return [{"resultType": "song", "title": "Wouldn't That Be Fine", "videoId": "vid-1",
+                     "artists": [{"name": "Nanci Griffith"}], "duration_seconds": 200}]
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", FlakyYTMusic)
+    monkeypatch.setattr(handler, "_yt_search", lambda query_text: [])
+    album = _network_retry_album()
+
+    handler._link_finder(album)
+
+    assert len(calls) == 3
+    assert album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
+
+
+def test_link_finder_records_error_outcome_when_network_never_recovers(lidatube_module, monkeypatch, tmp_path):
+    import requests
+
+    handler = build_data_handler(lidatube_module)
+    handler._SEARCH_RETRY_DELAYS = (0, 0)
+    handler.store = Store(tmp_path / "lidatube.db")
+    handler.current_session_id = handler.store.start_session(requested_count=1)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    calls = []
+
+    class OfflineYTMusic:
+        def search(self, query, filter, limit):
+            calls.append(query)
+            raise requests.exceptions.ConnectionError("Failed to resolve 'music.youtube.com'")
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", OfflineYTMusic)
+
+    handler._link_finder(_network_retry_album())
+
+    tracks = handler.store.get_session_tracks(handler.current_session_id)
+    assert len(calls) == 3
+    assert [track["outcome"] for track in tracks] == ["error"]
+    handler.store.close()
+
+
+def test_link_finder_does_not_retry_non_network_errors(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler._SEARCH_RETRY_DELAYS = (0, 0, 0)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    calls = []
+
+    class BrokenYTMusic:
+        def search(self, query, filter, limit):
+            calls.append(query)
+            raise ValueError("unexpected response shape")
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", BrokenYTMusic)
+
+    handler._link_finder(_network_retry_album())
+
+    assert len(calls) == 1

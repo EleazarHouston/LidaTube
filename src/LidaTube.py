@@ -23,6 +23,7 @@ from store import Store
 
 class DataHandler:
     _ARTIST_RETRY_WAIT = 10  # seconds per attempt; override in tests
+    _SEARCH_RETRY_DELAYS = (5, 10, 20, 40)  # back-off between link searches after network errors
     _LIDARR_CACHE_SCHEMA_VERSION = 2
     _LIDARR_CACHE_CHECKPOINT_PAGES = 5
     _LIDARR_MAX_PENDING_MULTIPLIER = 4
@@ -1334,8 +1335,12 @@ class DataHandler:
     def _set_track_link_from_video_id(self, track, video_id, title, matched_via=None):
         self._set_track_link(track, f"https://www.youtube.com/watch?v={video_id}", title, matched_via)
 
-    def _record_link_results(self, req_album):
-        """Persist final search outcomes after all matching stages have run."""
+    def _record_link_results(self, req_album, search_error=None):
+        """Persist final search outcomes after all matching stages have run.
+
+        Unlinked tracks are recorded as "error" rather than "no_match" when the search
+        itself failed, so an outage is not mistaken for YouTube lacking the track.
+        """
         session_id = getattr(self, "current_session_id", None)
         store = getattr(self, "store", None)
         if not session_id or store is None:
@@ -1343,7 +1348,10 @@ class DataHandler:
         for track in req_album.get("missing_tracks", []):
             if track.get("_track_result_id"):
                 continue
-            outcome = "matched" if track.get("link") else "no_match"
+            if track.get("link"):
+                outcome = "matched"
+            else:
+                outcome = "error" if search_error is not None else "no_match"
             suspicion, _ = library_suspicion.score_track({
                 "duration_delta_s": None,
                 "expected_known": bool(track.get("duration_ms")),
@@ -1418,15 +1426,9 @@ class DataHandler:
     def _link_finder(self, req_album):
         ytmusic = None
         semaphore_acquired = False
+        search_error = None
         try:
             self.general_logger.warning(f'Searching for: {req_album["artist"]} - {req_album["album_name"]}')
-            artist = req_album["artist"]
-            album_name = req_album["album_name"]
-            number_tracks_in_album = req_album["track_count"]
-            number_of_missing_tracks = req_album["missing_count"]
-            query_text = f"{artist} - {album_name}"
-            cleaned_artist = _general.string_cleaner(artist).lower()
-            cleaned_album = _general.string_cleaner(album_name).lower()
 
             self._wait_if_fd_pressure()
             while not self.ytdlp_stop_event.is_set():
@@ -1437,40 +1439,73 @@ class DataHandler:
                 return
             ytmusic = YTMusic()
             self._apply_saved_overrides(req_album)
-
-            if number_tracks_in_album == number_of_missing_tracks:
-                self._get_album_links(req_album, artist, album_name, cleaned_artist, cleaned_album, query_text, ytmusic)
-
-            number_of_links = self._count_found_links(req_album)
-            if number_of_links == len(req_album["missing_tracks"]):
-                req_album["status"] = "All Tracks Found"
-                self._emit_ytdlp_update()
-                self.general_logger.warning(f'Links found for all tracks of: {req_album["artist"]} - {req_album["album_name"]}')
-            else:
-                req_album["status"] = "Searching"
-                self._emit_ytdlp_update()
-                continue_with_secondary_search = self._get_song_links(req_album, artist, cleaned_artist, ytmusic)
-
-                number_of_links = self._count_found_links(req_album)
-                if number_of_links == len(req_album["missing_tracks"]):
-                    req_album["status"] = "All Tracks Found"
-                    self._emit_ytdlp_update()
-                    self.general_logger.warning(f'Links found for all Tracks of: {req_album["artist"]} - {req_album["album_name"]}')
-                elif not continue_with_secondary_search:
-                    self.general_logger.warning(f'Skipping secondary search due to resource exhaustion: {req_album["artist"]} - {req_album["album_name"]}')
-                else:
-                    self.general_logger.warning(f'Not all tracks found, searching again: {req_album["artist"]} - {req_album["album_name"]}')
-                    self._get_song_links_secondary(req_album, artist, cleaned_artist, ytmusic)
+            self._search_links_with_network_retry(req_album, ytmusic)
 
         except Exception as e:
+            search_error = e
             self.general_logger.error(f"Error in Link Finder: {e}")
             if _general.is_resource_exhaustion_error(e):
                 threading.Thread(target=self._signal_fd_exhaustion, daemon=True).start()
         finally:
-            self._record_link_results(req_album)
+            self._record_link_results(req_album, search_error=search_error)
             self._close_ytmusic_client(ytmusic)
             if semaphore_acquired:
                 self._ytmusic_semaphore.release()
+
+    def _search_links_with_network_retry(self, req_album, ytmusic):
+        """Run all search stages, backing off and retrying when the network is unreachable.
+
+        A container can start searching before its VPN's DNS is ready; without a retry
+        every album searched in that window is recorded as a permanent miss.
+        """
+        delays = tuple(self._SEARCH_RETRY_DELAYS)
+        for attempt in range(len(delays) + 1):
+            try:
+                self._search_links(req_album, ytmusic)
+                return
+            except Exception as e:
+                if attempt == len(delays) or not _general.is_network_error(e):
+                    raise
+                self.general_logger.warning(
+                    f'Network error searching {req_album["artist"]} - {req_album["album_name"]}, '
+                    f"retrying in {delays[attempt]}s ({attempt + 1}/{len(delays)}): {e}"
+                )
+                for track in req_album.get("missing_tracks", []):
+                    track.pop("_match_trace", None)
+                if self.ytdlp_stop_event.wait(delays[attempt]):
+                    raise
+
+    def _search_links(self, req_album, ytmusic):
+        artist = req_album["artist"]
+        album_name = req_album["album_name"]
+        query_text = f"{artist} - {album_name}"
+        cleaned_artist = _general.string_cleaner(artist).lower()
+        cleaned_album = _general.string_cleaner(album_name).lower()
+
+        if req_album["track_count"] == req_album["missing_count"]:
+            self._get_album_links(req_album, artist, album_name, cleaned_artist, cleaned_album, query_text, ytmusic)
+
+        number_of_links = self._count_found_links(req_album)
+        if number_of_links == len(req_album["missing_tracks"]):
+            req_album["status"] = "All Tracks Found"
+            self._emit_ytdlp_update()
+            self.general_logger.warning(f'Links found for all tracks of: {req_album["artist"]} - {req_album["album_name"]}')
+            return
+
+        req_album["status"] = "Searching"
+        self._emit_ytdlp_update()
+        continue_with_secondary_search = self._get_song_links(req_album, artist, cleaned_artist, ytmusic)
+
+        number_of_links = self._count_found_links(req_album)
+        if number_of_links == len(req_album["missing_tracks"]):
+            req_album["status"] = "All Tracks Found"
+            self._emit_ytdlp_update()
+            self.general_logger.warning(f'Links found for all Tracks of: {req_album["artist"]} - {req_album["album_name"]}')
+        elif not continue_with_secondary_search:
+            self.general_logger.warning(f'Skipping secondary search due to resource exhaustion: {req_album["artist"]} - {req_album["album_name"]}')
+        else:
+            self.general_logger.warning(f'Not all tracks found, searching again: {req_album["artist"]} - {req_album["album_name"]}')
+            self._get_song_links_secondary(req_album, artist, cleaned_artist, ytmusic)
 
     def _get_album_links(self, req_album, artist, album_name, cleaned_artist, cleaned_album, query_text, ytmusic):
         try:
