@@ -1179,3 +1179,32 @@ def test_version_descriptor_rejection_is_traced_as_version_gate():
         expected_duration_ms=231000, trace=trace,
     )
     assert [entry["rejected_by"] for entry in trace] == ["version_gate"]
+
+
+# --- tie-breaking between equally scored candidates (replay: collaborator credits / duets won ties) ---
+
+def test_song_matcher_prefers_sole_artist_credit_when_scores_tie():
+    search_results = [
+        {"resultType": "song", "title": "Scared of Love", "videoId": "collab", "artists": [{"name": "Butch Cassidy"}, {"name": "Nate Dogg"}], "duration_seconds": 327},
+        {"resultType": "song", "title": "Scared of Love", "videoId": "sole", "artists": [{"name": "Nate Dogg"}], "duration_seconds": 327},
+    ]
+    match = _matcher.song_matcher(85, "Nate Dogg", "nate dogg", "Scared of Love", "scared of love", search_results, expected_duration_ms=327000)
+    assert match["videoId"] == "sole"
+
+
+def test_song_matcher_prefers_exact_title_over_featured_variant_when_scores_tie():
+    search_results = [
+        {"resultType": "song", "title": "Buon Natale (feat. Anthony Hamilton)", "videoId": "duet", "artists": [{"name": "Nat King Cole"}], "duration_seconds": 94},
+        {"resultType": "song", "title": "Buon Natale", "videoId": "original", "artists": [{"name": "Nat King Cole"}], "duration_seconds": 94},
+    ]
+    match = _matcher.song_matcher(85, "Nat King Cole", "nat king cole", "Buon Natale", "buon natale", search_results, expected_duration_ms=94000)
+    assert match["videoId"] == "original"
+
+
+def test_song_matcher_tie_break_never_beats_a_higher_score():
+    search_results = [
+        {"resultType": "song", "title": "Scared of Love", "videoId": "right", "artists": [{"name": "Butch Cassidy"}, {"name": "Nate Dogg"}], "duration_seconds": 327},
+        {"resultType": "song", "title": "Scared of Lies", "videoId": "wrong", "artists": [{"name": "Nate Dogg"}], "duration_seconds": 327},
+    ]
+    match = _matcher.song_matcher(85, "Nate Dogg", "nate dogg", "Scared of Love", "scared of love", search_results, expected_duration_ms=327000)
+    assert match["videoId"] == "right"

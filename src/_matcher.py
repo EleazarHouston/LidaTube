@@ -340,6 +340,7 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         return None
     best_match_rating = 0
     best_match_item = None
+    best_tie_break = -1
     cleaned_song_title_minus_keywords = remove_song_keywords(cleaned_song_title)
     threshold = _normalize_min_ratio(minimum_match_ratio)
 
@@ -360,20 +361,27 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         raw_artist_match_ratio = fuzz.ratio(artist, artists_string)
         cleaned_artists_string = _normalized_text(artists_string)
         cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
+        # Similarities before the full-credit overrides: equal scores are broken in favour of
+        # the closest artist list and title, so "Scared of Love" by Nate Dogg beats the same
+        # title credited to Butch Cassidy & Nate Dogg, and "Buon Natale" beats its later duet.
+        artist_similarity = cleaned_artist_match_ratio
         if artist_credited:
             raw_artist_match_ratio = cleaned_artist_match_ratio = 100
         cleaned_yt_song_title = _normalized_text(item["title"])
         cleaned_song_title_ratio = fuzz.ratio(cleaned_song_title, cleaned_yt_song_title)
+        title_similarity = cleaned_song_title_ratio
         if song_title.lower() in item["title"].lower() or _same_base_title(cleaned_song_title, cleaned_yt_song_title):
             cleaned_song_title_ratio = 100
         cleaned_yt_title_minus_keywords = remove_song_keywords(cleaned_yt_song_title)
         cleaned_song_title_minus_keywords_ratio = fuzz.ratio(cleaned_song_title_minus_keywords, cleaned_yt_title_minus_keywords)
         score = (raw_artist_match_ratio + cleaned_artist_match_ratio + cleaned_song_title_ratio + cleaned_song_title_minus_keywords_ratio) / 4
+        tie_break = artist_similarity + title_similarity
         _append_trace(trace, "ytmusic", item, candidate_seconds, score, "accepted" if score >= threshold else "below_threshold")
-        if score > best_match_rating:
+        if (score, tie_break) > (best_match_rating, best_tie_break):
             best_match_rating = score
+            best_tie_break = tie_break
             best_match_item = item
-            if score == 100:
+            if score == 100 and tie_break == 200:
                 break
     return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
 
