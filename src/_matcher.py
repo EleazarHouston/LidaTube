@@ -125,6 +125,19 @@ def _artist_in_result(cleaned_artist, item):
     return cleaned_artist in haystack
 
 
+def _artist_credited(cleaned_artist, artist_names):
+    """True if the cleaned artist appears as whole words in any credited artist name.
+
+    Handles collaborations ("Neil Young" in ["Neil Young", "Crazy Horse"]) and billing
+    variants ("Nelson Riddle" in "Nelson Riddle & His Orchestra") without crediting
+    "Nas" for "Jonas Brothers".
+    """
+    if not cleaned_artist:
+        return False
+    pattern = r"\b" + re.escape(cleaned_artist) + r"\b"
+    return any(re.search(pattern, _normalized_text(name)) for name in artist_names)
+
+
 def _remove_keywords(text, keywords):
     ret = text
     for keyword in keywords:
@@ -202,16 +215,18 @@ def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, clean
             _append_trace(trace, "ytmusic", item, 0, None, "not_song_type")
             continue
         raw_album_match_ratio = fuzz.ratio(album_name, item["title"])
-        artists_string = "".join([item["artists"][x]["name"] for x in range(1, len(item["artists"]))])
-        raw_artist_match_ratio = fuzz.ratio(artist, artists_string)
+        artist_names = [entry["name"] for entry in item.get("artists", [])]
+        artists_string = " ".join(artist_names)
+        artist_credited = _artist_credited(cleaned_artist, artist_names)
+        raw_artist_match_ratio = 100 if artist_credited else fuzz.ratio(artist, artists_string)
         cleaned_yt_album_name = _normalized_text(item["title"])
         cleaned_album_match_ratio = fuzz.ratio(cleaned_album, cleaned_yt_album_name)
         cleaned_artists_string = _normalized_text(artists_string)
-        cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
+        cleaned_artist_match_ratio = 100 if artist_credited else fuzz.ratio(cleaned_artist, cleaned_artists_string)
         cleaned_yt_album_title_minus_keywords = remove_album_keywords(cleaned_yt_album_name)
         album_ratio_minus_keywords = fuzz.ratio(cleaned_album, cleaned_yt_album_title_minus_keywords)
         cleaned_yt_artist_minus_keywords = remove_album_keywords(cleaned_artists_string)
-        artist_ratio_minus_keywords = fuzz.ratio(cleaned_artist, cleaned_yt_artist_minus_keywords)
+        artist_ratio_minus_keywords = 100 if artist_credited else fuzz.ratio(cleaned_artist, cleaned_yt_artist_minus_keywords)
         score = (raw_album_match_ratio + raw_artist_match_ratio + cleaned_album_match_ratio + cleaned_artist_match_ratio + album_ratio_minus_keywords + artist_ratio_minus_keywords) / 6
         _append_trace(trace, "ytmusic", item, 0, score, "accepted" if score > _normalize_min_ratio(minimum_match_ratio) else "below_threshold")
         if score > best_match_rating:

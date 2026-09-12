@@ -933,3 +933,40 @@ def test_song_matcher_trace_marks_the_selected_candidate_accepted():
         "score": 100.0,
         "rejected_by": "accepted",
     }]
+
+
+def test_album_matcher_uses_first_artist_of_current_ytmusic_shape():
+    # ytmusicapi now returns only real artists (no leading type label), so the
+    # artist at index 0 must count; otherwise exact albums score ~50 and never match.
+    search_results = [
+        {
+            "type": "Album",
+            "title": "Changing Colors",
+            "artists": [{"name": "Nelson Riddle & His Orchestra"}],
+            "browseId": "exact",
+        },
+    ]
+
+    match = _matcher.album_matcher(
+        minimum_match_ratio=85,
+        artist="Nelson Riddle",
+        album_name="Changing Colors",
+        cleaned_artist="nelson riddle",
+        cleaned_album="changing colors",
+        search_results=search_results,
+    )
+
+    assert match is not None
+    assert match["browseId"] == "exact"
+
+
+def test_album_matcher_exact_single_artist_album_matches():
+    search_results = [
+        {"type": "Album", "title": "3 Feet High and Rising", "artists": [{"name": "De La Soul"}], "browseId": "exact"},
+        {"type": "Album", "title": "De La Soul is Dead", "artists": [{"name": "De La Soul"}], "browseId": "other"},
+    ]
+
+    match = _matcher.album_matcher(85, "De La Soul", "3 Feet High and Rising", "de la soul", "3 feet high and rising", search_results)
+
+    assert match is not None
+    assert match["browseId"] == "exact"
