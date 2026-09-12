@@ -1008,3 +1008,51 @@ def test_song_matcher_accepts_and_traces_candidate_scoring_exactly_minimum(monke
     assert match is not None
     assert trace[0]["score"] == 85
     assert trace[0]["rejected_by"] == "accepted"
+
+
+# --- qualifier stripping (seen in prod: "(album version)" left "downtown (album ") ---
+
+@pytest.mark.parametrize("text, expected", [
+    ("downtown (album version)", "downtown"),
+    ("peace & love (lp version)", "peace & love"),
+    ("leave the driving (5.1 mix)", "leave the driving"),
+    ("you'll never know (bonus track) (stereo)", "you'll never know"),
+    ("stay (mono)", "stay"),
+    ("work it (album version explicit)", "work it"),
+    ("work it (feat. justin timberlake)", "work it"),
+    ("made you look (remix) (dirty version)", "made you look (remix)"),
+    ("alabama - 2009 remaster", "alabama"),
+    ("halftime [lp version]", "halftime"),
+])
+def test_remove_song_keywords_strips_whole_qualifier_groups(text, expected):
+    assert _matcher.remove_song_keywords(text) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("delivery olive credit", "delivery olive credit"),
+    ("all good things (kaskade radio mix)", "all good things (kaskade)"),
+    ("heaven (live at the greek theatre)", "heaven (at the greek theatre)"),
+])
+def test_remove_song_keywords_respects_word_boundaries_and_keeps_distinct_groups(text, expected):
+    assert _matcher.remove_song_keywords(text) == expected
+
+
+@pytest.mark.parametrize("song_title, candidate_title, seconds", [
+    ("Downtown (album version)", "Downtown", 311),
+    ("You'll Never Know (bonus Track) (stereo)", "You'll Never Know", 164),
+])
+def test_song_matcher_matches_through_request_qualifiers(song_title, candidate_title, seconds):
+    search_results = [
+        {"resultType": "song", "title": candidate_title, "videoId": "right", "artists": [{"name": "Neil Young"}], "duration_seconds": seconds},
+    ]
+    match = _matcher.song_matcher(
+        minimum_match_ratio=85,
+        artist="Neil Young",
+        cleaned_artist="neil young",
+        song_title=song_title,
+        cleaned_song_title=song_title.lower(),
+        search_results=search_results,
+        expected_duration_ms=seconds * 1000,
+    )
+    assert match is not None
+    assert match["videoId"] == "right"

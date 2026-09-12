@@ -207,8 +207,35 @@ def remove_album_keywords(text):
     return _remove_keywords(text, ALBUM_KEYWORDS_TO_REMOVE)
 
 
+# Words that only describe a release/format of the same recording. A bracketed group or
+# " - suffix" made up solely of these (and numbers) is dropped whole, so "(album version)",
+# "(5.1 mix)" or "- 2009 Remaster" don't leave fragments like "downtown (album " behind.
+_QUALIFIER_WORDS = set(SONG_KEYWORDS_TO_REMOVE) | {
+    "album", "lp", "single", "mono", "stereo", "remaster", "dirty", "explicit", "clean",
+    "audio", "video", "lyrics", "visualizer", "hd", "hq", "digital", "take", "alternate",
+    "alternative", "short", "long", "full", "mixed", "master",
+}
+_BRACKET_GROUP_RE = re.compile(r"\s*[\(\[]([^\(\)\[\]]*)[\)\]]")
+_DASH_SUFFIX_RE = re.compile(r"\s+-\s+([^-]*)$")
+_FEAT_GROUP_RE = re.compile(r"^\s*(?:feat|featuring|ft)\b", re.IGNORECASE)
+_SONG_KEYWORD_RE = re.compile(r"\b(?:" + "|".join(re.escape(k) for k in SONG_KEYWORDS_TO_REMOVE) + r")\b", re.IGNORECASE)
+
+
+def _is_qualifier_group(content):
+    if _FEAT_GROUP_RE.match(content):
+        return True
+    tokens = re.findall(r"[a-z]+|\d+", content.lower())
+    return bool(tokens) and all(token.isdigit() or token in _QUALIFIER_WORDS for token in tokens)
+
+
 def remove_song_keywords(text):
-    return _remove_keywords(text, SONG_KEYWORDS_TO_REMOVE)
+    ret = _BRACKET_GROUP_RE.sub(lambda m: "" if _is_qualifier_group(m.group(1)) else m.group(0), text)
+    ret = _DASH_SUFFIX_RE.sub(lambda m: "" if _is_qualifier_group(m.group(1)) else m.group(0), ret)
+    ret = _SONG_KEYWORD_RE.sub("", ret)
+    ret = re.sub(r"[\(\[]\s*[\)\]]", "", ret)
+    ret = re.sub(r"([\(\[])\s+", r"\1", ret)
+    ret = re.sub(r"\s+([\)\]])", r"\1", ret)
+    return re.sub(r"\s+", " ", ret).strip()
 
 
 def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, cleaned_album, search_results,
