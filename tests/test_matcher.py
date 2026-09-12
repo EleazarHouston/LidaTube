@@ -984,3 +984,27 @@ def test_version_gate_treats_a_cappella_spellings_as_one_marker(requested, candi
 def test_version_gate_still_rejects_a_cappella_for_plain_request():
     assert _matcher._version_mismatch("Definition of Love", "Definition of Love (Acapella)")
     assert _matcher._version_mismatch("Definition of Love (a cappella)", "Definition of Love")
+
+
+def test_best_match_accepts_score_equal_to_minimum_ratio():
+    item = {"videoId": "tie"}
+    assert _matcher._best_match_or_none(85, 85, item) is item
+    assert _matcher._best_match_or_none(84.99, 85, item) is None
+
+
+def test_song_matcher_accepts_and_traces_candidate_scoring_exactly_minimum(monkeypatch):
+    monkeypatch.setattr(_matcher.fuzz, "ratio", lambda left, right: 85)
+    trace = []
+    match = _matcher.song_matcher(
+        minimum_match_ratio=85,
+        artist="Requested",
+        cleaned_artist="requested",
+        song_title="Alpha",
+        cleaned_song_title="alpha",
+        search_results=[{"resultType": "song", "title": "Omega", "videoId": "tie", "artists": [{"name": "Other"}]}],
+        trace=trace,
+    )
+
+    assert match is not None
+    assert trace[0]["score"] == 85
+    assert trace[0]["rejected_by"] == "accepted"

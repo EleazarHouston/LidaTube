@@ -158,7 +158,7 @@ def _normalized_text(text):
 
 
 def _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item):
-    if best_match_rating > _normalize_min_ratio(minimum_match_ratio):
+    if best_match_rating >= _normalize_min_ratio(minimum_match_ratio):
         return best_match_item
     return None
 
@@ -235,7 +235,7 @@ def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, clean
         cleaned_yt_artist_minus_keywords = remove_album_keywords(cleaned_artists_string)
         artist_ratio_minus_keywords = 100 if artist_credited else fuzz.ratio(cleaned_artist, cleaned_yt_artist_minus_keywords)
         score = (raw_album_match_ratio + raw_artist_match_ratio + cleaned_album_match_ratio + cleaned_artist_match_ratio + album_ratio_minus_keywords + artist_ratio_minus_keywords) / 6
-        _append_trace(trace, "ytmusic", item, 0, score, "accepted" if score > _normalize_min_ratio(minimum_match_ratio) else "below_threshold")
+        _append_trace(trace, "ytmusic", item, 0, score, "accepted" if score >= _normalize_min_ratio(minimum_match_ratio) else "below_threshold")
         if score > best_match_rating:
             best_match_rating = score
             best_match_item = item
@@ -277,7 +277,7 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         cleaned_yt_title_minus_keywords = remove_song_keywords(cleaned_yt_song_title)
         cleaned_song_title_minus_keywords_ratio = fuzz.ratio(cleaned_song_title_minus_keywords, cleaned_yt_title_minus_keywords)
         score = (raw_artist_match_ratio + cleaned_artist_match_ratio + cleaned_song_title_ratio + cleaned_song_title_minus_keywords_ratio) / 4
-        _append_trace(trace, "ytmusic", item, candidate_seconds, score, "accepted" if score > threshold else "below_threshold")
+        _append_trace(trace, "ytmusic", item, candidate_seconds, score, "accepted" if score >= threshold else "below_threshold")
         if score > best_match_rating:
             best_match_rating = score
             best_match_item = item
@@ -338,7 +338,7 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
             _append_trace(trace, "yt", item, candidate_seconds, None, "duration_gate")
             continue
         score = _yt_title_score(query_text, cleaned_query_text, cleaned_query_text_minus_keywords, title)
-        _append_trace(trace, "yt", item, candidate_seconds, score, "accepted" if score > threshold else "below_threshold")
+        _append_trace(trace, "yt", item, candidate_seconds, score, "accepted" if score >= threshold else "below_threshold")
         gate_cleared.append((item, title, candidate_seconds))
         if score > best_match_rating:
             best_match_rating = score
@@ -365,7 +365,7 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
             continue
         augmented = f"{channel} - {title}"
         score = _yt_title_score(query_text, cleaned_query_text, cleaned_query_text_minus_keywords, augmented)
-        _append_trace(trace, "yt-channel", item, candidate_seconds, score, "accepted" if score > threshold else "below_threshold")
+        _append_trace(trace, "yt-channel", item, candidate_seconds, score, "accepted" if score >= threshold else "below_threshold")
         if score > fb_rating:
             fb_rating = score
             fb_item = item
