@@ -1208,3 +1208,8 @@ def test_song_matcher_tie_break_never_beats_a_higher_score():
     ]
     match = _matcher.song_matcher(85, "Nate Dogg", "nate dogg", "Scared of Love", "scared of love", search_results, expected_duration_ms=327000)
     assert match["videoId"] == "right"
+
+
+def test_song_matcher_reads_version_descriptors_from_dash_suffix():
+    assert _single_candidate_match("Nelly Furtado", "Te busqué", "Te Busque - Spanish Version") is None
+    assert _single_candidate_match("Neil Young", "Like a Hurricane", "Like a Hurricane - 2003 Remaster") is not None

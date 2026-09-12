@@ -2069,3 +2069,30 @@ def test_secondary_search_links_track_from_ytdlp_fallback_when_yts_fails(lidatub
     handler._get_song_links_secondary(req_album, "Larry Coryell", "larry coryell", EmptyYTMusic())
 
     assert req_album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=abc"
+
+
+def test_link_finder_stops_retrying_when_stop_requested_during_backoff(lidatube_module, monkeypatch, tmp_path):
+    import requests
+
+    handler = build_data_handler(lidatube_module)
+    handler._SEARCH_RETRY_DELAYS = (30, 30)
+    handler.store = Store(tmp_path / "lidatube.db")
+    handler.current_session_id = handler.store.start_session(requested_count=1)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    calls = []
+
+    class OfflineYTMusic:
+        def search(self, query, filter, limit):
+            calls.append(query)
+            handler.ytdlp_stop_event.set()
+            raise requests.exceptions.ConnectionError("Failed to resolve 'music.youtube.com'")
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", OfflineYTMusic)
+    started = time.monotonic()
+
+    handler._link_finder(_network_retry_album())
+
+    assert len(calls) == 1
+    assert time.monotonic() - started < 5
+    assert [track["outcome"] for track in handler.store.get_session_tracks(handler.current_session_id)] == ["error"]
+    handler.store.close()
