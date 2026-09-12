@@ -970,3 +970,17 @@ def test_album_matcher_exact_single_artist_album_matches():
 
     assert match is not None
     assert match["browseId"] == "exact"
+
+
+@pytest.mark.parametrize("requested, candidate", [
+    ("Definition of Love (a cappella)", "Definition of Love (Acapella)"),
+    ("Another Life (acapella)", "Another Life (A Cappella)"),
+    ("I Can (a capella)", "I Can (Acappella)"),
+])
+def test_version_gate_treats_a_cappella_spellings_as_one_marker(requested, candidate):
+    assert not _matcher._version_mismatch(requested, candidate)
+
+
+def test_version_gate_still_rejects_a_cappella_for_plain_request():
+    assert _matcher._version_mismatch("Definition of Love", "Definition of Love (Acapella)")
+    assert _matcher._version_mismatch("Definition of Love (a cappella)", "Definition of Love")

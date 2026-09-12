@@ -50,13 +50,20 @@ UNWANTED_VERSION_MARKERS = [
     "in the style of",
     "tribute",
     "a cappella",
-    "acapella",
     "8d audio",
     "sped up",
     "slowed",
     "nightcore",
     "cover",
 ]
+
+
+_A_CAPPELLA_RE = re.compile(r"\ba\s*c+ap+el+a\b")
+
+
+def _canonical_markers(text):
+    """Collapse spelling variants of a marker so "Acapella" and "a cappella" agree."""
+    return _A_CAPPELLA_RE.sub("a cappella", text)
 
 
 def _contains_marker(text, marker):
@@ -81,8 +88,8 @@ def _version_mismatch(requested_title, candidate_title):
     AND grabbing the plain vocal for a request that explicitly wants that version are
     both rejected. Markers the request itself asks for are allowed through.
     """
-    req = (requested_title or "").lower()
-    cand = (candidate_title or "").lower()
+    req = _canonical_markers((requested_title or "").lower())
+    cand = _canonical_markers((candidate_title or "").lower())
     for marker in UNWANTED_VERSION_MARKERS:
         if _contains_marker(cand, marker) != _contains_marker(req, marker):
             return True
