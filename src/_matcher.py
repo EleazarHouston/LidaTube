@@ -238,6 +238,18 @@ def remove_song_keywords(text):
     return re.sub(r"\s+", " ", ret).strip()
 
 
+def _base_title(text):
+    text = re.sub(r"\s*&\s*", " and ", (text or "").lower())
+    text = re.sub(r"[^\w\s]", " ", remove_song_keywords(text))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _same_base_title(left, right):
+    """True if both titles are the same once release qualifiers, "&" and punctuation are ignored."""
+    left_base = _base_title(left)
+    return bool(left_base) and left_base == _base_title(right)
+
+
 def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, cleaned_album, search_results,
                   item_wanted_type="Album", trace=None):
     if not search_results:
@@ -299,7 +311,7 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
         cleaned_yt_song_title = _normalized_text(item["title"])
         cleaned_song_title_ratio = fuzz.ratio(cleaned_song_title, cleaned_yt_song_title)
-        if song_title.lower() in item["title"].lower():
+        if song_title.lower() in item["title"].lower() or _same_base_title(cleaned_song_title, cleaned_yt_song_title):
             cleaned_song_title_ratio = 100
         cleaned_yt_title_minus_keywords = remove_song_keywords(cleaned_yt_song_title)
         cleaned_song_title_minus_keywords_ratio = fuzz.ratio(cleaned_song_title_minus_keywords, cleaned_yt_title_minus_keywords)

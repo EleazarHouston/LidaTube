@@ -1056,3 +1056,34 @@ def test_song_matcher_matches_through_request_qualifiers(song_title, candidate_t
     )
     assert match is not None
     assert match["videoId"] == "right"
+
+
+@pytest.mark.parametrize("left, right, same", [
+    ("peace & love (lp version)", "peace and love", True),
+    ("nature boy (2003 digital remaster) (single version)", "nature boy", True),
+    ("made you look (remix)", "made you look", False),
+    ("heaven", "heaven knows", False),
+    ("", "", False),
+])
+def test_same_base_title_ignores_release_qualifiers_and_ampersands(left, right, same):
+    assert _matcher._same_base_title(left, right) is same
+
+
+@pytest.mark.parametrize("song_title, candidate_title", [
+    ("Nature Boy (2003 Digital Remaster) (Single Version)", "Nature Boy"),
+    ("Rock & Roll (2009 Remaster) (Mono)", "Rock and Roll"),
+])
+def test_song_matcher_gives_full_title_credit_when_base_titles_equal(song_title, candidate_title):
+    search_results = [
+        {"resultType": "song", "title": candidate_title, "videoId": "right", "artists": [{"name": "Nat King Cole"}], "duration_seconds": 200},
+    ]
+    match = _matcher.song_matcher(
+        minimum_match_ratio=85,
+        artist="Nat King Cole",
+        cleaned_artist="nat king cole",
+        song_title=song_title,
+        cleaned_song_title=song_title.lower(),
+        search_results=search_results,
+        expected_duration_ms=200000,
+    )
+    assert match is not None
