@@ -1213,3 +1213,21 @@ def test_song_matcher_tie_break_never_beats_a_higher_score():
 def test_song_matcher_reads_version_descriptors_from_dash_suffix():
     assert _single_candidate_match("Nelly Furtado", "Te busqué", "Te Busque - Spanish Version") is None
     assert _single_candidate_match("Neil Young", "Like a Hurricane", "Like a Hurricane - 2003 Remaster") is not None
+
+
+def test_song_matcher_prefers_candidate_without_extra_version_words_when_scores_tie():
+    # Replay: "Double E (5.1 mix)" picked "Double E (Live)" because its title length was closer.
+    search_results = [
+        {"resultType": "song", "title": "Double E (Live)", "videoId": "live", "artists": [{"name": "Neil Young"}, {"name": "Crazy Horse"}], "duration_seconds": 318},
+        {"resultType": "song", "title": "Double E", "videoId": "studio", "artists": [{"name": "Neil Young"}, {"name": "Crazy Horse"}], "duration_seconds": 318},
+    ]
+    match = _matcher.song_matcher(85, "Neil Young", "neil young", "Double E (5.1 mix)", "double e (5.1 mix)", search_results, expected_duration_ms=318000)
+    assert match["videoId"] == "studio"
+
+
+def test_song_matcher_still_accepts_live_only_candidate():
+    search_results = [
+        {"resultType": "song", "title": "Double E (Live)", "videoId": "live", "artists": [{"name": "Neil Young"}], "duration_seconds": 318},
+    ]
+    match = _matcher.song_matcher(85, "Neil Young", "neil young", "Double E", "double e", search_results, expected_duration_ms=318000)
+    assert match is not None

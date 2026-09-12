@@ -340,7 +340,8 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         return None
     best_match_rating = 0
     best_match_item = None
-    best_tie_break = -1
+    best_match_key = None
+    requested_words = set(_WORD_RE.findall(cleaned_song_title.lower()))
     cleaned_song_title_minus_keywords = remove_song_keywords(cleaned_song_title)
     threshold = _normalize_min_ratio(minimum_match_ratio)
 
@@ -375,13 +376,16 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         cleaned_yt_title_minus_keywords = remove_song_keywords(cleaned_yt_song_title)
         cleaned_song_title_minus_keywords_ratio = fuzz.ratio(cleaned_song_title_minus_keywords, cleaned_yt_title_minus_keywords)
         score = (raw_artist_match_ratio + cleaned_artist_match_ratio + cleaned_song_title_ratio + cleaned_song_title_minus_keywords_ratio) / 4
-        tie_break = artist_similarity + title_similarity
+        # Among equal scores, a candidate adding version words the request lacks ("Live",
+        # "Demo") ranks below one that doesn't, whatever its title length.
+        extra_version_words = len((_VERSION_TYPE_WORDS & set(_WORD_RE.findall(cleaned_yt_song_title))) - requested_words)
+        match_key = (score, -extra_version_words, artist_similarity + title_similarity)
         _append_trace(trace, "ytmusic", item, candidate_seconds, score, "accepted" if score >= threshold else "below_threshold")
-        if (score, tie_break) > (best_match_rating, best_tie_break):
+        if best_match_key is None or match_key > best_match_key:
+            best_match_key = match_key
             best_match_rating = score
-            best_tie_break = tie_break
             best_match_item = item
-            if score == 100 and tie_break == 200:
+            if match_key == (100, 0, 200):
                 break
     return _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
 
