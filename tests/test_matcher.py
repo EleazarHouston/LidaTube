@@ -1133,3 +1133,49 @@ def test_artist_credited_handles_names_edged_with_punctuation(artist, credited_n
 def test_artist_credited_still_requires_whole_name_boundaries_with_punctuation():
     assert not _matcher._artist_credited(_matcher._normalized_text("M.I.A."), ["M.I.A.M.I."])
     assert not _matcher._artist_credited("nas", ["Jonas Brothers"])
+
+
+# --- version descriptors (replay false positives after qualifier stripping) ---
+
+def _single_candidate_match(artist, song_title, candidate_title, artists=None, seconds=200):
+    search_results = [
+        {"resultType": "song", "title": candidate_title, "videoId": "candidate",
+         "artists": [{"name": name} for name in (artists or [artist])], "duration_seconds": seconds},
+    ]
+    return _matcher.song_matcher(
+        85, artist, _matcher._normalized_text(artist), song_title, _matcher._normalized_text(song_title),
+        search_results, expected_duration_ms=seconds * 1000,
+    )
+
+
+@pytest.mark.parametrize("artist, song_title, candidate_title", [
+    ("Nelly Furtado", "Te busqué (English version)", "Te Busque (Spanish Version) (feat. Juanes)"),
+    ("Neil Young", "Rainbow of Colors (Solo Version)", "Rainbow Of Colors"),
+    ("Nas", "Life's a Bitch II", "Life's a Bitch (Remix #1)"),
+    ("Neil Diamond", "Songs Of Life", "Songs Of Life (Live At A.S.U. Activity Center / 1983)"),
+    ("Nazareth", "Woke Up This Morning", "Woke Up This Morning (Live In Germany)"),
+    ("Nas", "One Love (album version)", "One Love (LG Main Mix)"),
+])
+def test_song_matcher_rejects_candidate_with_different_version_descriptor(artist, song_title, candidate_title):
+    assert _single_candidate_match(artist, song_title, candidate_title) is None
+
+
+@pytest.mark.parametrize("artist, song_title, candidate_title", [
+    ("Nas", "Street Dreams (R. Kelly mix)", "Street Dreams (Remix) (feat. R.Kelly)"),
+    ("Nelly", "Stepped on My J’z (with intro)", "Stepped On My J'z (Album Version With Intro) (feat. Ciara & Jermaine Dupri)"),
+    ("Neil Diamond", "Songs Of Life", 'Songs Of Life (From "The Jazz Singer" Soundtrack)'),
+    ("Nanci Griffith", "Hard Times (Come Again No More)", "Hard Times Come Again No More"),
+    ("Neil Young", "Leave the Driving (5.1 mix)", "Leave the Driving"),
+])
+def test_song_matcher_accepts_candidate_with_compatible_version_descriptor(artist, song_title, candidate_title):
+    assert _single_candidate_match(artist, song_title, candidate_title) is not None
+
+
+def test_version_descriptor_rejection_is_traced_as_version_gate():
+    trace = []
+    _matcher.song_matcher(
+        85, "Neil Young", "neil young", "Rainbow of Colors (Solo Version)", "rainbow of colors (solo version)",
+        [{"resultType": "song", "title": "Rainbow Of Colors", "videoId": "band", "artists": [{"name": "Neil Young"}], "duration_seconds": 231}],
+        expected_duration_ms=231000, trace=trace,
+    )
+    assert [entry["rejected_by"] for entry in trace] == ["version_gate"]

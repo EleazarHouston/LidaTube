@@ -239,6 +239,56 @@ def remove_song_keywords(text):
     return re.sub(r"\s+", " ", ret).strip()
 
 
+# A bracketed group or " - suffix" that names a kind of version ("Spanish Version",
+# "Solo Version", "Remix #1", "Live In Germany") carries descriptor words that identify
+# a different recording. Qualifier stripping discards them for scoring, so they are
+# compared separately: every descriptor must appear somewhere in the other title.
+_VERSION_TYPE_WORDS = {
+    "version", "mix", "remix", "edit", "dub", "rework", "recording", "session", "sessions",
+    "take", "live", "acoustic", "demo", "unplugged",
+}
+_DISTINCT_RECORDING_WORDS = {"remix", "dub"}
+_DESCRIPTOR_IGNORED_WORDS = _QUALIFIER_WORDS | _VERSION_TYPE_WORDS | {"deluxe", "edition", "expanded", "anniversary", "special"}
+_DESCRIPTOR_EXEMPT_GROUP_RE = re.compile(r"^\s*(?:feat|featuring|ft|from)\b", re.IGNORECASE)
+_WORD_RE = re.compile(r"[a-z]+|\d+")
+
+
+def _version_descriptors(title):
+    text = _normalized_text(title or "")
+    groups = _BRACKET_GROUP_RE.findall(text)
+    suffix = _DASH_SUFFIX_RE.search(text)
+    if suffix:
+        groups.append(suffix.group(1))
+    descriptors = set()
+    for group in groups:
+        if _DESCRIPTOR_EXEMPT_GROUP_RE.match(group):
+            continue
+        words = _WORD_RE.findall(group)
+        if not _VERSION_TYPE_WORDS.intersection(words):
+            continue
+        descriptors.update(
+            word for word in words
+            if not word.isdigit() and (word in _DISTINCT_RECORDING_WORDS or word not in _DESCRIPTOR_IGNORED_WORDS)
+        )
+    return descriptors, set(_WORD_RE.findall(text))
+
+
+def _descriptor_present(word, title_words):
+    if word in _DISTINCT_RECORDING_WORDS:
+        return bool(title_words & {word, "mix", "remix"})
+    return word in title_words
+
+
+def _version_descriptor_mismatch(requested_title, candidate_title):
+    """True if either title names a version (e.g. "Spanish Version", "Remix") the other lacks."""
+    requested_descriptors, requested_words = _version_descriptors(requested_title)
+    candidate_descriptors, candidate_words = _version_descriptors(candidate_title)
+    return (
+        any(not _descriptor_present(word, candidate_words) for word in requested_descriptors)
+        or any(not _descriptor_present(word, requested_words) for word in candidate_descriptors)
+    )
+
+
 def _base_title(text):
     text = re.sub(r"\s*&\s*", " and ", (text or "").lower())
     text = re.sub(r"[^\w\s]", " ", remove_song_keywords(text))
@@ -298,7 +348,7 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         if item["resultType"] != item_wanted_type:
             _append_trace(trace, "ytmusic", item, candidate_seconds, None, "not_song_type")
             continue
-        if _version_mismatch(song_title, item["title"]):
+        if _version_mismatch(song_title, item["title"]) or _version_descriptor_mismatch(song_title, item["title"]):
             _append_trace(trace, "ytmusic", item, candidate_seconds, None, "version_gate")
             continue
         if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
