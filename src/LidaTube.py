@@ -1618,8 +1618,12 @@ class DataHandler:
                     search = ydl.extract_info(query_text, download=False)
                     search_results = search.get("entries", [])
             elif self.config.secondary_search == "YTS":
-                videos_search = youtubesearchpython.VideosSearch(query_text, limit=10)
-                search_results = videos_search.result()["result"]
+                try:
+                    videos_search = youtubesearchpython.VideosSearch(query_text, limit=10)
+                    search_results = videos_search.result()["result"]
+                except Exception as e:
+                    self.general_logger.warning(f"youtube-search-python failed, falling back to yt-dlp search: {e}")
+                    search_results = self._ytdlp_flat_search(query_text)
             else:
                 return []
 
@@ -1630,6 +1634,18 @@ class DataHandler:
         except Exception as e:
             self.general_logger.error(f"Error in YouTube Search: {e}")
             return []
+
+    def _ytdlp_flat_search(self, query_text):
+        """Search YouTube via yt-dlp without resolving each video, shaped like YTS results (with "link")."""
+        ydl_opts = {"default_search": "ytsearch10", "quiet": True, "extract_flat": "in_playlist"}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            entries = ydl.extract_info(query_text, download=False).get("entries") or []
+        for entry in entries:
+            link = entry.get("webpage_url") or entry.get("url") or ""
+            if not link.startswith("http") and entry.get("id"):
+                link = f"https://www.youtube.com/watch?v={entry['id']}"
+            entry["link"] = link
+        return entries
 
 
 app = Flask(__name__)

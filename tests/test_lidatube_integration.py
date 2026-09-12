@@ -1991,3 +1991,81 @@ def test_link_finder_does_not_retry_non_network_errors(lidatube_module, monkeypa
     handler._link_finder(_network_retry_album())
 
     assert len(calls) == 1
+
+
+class _BrokenVideosSearch:
+    def __init__(self, query, limit):
+        raise TypeError('can only concatenate str (not "NoneType") to str')
+
+
+def _fake_ytdlp(entries, seen_opts):
+    class FakeYDL:
+        def __init__(self, opts):
+            seen_opts.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, query, download=False):
+            if isinstance(entries, Exception):
+                raise entries
+            return {"entries": entries}
+
+    return FakeYDL
+
+
+def test_yt_search_falls_back_to_flat_ytdlp_search_when_yts_fails(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler.config.secondary_search = "YTS"
+    seen_opts = []
+    monkeypatch.setattr(lidatube_module.youtubesearchpython, "VideosSearch", _BrokenVideosSearch)
+    monkeypatch.setattr(lidatube_module.yt_dlp, "YoutubeDL", _fake_ytdlp([
+        {"title": "Larry Coryell - Larry's Boogie", "url": "https://www.youtube.com/watch?v=abc", "duration": 213},
+        {"title": "Larry's Boogie (Live)", "id": "xyz", "duration": 250},
+    ], seen_opts))
+
+    results = handler._yt_search("Larry Coryell - Larry's Boogie")
+
+    assert [item["link"] for item in results] == [
+        "https://www.youtube.com/watch?v=abc",
+        "https://www.youtube.com/watch?v=xyz",
+    ]
+    assert seen_opts[0]["extract_flat"]
+
+
+def test_yt_search_returns_empty_when_yts_and_ytdlp_fallback_both_fail(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler.config.secondary_search = "YTS"
+    monkeypatch.setattr(lidatube_module.youtubesearchpython, "VideosSearch", _BrokenVideosSearch)
+    monkeypatch.setattr(lidatube_module.yt_dlp, "YoutubeDL", _fake_ytdlp(RuntimeError("yt-dlp offline"), []))
+
+    assert handler._yt_search("Artist - Song") == []
+
+
+def test_secondary_search_links_track_from_ytdlp_fallback_when_yts_fails(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler.config.secondary_search = "YTS"
+    handler.config.duration_tolerance_seconds = 15
+    monkeypatch.setattr(lidatube_module.youtubesearchpython, "VideosSearch", _BrokenVideosSearch)
+    monkeypatch.setattr(lidatube_module.yt_dlp, "YoutubeDL", _fake_ytdlp([
+        {"title": "Larry Coryell - Larry's Boogie", "url": "https://www.youtube.com/watch?v=abc", "duration": 213},
+    ], []))
+
+    class EmptyYTMusic:
+        def search(self, query, filter, limit):
+            return []
+
+    req_album = {
+        "artist": "Larry Coryell",
+        "album_name": "The Lion and the Ram",
+        "missing_tracks": [
+            {"artist": "Larry Coryell", "track_title": "Larry's Boogie", "link": "", "title_of_link": "", "duration_ms": 211000},
+        ],
+    }
+
+    handler._get_song_links_secondary(req_album, "Larry Coryell", "larry coryell", EmptyYTMusic())
+
+    assert req_album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=abc"
