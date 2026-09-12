@@ -457,7 +457,14 @@ async function load_lidarr_page(reset = false) {
         const fragment = document.createDocumentFragment();
         page.items.forEach((item) => {
             const is_checked = lidarr_row_checked(item);
-            const row=document.createElement('tr'); row.innerHTML=`<td><input class="form-check-input" type="checkbox" name="lidarr_item" data-index="${item.index}" ${is_checked ? 'checked' : ''}></td><td></td><td class="text-center"></td>`; row.children[1].textContent=`${item.artist} - ${item.album_name}`; row.children[2].textContent=item.scan_ready === false ? 'Scanning...' : `${item.missing_count}/${item.track_count}`; fragment.appendChild(row);
+            const row=document.createElement('tr'); row.innerHTML=`<td><input class="form-check-input" type="checkbox" name="lidarr_item" data-index="${item.index}" ${is_checked ? 'checked' : ''}></td><td></td><td class="text-center"></td>`;
+            row.children[1].textContent=`${item.artist} - ${item.album_name}`;
+            if (item.scan_state === 'error') {
+                row.children[2].textContent = item.scan_error ? `Error: ${item.scan_error}` : 'Scan error';
+            } else {
+                row.children[2].textContent=item.scan_ready === false ? 'Scanning...' : `${item.missing_count}/${item.track_count}`;
+            }
+            fragment.appendChild(row);
         });
         lidarr_table.appendChild(fragment); while (lidarr_table.rows.length > 300) lidarr_table.deleteRow(0); lidarr_offset += page.items.length; lidarr_total = page.total;
         lidarr_count_text.textContent = lidarr_total ? `${lidarr_total.toLocaleString()} with missing tracks` : 'All albums downloaded';

@@ -47,6 +47,9 @@ def build_data_handler(module):
         "albums_total": 0,
         "percent": 0,
     }
+    handler.lidarr_scan_started_at = None
+    handler.lidarr_scan_completed_at = None
+    handler.lidarr_scan_error = None
 
     handler.ytdlp_items = []
     handler.ytdlp_futures = []
@@ -78,6 +81,7 @@ def build_data_handler(module):
     cfg.lidarr_address = "http://lidarr.test"
     cfg.lidarr_api_key = "api-key"
     cfg.lidarr_api_timeout = 30
+    cfg.lidarr_download_path = "/staging"
     cfg.minimum_match_ratio = 80
     cfg.fallback_to_top_result = False
     cfg.secondary_search = "YTS"
@@ -812,8 +816,8 @@ def test_save_lidarr_cache_is_atomic(lidatube_module, monkeypatch, tmp_path):
     assert not src.endswith(".tmp") or dst == src[: -len(".tmp")]
 
 
-def test_cache_saved_after_each_page(lidatube_module, monkeypatch):
-    """Cache is saved after each page so partial scans survive a restart."""
+def test_cache_checkpointed_periodically(lidatube_module, monkeypatch):
+    """Growing caches are checkpointed periodically instead of rewritten per page."""
     handler = build_data_handler(lidatube_module)
     emit_mock = Mock()
     monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
@@ -834,7 +838,7 @@ def test_cache_saved_after_each_page(lidatube_module, monkeypatch):
     ]
 
     def fake_get_wanted(page, page_size=2000):
-        return FakeResponse(200, {"records": page_one_records if page == 1 else []})
+        return FakeResponse(200, {"records": page_one_records if page <= 6 else []})
 
     handler.lidarr_client.get_artists_page.return_value = FakeResponse(200, [
         {"id": 1, "artistName": "Artist A", "path": "/music/A"},
@@ -844,8 +848,8 @@ def test_cache_saved_after_each_page(lidatube_module, monkeypatch):
 
     handler.get_wanted_albums_from_lidarr()
 
-    # At least one save during scan (per page) plus the final save on completion
-    assert len(save_calls) >= 2
+    # One checkpoint at page 5 plus the final completed-state write.
+    assert len(save_calls) == 2
 
 
 def test_missing_tracks_preserved_after_download(lidatube_module, monkeypatch):
@@ -905,10 +909,37 @@ def test_response_closed_on_non_200_track_fetch(lidatube_module, monkeypatch):
     handler.get_missing_tracks_for_album(album)
 
     assert len(close_called) >= 1
+    assert album["scan_state"] == "error"
+    assert album["scan_ready"] is False
+    assert album["scan_in_progress"] is False
+    assert album["missing_count"] == 0
+    assert "500" in album["scan_error"]
+
+
+def test_import_album_closes_scan_and_command_responses(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    scan = FakeResponse(200, [{"path": "/staging/file.mp3"}])
+    response = FakeResponse(201, {})
+    scan.close = Mock()
+    response.close = Mock()
+    handler.lidarr_client.scan_import_candidates.return_value = scan
+    handler.lidarr_client.import_candidates.return_value = (response, 1)
+
+    handler.import_album({
+        "artist": "Artist",
+        "album_name": "Album",
+        "artist_path": "/music/Artist",
+        "album_folder": "Album (2024)",
+        "album_full_path": "/music/Artist/Album (2024)",
+    })
+
+    scan.close.assert_called_once_with()
+    response.close.assert_called_once_with()
 
 
 def test_link_finder_does_not_retry_secondary_after_emfile(lidatube_module, monkeypatch):
     handler = build_data_handler(lidatube_module)
+
     emit_mock = Mock()
     monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
 
@@ -933,6 +964,22 @@ def test_link_finder_does_not_retry_secondary_after_emfile(lidatube_module, monk
     handler._link_finder(req_album)
 
     secondary_search_mock.assert_not_called()
+
+
+def test_drain_lidarr_futures_releases_completed_references(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    future = Mock()
+    future.done.return_value = True
+    future.result.return_value = True
+    album = {"scan_state": "complete"}
+    future_map = {future: album}
+    handler.lidarr_futures = [future]
+
+    processed, failed = handler._drain_lidarr_futures(future_map)
+
+    assert (processed, failed) == (1, 0)
+    assert future_map == {}
+    assert handler.lidarr_futures == []
 
 
 def test_close_ytmusic_client_closes_underlying_session(lidatube_module):
@@ -1143,9 +1190,35 @@ def test_load_lidarr_cache_restores_cached_state(lidatube_module, tmp_path):
     handler._load_lidarr_cache()
 
     assert handler.lidarr_status == "complete"
-    assert handler.lidarr_items == [{"artist": "A", "album_name": "B"}]
+    assert handler.lidarr_items[0]["artist"] == "A"
+    assert handler.lidarr_items[0]["album_name"] == "B"
+    assert handler.lidarr_items[0]["scan_state"] == "pending"
     assert handler.lidarr_scan_progress["phase"] == "Complete (cached)"
     assert handler.lidarr_scan_progress["albums_processed"] == 5
+
+
+def test_incomplete_lidarr_cache_remains_incomplete_after_restart(lidatube_module, tmp_path):
+    handler = build_data_handler(lidatube_module)
+    handler.config.CONFIG_FOLDER = str(tmp_path)
+    handler.lidarr_items = [{"artist": "A", "album_name": "B", "scan_ready": False}]
+    handler._set_album_scan_state(handler.lidarr_items[0], "error", "track API failed")
+    handler._set_lidarr_scan_progress(phase="Incomplete — Lidarr error on page 2", pages_scanned=1)
+    handler._set_lidarr_scan_state("error", error="Lidarr page 2 returned 500")
+    handler._save_lidarr_cache()
+
+    payload = json.loads((tmp_path / "lidarr_cache.json").read_text())
+    assert payload["schema_version"] == 2
+    assert payload["lidarr_scan_state"]["complete"] is False
+    assert payload["lidarr_scan_state"]["last_successful_page"] == 1
+
+    restarted = build_data_handler(lidatube_module)
+    restarted.config.CONFIG_FOLDER = str(tmp_path)
+    restarted._load_lidarr_cache()
+
+    assert restarted.lidarr_status == "error"
+    assert restarted.lidarr_scan_progress["phase"].startswith("Incomplete")
+    assert restarted.lidarr_items[0]["scan_state"] == "error"
+    assert restarted.lidarr_items[0]["scan_ready"] is False
 
 
 def test_load_lidarr_cache_logs_error_on_invalid_json(lidatube_module, tmp_path):

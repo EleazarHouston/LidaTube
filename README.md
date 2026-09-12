@@ -6,6 +6,8 @@
 <img src=src/static/lidatube.png>
 
 LidaTube is a tool for finding and fetching missing Lidarr albums via yt-dlp.
+Its matcher deliberately prefers returning no match over automatically downloading an uncertain candidate. Missing duration metadata is not treated as a rejection.
+
 This repository is a fork of TheWicklowWolf/LidaTube focused on cleanup and bug fixes.
 Upstream project credit remains with TheWicklowWolf.
 
@@ -61,6 +63,7 @@ Certain values can be set via environment variables:
 
 Download selections are stored in `config/lidatube.db` and processed in bounded batches. A worker restart resumes the unfinished session automatically unless `auto_resume` is disabled. **Stop** halts the run and retains pending albums for **Resume**; **Reset** deletes the persisted queue for that session and clears its progress.
 
+LidaTube currently supports a single application process. The shipped Gunicorn configuration intentionally uses one worker; running multiple workers against the SQLite queue database is unsupported.
 
 ## Sync Schedule
 
