@@ -303,12 +303,14 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
             _append_trace(trace, "ytmusic", item, candidate_seconds, None, "duration_gate")
             continue
-        artists_string = "".join([x["name"] for x in item["artists"]])
+        artist_names = [x["name"] for x in item["artists"]]
+        artists_string = "".join(artist_names)
+        artist_credited = _artist_credited(cleaned_artist, artist_names) or _artist_credited(_normalized_text(artist), artist_names)
         raw_artist_match_ratio = fuzz.ratio(artist, artists_string)
-        if artist.lower() in artists_string.lower():
-            raw_artist_match_ratio = 100
         cleaned_artists_string = _normalized_text(artists_string)
         cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
+        if artist_credited:
+            raw_artist_match_ratio = cleaned_artist_match_ratio = 100
         cleaned_yt_song_title = _normalized_text(item["title"])
         cleaned_song_title_ratio = fuzz.ratio(cleaned_song_title, cleaned_yt_song_title)
         if song_title.lower() in item["title"].lower() or _same_base_title(cleaned_song_title, cleaned_yt_song_title):

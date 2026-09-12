@@ -1087,3 +1087,34 @@ def test_song_matcher_gives_full_title_credit_when_base_titles_equal(song_title,
         expected_duration_ms=200000,
     )
     assert match is not None
+
+
+# --- artist credit: collaborations / billing variants (seen: Nas "Wow" -> "Nas Presents Nashawn") ---
+
+def test_song_matcher_credits_artist_named_within_billing_variant():
+    search_results = [
+        {"resultType": "song", "title": "Wow", "videoId": "right", "artists": [{"name": "Nas Presents Nashawn"}], "duration_seconds": 190},
+    ]
+    match = _matcher.song_matcher(85, "Nas", "nas", "Wow", "wow", search_results, expected_duration_ms=189000)
+    assert match is not None
+    assert match["videoId"] == "right"
+
+
+def test_song_matcher_credits_one_of_several_credited_artists():
+    search_results = [
+        {"resultType": "song", "title": "Symphony No. 6 in F Major, Op. 68 Pastoral: V. Shepherd's Song", "videoId": "right",
+         "artists": [{"name": "Berliner Philharmoniker"}, {"name": "Herbert von Karajan"}, {"name": "Ludwig van Beethoven"}],
+         "duration_seconds": 550},
+    ]
+    title = "Symphony No. 6 in F Major, Op. 68 Pastoral: V. Shepherd's Song (Remastered)"
+    match = _matcher.song_matcher(85, "Ludwig van Beethoven", "ludwig van beethoven", title, title.lower(), search_results, expected_duration_ms=550000)
+    assert match is not None
+
+
+def test_song_matcher_does_not_credit_artist_hidden_inside_another_word():
+    # "nas" is a substring of "jonas", but Jonas Brothers is not Nas.
+    search_results = [
+        {"resultType": "song", "title": "Wow", "videoId": "wrong", "artists": [{"name": "Jonas Brothers"}], "duration_seconds": 190},
+    ]
+    match = _matcher.song_matcher(85, "Nas", "nas", "Wow", "wow", search_results, expected_duration_ms=189000)
+    assert match is None
