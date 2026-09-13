@@ -4,12 +4,14 @@ wrong / bad match, combining multiple independent signals:
 
   * duration delta vs Lidarr's expected track length (wrong-song / wrong-length)
   * embedded YouTube provenance (TXXX:purl / description / comment) — an official
-    "Provided to YouTube by <label>" upload is trustworthy; a random upload is not
+    "Provided to YouTube by <label>" upload reduces suspicion; missing provenance
+    alone does not establish that a match is wrong
   * strong version markers in the provenance text (karaoke / instrumental / …),
     which catches same-duration instrumentals that the duration check alone misses
 
 Every file gets a row and a 0-100 suspicion score (higher = more dubious) with a
 list of reasons, written to CSV sorted worst-first for spot checking.
+Scores are triage heuristics, not probabilities or proof of an incorrect file.
 
 Usage:
     python library_suspicion.py \\

@@ -403,6 +403,7 @@ def run_audit(lidarr_url, api_key, download_folder, tolerance, output_path, dele
     suspects.sort(key=lambda r: r["delta_s"], reverse=True)
     _save_lidarr_cache(cache, cache_file)
 
+    print("\nDuration differences are heuristic signals, not proof of an incorrect file; review before deleting.")
     print(f"\nResults: {len(suspects)} SUSPECT, {ok_count} OK, {skipped} skipped (no Lidarr match or unknown duration)")
     if output_path:
         print(f"Full results in {output_path}")
