@@ -127,9 +127,13 @@ def _artist_in_result(cleaned_artist, item):
         if isinstance(val, dict):
             val = val.get("name", "")
         if val:
-            parts.append(str(val))
-    haystack = _general.string_cleaner(" ".join(parts)).lower()
-    return cleaned_artist in haystack
+            parts.append(_youtube_channel_credit(str(val)))
+    return _artist_credited(cleaned_artist, parts)
+
+
+def _youtube_channel_credit(name):
+    # VEVO commonly appends its branding without a separator (e.g. NasVEVO).
+    return re.sub(r"vevo$", "", name, flags=re.IGNORECASE).strip()
 
 
 def _artist_credited(cleaned_artist, artist_names):
@@ -289,6 +293,21 @@ def _version_descriptor_mismatch(requested_title, candidate_title):
     )
 
 
+def _recording_mismatch(requested_title, candidate_title):
+    """Shared recording validation for both search providers."""
+    return (
+        _version_mismatch(requested_title, candidate_title)
+        or _version_descriptor_mismatch(requested_title, candidate_title)
+    )
+
+
+def _without_artist_prefix(title, artist):
+    """Keep artist billing out of recording descriptors in YouTube search titles."""
+    if not artist:
+        return title
+    return re.sub(r"^" + re.escape(artist) + r"\s+-\s+", "", title, count=1, flags=re.IGNORECASE)
+
+
 def _base_title(text):
     text = re.sub(r"\s*&\s*", " and ", (text or "").lower())
     text = re.sub(r"[^\w\s]", " ", remove_song_keywords(text))
@@ -350,7 +369,7 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         if item["resultType"] != item_wanted_type:
             _append_trace(trace, "ytmusic", item, candidate_seconds, None, "not_song_type")
             continue
-        if _version_mismatch(song_title, item["title"]) or _version_descriptor_mismatch(song_title, item["title"]):
+        if _recording_mismatch(song_title, item["title"]):
             _append_trace(trace, "ytmusic", item, candidate_seconds, None, "version_gate")
             continue
         if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
@@ -427,6 +446,7 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
     cleaned_artist = _general.string_cleaner(artist).lower() if artist else ""
     threshold = _normalize_min_ratio(minimum_match_ratio)
     gate_cleared = []
+    requested_title = _without_artist_prefix(query_text, artist)
 
     for item in search_results:
         title = item.get("title", "")
@@ -435,7 +455,7 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
         if not _artist_in_result(cleaned_artist, item):
             _append_trace(trace, "yt", item, candidate_seconds, None, "artist_gate")
             continue
-        if _version_mismatch(query_text, title):
+        if _recording_mismatch(requested_title, _without_artist_prefix(title, artist)):
             _append_trace(trace, "yt", item, candidate_seconds, None, "version_gate")
             continue
         if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
@@ -465,7 +485,7 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
     fb_item = None
     for item, title, candidate_seconds in gate_cleared:
         channel = _channel_name(item)
-        if not channel or cleaned_artist not in _general.string_cleaner(channel).lower():
+        if not channel or not _artist_credited(cleaned_artist, [_youtube_channel_credit(channel)]):
             continue
         augmented = f"{channel} - {title}"
         score = _yt_title_score(query_text, cleaned_query_text, cleaned_query_text_minus_keywords, augmented)

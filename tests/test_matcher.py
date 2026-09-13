@@ -1231,3 +1231,59 @@ def test_song_matcher_still_accepts_live_only_candidate():
     ]
     match = _matcher.song_matcher(85, "Neil Young", "neil young", "Double E", "double e", search_results, expected_duration_ms=318000)
     assert match is not None
+
+
+@pytest.mark.parametrize("requested,candidate", [
+    ("Song", "Song (Spanish Version)"),
+    ("Song (Solo Version)", "Song"),
+    ("Song", "Song (Remix #1)"),
+    ("Song", "Song (Live In Germany)"),
+    ("Song", "Song - Spanish Version"),
+])
+@pytest.mark.parametrize("channel_only", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_youtube_recording_gate_matches_ytmusic(requested, candidate, channel_only, reverse):
+    if reverse:
+        requested, candidate = candidate, requested
+    item = {"title": candidate if channel_only else f"Artist - {candidate}",
+            "channel": {"name": "Artist - Topic"}, "duration": "3:20"}
+    trace = []
+    assert _matcher.song_matcher_yt(
+        0, "Artist", f"Artist - {requested}", [item], trace=trace,
+    ) is None
+    assert [entry["rejected_by"] for entry in trace] == ["version_gate"]
+
+
+@pytest.mark.parametrize("title", ["Song (Solo Version)", "Song (Spanish Version)", "Song (Remix)", "Song - Live In Germany"])
+def test_youtube_accepts_requested_recording(title):
+    item = {"title": f"Artist - {title}"}
+    assert _matcher.song_matcher_yt(90, "Artist", f"Artist - {title}", [item]) is item
+
+
+def test_youtube_artist_name_cannot_supply_recording_descriptor():
+    item = {"title": "Spanish - Song (Spanish Version)"}
+    assert _matcher.song_matcher_yt(0, "Spanish", "Spanish - Song", [item]) is None
+
+
+@pytest.mark.parametrize("field", ["title", "uploader", "channel", "uploader_id"])
+@pytest.mark.parametrize("credit", ["Jonas Brothers", {"name": "Jonas Brothers"}])
+def test_youtube_artist_gate_rejects_substring_credits(field, credit):
+    if field == "title" and isinstance(credit, dict):
+        credit = credit["name"]
+    item = {"title": "Song", field: credit}
+    trace = []
+    assert _matcher.song_matcher_yt(0, "Nas", "Nas - Song", [item], trace=trace) is None
+    assert trace[0]["rejected_by"] == "artist_gate"
+
+
+@pytest.mark.parametrize("artist,credit", [
+    ("Nas", "Nas - Topic"), ("Nas", "Nas VEVO"), ("Nas", "NasVEVO"),
+    ("Neil Young", "Neil Young & Crazy Horse"), ("M.I.A.", "M.I.A."),
+])
+def test_youtube_accepts_bounded_channel_credit(artist, credit):
+    item = {"title": "Song", "channel": {"name": credit}}
+    assert _matcher.song_matcher_yt(60, artist, f"{artist} - Song", [item]) is item
+
+
+def test_youtube_artist_credit_does_not_join_separate_fields():
+    assert not _matcher._artist_in_result("neil young", {"title": "Neil", "channel": "Young"})
