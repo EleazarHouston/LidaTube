@@ -190,3 +190,62 @@ def test_clear_queue_removes_only_requested_session(tmp_path):
     assert store.queue_counts(first_id)["total"] == 0
     assert store.queue_counts(second_id)["total"] == 1
     store.close()
+
+
+
+def test_store_adopts_unversioned_database_without_losing_data(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    store = Store(path)
+    session_id = store.start_session()
+    store.set_override(42, "https://youtube.test/keep", "keep me")
+    store.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version = 0")
+    for _ in range(2):
+        store = Store(path)
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert store.list_sessions()[0]["id"] == session_id
+        assert store.list_sessions()[0]["status"] == "interrupted"
+        assert store.get_override(42)["note"] == "keep me"
+        store.close()
+
+
+def test_store_rejects_newer_schema_without_changing_session_state(tmp_path):
+    import sqlite3
+    import pytest
+
+    path = tmp_path / "future.db"
+    store = Store(path)
+    store.start_session()
+    store.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version = 999")
+    with pytest.raises(RuntimeError, match="newer than supported"):
+        Store(path)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 999
+        assert connection.execute("SELECT status FROM sessions").fetchone()[0] == "running"
+
+
+def test_store_rolls_back_failed_migration_and_can_retry(tmp_path, monkeypatch):
+    import sqlite3
+    import pytest
+    import store as store_module
+
+    path = tmp_path / "migration.db"
+    Store(path).close()
+    migrations = store_module._MIGRATIONS
+    monkeypatch.setattr(store_module, "_MIGRATIONS", migrations + (
+        "CREATE TABLE example (id INTEGER); INSERT INTO missing_table VALUES (1);",
+    ))
+    with pytest.raises(sqlite3.OperationalError):
+        Store(path)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'example'").fetchone() is None
+    monkeypatch.setattr(store_module, "_MIGRATIONS", migrations + ("CREATE TABLE example (id INTEGER);",))
+    store = Store(path)
+    assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    store.close()

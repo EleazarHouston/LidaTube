@@ -14,6 +14,80 @@ from datetime import datetime, timezone
 
 _DB_LOCK = threading.RLock()
 
+# Append one SQL script per schema version; never edit a released migration.
+# Version 1 also adopts unversioned databases created by older LidaTube releases.
+_MIGRATIONS = (
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        status TEXT NOT NULL,
+        requested_count INTEGER NOT NULL DEFAULT 0,
+        matched_count INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS queue_items (
+        id INTEGER PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        artist_id INTEGER,
+        album_id INTEGER,
+        album_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'in_progress', 'done', 'error')),
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_items_session_position
+        ON queue_items(session_id, position);
+
+    CREATE INDEX IF NOT EXISTS idx_queue_items_session_status_position
+        ON queue_items(session_id, status, position);
+
+    CREATE TABLE IF NOT EXISTS track_results (
+        id INTEGER PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES sessions(id),
+        artist TEXT,
+        album TEXT,
+        track_title TEXT,
+        track_number INTEGER,
+        track_id INTEGER,
+        duration_ms INTEGER,
+        outcome TEXT NOT NULL CHECK(outcome IN ('matched', 'no_match', 'error')),
+        link TEXT,
+        title_of_link TEXT,
+        matched_via TEXT CHECK(matched_via IN ('ytmusic', 'ytmusic_secondary', 'yt') OR matched_via IS NULL),
+        suspicion INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS evaluations (
+        id INTEGER PRIMARY KEY,
+        track_result_id INTEGER NOT NULL REFERENCES track_results(id) ON DELETE CASCADE,
+        source TEXT,
+        candidate_title TEXT,
+        candidate_url TEXT,
+        candidate_duration_s REAL,
+        score REAL,
+        rejected_by TEXT,
+        detail TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_evaluations_track_result_id
+        ON evaluations(track_result_id);
+
+    CREATE TABLE IF NOT EXISTS overrides (
+        track_id INTEGER PRIMARY KEY,
+        forced_url TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL
+    );
+    """,
+)
+
 
 class Store:
     """SQLite-backed persistence for sessions, queued albums, results, and overrides."""
@@ -27,7 +101,11 @@ class Store:
             os.makedirs(parent, exist_ok=True)
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
-        self._initialize()
+        try:
+            self._initialize()
+        except Exception:
+            self._connection.close()
+            raise
 
     @staticmethod
     def _now():
@@ -37,77 +115,7 @@ class Store:
         with _DB_LOCK:
             self._connection.execute("PRAGMA journal_mode=WAL")
             self._connection.execute("PRAGMA foreign_keys=ON")
-            self._connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY,
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT,
-                    status TEXT NOT NULL,
-                    requested_count INTEGER NOT NULL DEFAULT 0,
-                    matched_count INTEGER NOT NULL DEFAULT 0,
-                    failed_count INTEGER NOT NULL DEFAULT 0
-                );
-
-                CREATE TABLE IF NOT EXISTS queue_items (
-                    id INTEGER PRIMARY KEY,
-                    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                    position INTEGER NOT NULL,
-                    artist_id INTEGER,
-                    album_id INTEGER,
-                    album_json TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending'
-                        CHECK(status IN ('pending', 'in_progress', 'done', 'error')),
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_items_session_position
-                    ON queue_items(session_id, position);
-
-                CREATE INDEX IF NOT EXISTS idx_queue_items_session_status_position
-                    ON queue_items(session_id, status, position);
-
-                CREATE TABLE IF NOT EXISTS track_results (
-                    id INTEGER PRIMARY KEY,
-                    session_id INTEGER NOT NULL REFERENCES sessions(id),
-                    artist TEXT,
-                    album TEXT,
-                    track_title TEXT,
-                    track_number INTEGER,
-                    track_id INTEGER,
-                    duration_ms INTEGER,
-                    outcome TEXT NOT NULL CHECK(outcome IN ('matched', 'no_match', 'error')),
-                    link TEXT,
-                    title_of_link TEXT,
-                    matched_via TEXT CHECK(matched_via IN ('ytmusic', 'ytmusic_secondary', 'yt') OR matched_via IS NULL),
-                    suspicion INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS evaluations (
-                    id INTEGER PRIMARY KEY,
-                    track_result_id INTEGER NOT NULL REFERENCES track_results(id) ON DELETE CASCADE,
-                    source TEXT,
-                    candidate_title TEXT,
-                    candidate_url TEXT,
-                    candidate_duration_s REAL,
-                    score REAL,
-                    rejected_by TEXT,
-                    detail TEXT
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_evaluations_track_result_id
-                    ON evaluations(track_result_id);
-
-                CREATE TABLE IF NOT EXISTS overrides (
-                    track_id INTEGER PRIMARY KEY,
-                    forced_url TEXT NOT NULL,
-                    note TEXT,
-                    created_at TEXT NOT NULL
-                );
-                """
-            )
+            self._migrate()
             # A process restart has no active worker capable of completing a run.
             self._connection.execute(
                 "UPDATE sessions SET status = 'interrupted', ended_at = COALESCE(ended_at, ?) "
@@ -115,6 +123,23 @@ class Store:
                 (self._now(),),
             )
             self._connection.commit()
+
+    def _migrate(self):
+        """Upgrade schema and version together, preserving legacy database contents."""
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            version = self._connection.execute("PRAGMA user_version").fetchone()[0]
+            if version > len(_MIGRATIONS):
+                raise RuntimeError(
+                    f"Database schema version {version} is newer than supported version {len(_MIGRATIONS)}"
+                )
+            for index in range(version, len(_MIGRATIONS)):
+                # Execute separately: executescript implicitly commits an open transaction.
+                # Migration scripts must contain simple statements, without trigger bodies.
+                for statement in _MIGRATIONS[index].split(";"):
+                    if statement.strip():
+                        self._connection.execute(statement)
+                self._connection.execute(f"PRAGMA user_version = {index + 1}")
 
     def close(self):
         with _DB_LOCK:
