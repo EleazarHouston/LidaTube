@@ -2036,13 +2036,14 @@ def test_yt_search_falls_back_to_flat_ytdlp_search_when_yts_fails(lidatube_modul
     assert seen_opts[0]["extract_flat"]
 
 
-def test_yt_search_returns_empty_when_yts_and_ytdlp_fallback_both_fail(lidatube_module, monkeypatch):
+def test_yt_search_propagates_error_when_yts_and_ytdlp_fallback_both_fail(lidatube_module, monkeypatch):
     handler = build_data_handler(lidatube_module)
     handler.config.secondary_search = "YTS"
     monkeypatch.setattr(lidatube_module.youtubesearchpython, "VideosSearch", _BrokenVideosSearch)
     monkeypatch.setattr(lidatube_module.yt_dlp, "YoutubeDL", _fake_ytdlp(RuntimeError("yt-dlp offline"), []))
 
-    assert handler._yt_search("Artist - Song") == []
+    with pytest.raises(RuntimeError, match="yt-dlp offline"):
+        handler._yt_search("Artist - Song")
 
 
 def test_secondary_search_links_track_from_ytdlp_fallback_when_yts_fails(lidatube_module, monkeypatch):
@@ -2096,3 +2097,61 @@ def test_link_finder_stops_retrying_when_stop_requested_during_backoff(lidatube_
     assert time.monotonic() - started < 5
     assert [track["outcome"] for track in handler.store.get_session_tracks(handler.current_session_id)] == ["error"]
     handler.store.close()
+
+
+@pytest.mark.parametrize("mode", ["YTS", "YTDLP"])
+def test_yt_search_preserves_successful_empty_results(lidatube_module, monkeypatch, mode):
+    handler = build_data_handler(lidatube_module)
+    handler.config.secondary_search = mode
+    monkeypatch.setattr(lidatube_module.youtubesearchpython, "VideosSearch", _BrokenVideosSearch)
+    monkeypatch.setattr(lidatube_module.yt_dlp, "YoutubeDL", _fake_ytdlp([], []))
+    assert handler._yt_search("Artist - Song") == []
+
+
+@pytest.mark.parametrize("mode", ["YTS", "YTDLP"])
+@pytest.mark.parametrize("recovers", [False, True])
+def test_link_finder_retries_youtube_outages_and_persists_outcome(
+    lidatube_module, monkeypatch, tmp_path, mode, recovers,
+):
+    import requests
+
+    handler = build_data_handler(lidatube_module)
+    handler.config.secondary_search = mode
+    handler.config.duration_tolerance_seconds = 15
+    handler._SEARCH_RETRY_DELAYS = (0, 0)
+    handler.store = Store(tmp_path / "youtube-retry.db")
+    handler.current_session_id = handler.store.start_session(requested_count=1)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    monkeypatch.setattr(lidatube_module, "YTMusic", lambda: Mock(search=Mock(return_value=[])))
+    monkeypatch.setattr(lidatube_module.youtubesearchpython, "VideosSearch", _BrokenVideosSearch)
+    calls = []
+
+    class FlakyYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, query, download=False):
+            calls.append(query)
+            if not recovers or len(calls) == 1:
+                raise requests.exceptions.ConnectionError("Failed to resolve youtube.com")
+            return {"entries": [{
+                "title": "Nanci Griffith - Wouldn't That Be Fine", "duration": 200,
+                "webpage_url": "https://www.youtube.com/watch?v=recovered",
+            }]}
+
+    monkeypatch.setattr(lidatube_module.yt_dlp, "YoutubeDL", FlakyYDL)
+    try:
+        handler._link_finder(_network_retry_album())
+        assert len(calls) == (2 if recovers else 3)
+        tracks = handler.store.get_session_tracks(handler.current_session_id)
+        assert [track["outcome"] for track in tracks] == ["matched" if recovers else "error"]
+        if recovers:
+            assert tracks[0]["link"] == "https://www.youtube.com/watch?v=recovered"
+    finally:
+        handler.store.close()

@@ -1633,7 +1633,7 @@ class DataHandler:
 
         except Exception as e:
             self.general_logger.error(f"Error in YouTube Search: {e}")
-            return []
+            raise
 
     def _ytdlp_flat_search(self, query_text):
         """Search YouTube via yt-dlp without resolving each video, shaped like YTS results (with "link")."""
