@@ -1397,3 +1397,64 @@ def test_album_matcher_skips_live_album_for_studio_album_request():
     match = _matcher.album_matcher(85, "Three Dog Night", "Three Dog Night", "three dog night", "three dog night", results)
     assert match["browseId"] == "studio"
     assert _matcher.album_matcher(85, "Three Dog Night", "Three Dog Night", "three dog night", "three dog night", results[:1]) is None
+
+
+# --- soundtracks credited to the composer in Lidarr but to performers on YouTube Music ---
+
+def _rodgers(song_title, results, seconds, **kwargs):
+    kwargs.setdefault("album_name", "The Sound of Music")
+    kwargs.setdefault("album_secondary_types", ["Soundtrack"])
+    return _matcher.song_matcher(85, "Richard Rodgers", "richard rodgers", song_title, song_title.lower(), results,
+                                 expected_duration_ms=seconds * 1000, **kwargs)
+
+
+def _cast_song(title, video_id, seconds, album, artists=("Julie Andrews",)):
+    return {"resultType": "song", "title": title, "videoId": video_id, "artists": [{"name": a} for a in artists],
+            "duration_seconds": seconds, "album": {"name": album}}
+
+
+def test_same_base_title_treats_pt_and_part_as_equal():
+    assert _matcher._same_base_title("my favorite things, pt. 1", "my favorite things (part 1)")
+    assert not _matcher._same_base_title("my favorite things, pt. 1", "my favorite things (part 2)")
+
+
+def test_song_matcher_accepts_soundtrack_performer_credit_when_album_matches():
+    results = [_cast_song("My Favorite Things (Reprise)", "reprise", 75,
+                          "The Sound Of Music (Original Soundtrack Recording / Super Deluxe Edition)",
+                          artists=("Julie Andrews", "Charmian Carr", "Nicholas Hammond", "Heather Menzies"))]
+    assert _rodgers("My Favorite Things (reprise)", results, 74)["videoId"] == "reprise"
+
+
+def test_song_matcher_prefers_soundtrack_album_cut_over_uncorroborated_exact_title():
+    results = [
+        _cast_song("My Favorite Things (Part 1)", "alternate-single", 139, "My Favorite Things (Alternate Version)", artists=("Julie Andrews", "Irwin Kostal")),
+        _cast_song("My Favorite Things", "soundtrack", 141, "The Sound Of Music (Original Soundtrack Recording)"),
+    ]
+    assert _rodgers("My Favorite Things, Pt. 1", results, 138)["videoId"] == "soundtrack"
+
+
+def test_song_matcher_soundtrack_type_can_come_from_album_names_alone():
+    results = [_cast_song("My Favorite Things (Reprise)", "reprise", 75, "The Sound Of Music (Original Soundtrack Recording)")]
+    assert _rodgers("My Favorite Things (reprise)", results, 74, album_secondary_types=[])["videoId"] == "reprise"
+
+
+def test_song_matcher_does_not_use_album_credit_for_non_soundtrack_albums():
+    results = [{"resultType": "song", "title": "White Christmas", "videoId": "other-artist", "artists": [{"name": "Bing Crosby"}],
+                "duration_seconds": 180, "album": {"name": "Christmas Songs"}}]
+    match = _matcher.song_matcher(85, "Taylor Swift", "taylor swift", "White Christmas", "white christmas", results,
+                                  expected_duration_ms=180000, album_name="Christmas Songs", album_secondary_types=[])
+    assert match is None
+
+
+def test_song_matcher_does_not_use_album_credit_for_a_different_stage_production():
+    results = [_cast_song("My Favorite Things (Reprise)", "broadway", 75, "The Sound of Music (Original Broadway Cast Recording)",
+                          artists=("Mary Martin",))]
+    assert _rodgers("My Favorite Things (reprise)", results, 74) is None
+
+
+def test_song_matcher_still_prefers_credited_artist_over_album_corroborated_performer():
+    results = [
+        _cast_song("My Favorite Things (Reprise)", "performer", 75, "The Sound Of Music (Original Soundtrack Recording)"),
+        _cast_song("My Favorite Things (Reprise)", "composer", 75, "The Sound Of Music (Original Soundtrack Recording)", artists=("Richard Rodgers",)),
+    ]
+    assert _rodgers("My Favorite Things (reprise)", results, 74)["videoId"] == "composer"

@@ -377,8 +377,50 @@ def _recording_rank_penalty(requested_title, candidate_title, requested_live, ca
     return penalty
 
 
+_PART_ABBREVIATION_RE = re.compile(r"\bpt\.?\s*(?=\d|[ivx]+\b)")
+
+
+def _canonical_parts(text):
+    """Spell out part abbreviations so "Pt. 1" and "(Part 1)" compare equal."""
+    return _PART_ABBREVIATION_RE.sub("part ", text or "")
+
+
+# Soundtracks are credited to the composer in Lidarr ("Richard Rodgers") but to the
+# performers on YouTube Music ("Julie Andrews"). The same soundtrack album stands in for
+# the artist credit, unless the candidate is a different stage/screen production of it.
+_SOUNDTRACK_ALBUM_RE = re.compile(r"\b(?:soundtrack|motion picture|original score|cast recording|musical)\b")
+_STAGE_PRODUCTION_WORDS = {"broadway", "cast", "stage", "revival", "london", "tv", "television", "live"}
+
+
+def _album_base(name):
+    text = _normalized_text(name or "")
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"[\(\[][^\(\)\[\]]*[\)\]]", " ", text)
+    text = re.sub(r"[^\w\s]", " ", _DASH_SUFFIX_RE.sub("", text))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _soundtrack_album_credit(requested_album, requested_secondary_types, candidate_album):
+    requested_base = _album_base(requested_album)
+    if not requested_base or requested_base != _album_base(candidate_album):
+        return False
+    requested_text = _normalized_text(requested_album)
+    candidate_text = _normalized_text(candidate_album)
+    is_soundtrack = (
+        any(str(kind).lower() == "soundtrack" for kind in (requested_secondary_types or []))
+        or _SOUNDTRACK_ALBUM_RE.search(requested_text)
+        or _SOUNDTRACK_ALBUM_RE.search(candidate_text)
+    )
+    if not is_soundtrack:
+        return False
+    added_production_words = (set(_WORD_RE.findall(candidate_text)) & _STAGE_PRODUCTION_WORDS) - set(_WORD_RE.findall(requested_text))
+    return not added_production_words
+
+
 def _base_title(text):
-    text = re.sub(r"\s*&\s*", " and ", (text or "").lower())
+    text = re.sub(r"\s*&\s*", " and ", _canonical_parts((text or "").lower()))
     text = re.sub(r"[^\w\s]", " ", remove_song_keywords(text))
     return re.sub(r"\s+", " ", text).strip()
 
@@ -435,6 +477,7 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
     best_match_item = None
     best_match_key = None
     requested_live = _request_is_live(song_title, album_name, album_secondary_types)
+    cleaned_song_title = _canonical_parts(cleaned_song_title)
     cleaned_song_title_minus_keywords = remove_song_keywords(cleaned_song_title)
     threshold = _normalize_min_ratio(minimum_match_ratio)
 
@@ -455,7 +498,11 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
             continue
         artist_names = [x["name"] for x in item["artists"]]
         artists_string = "".join(artist_names)
-        artist_credited = _artist_credited(cleaned_artist, artist_names) or _artist_credited(_normalized_text(artist), artist_names)
+        artist_credited = (
+            _artist_credited(cleaned_artist, artist_names)
+            or _artist_credited(_normalized_text(artist), artist_names)
+            or _soundtrack_album_credit(album_name, album_secondary_types, _candidate_album_name(item))
+        )
         raw_artist_match_ratio = fuzz.ratio(artist, artists_string)
         cleaned_artists_string = _normalized_text(artists_string)
         cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
@@ -465,7 +512,7 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         artist_similarity = cleaned_artist_match_ratio
         if artist_credited:
             raw_artist_match_ratio = cleaned_artist_match_ratio = 100
-        cleaned_yt_song_title = _normalized_text(item["title"])
+        cleaned_yt_song_title = _canonical_parts(_normalized_text(item["title"]))
         cleaned_song_title_ratio = fuzz.ratio(cleaned_song_title, cleaned_yt_song_title)
         title_similarity = cleaned_song_title_ratio
         if song_title.lower() in item["title"].lower() or _same_base_title(cleaned_song_title, cleaned_yt_song_title):
