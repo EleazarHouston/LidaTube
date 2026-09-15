@@ -24,6 +24,9 @@ class AppConfig:
         "attempt_lidarr_import": False,
         "lidarr_scan_thread_limit": 16,
         "duration_tolerance_seconds": 8,
+        # Second-pass window used only when nothing matches within duration_tolerance_seconds,
+        # restricted to the same title by the named artist (see _matcher._extended_duration_eligible).
+        "extended_duration_tolerance_seconds": 30,
         "batch_size": 200,
         "auto_resume": True,
         # Lidarr-namespace path that maps to LidaTube's download_folder. When set,
@@ -47,6 +50,7 @@ class AppConfig:
         "attempt_lidarr_import": lambda v: v.lower() == "true",
         "lidarr_scan_thread_limit": int,
         "duration_tolerance_seconds": int,
+        "extended_duration_tolerance_seconds": int,
         "batch_size": int,
         "auto_resume": lambda v: v.lower() == "true",
         "lidarr_download_path": str,

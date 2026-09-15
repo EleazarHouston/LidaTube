@@ -161,3 +161,11 @@ def test_cookies_path_set_when_file_exists(tmp_path, monkeypatch):
 
 def test_download_folder_default(cfg):
     assert cfg.download_folder == "downloads"
+
+
+def test_extended_duration_tolerance_defaults_to_thirty_seconds_and_reads_env(tmp_path, monkeypatch):
+    from config import AppConfig
+
+    monkeypatch.chdir(tmp_path)
+    assert AppConfig.DEFAULTS["extended_duration_tolerance_seconds"] == 30
+    assert AppConfig._ENV_CONVERTERS["extended_duration_tolerance_seconds"]("45") == 45

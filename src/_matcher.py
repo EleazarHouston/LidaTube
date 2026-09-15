@@ -419,6 +419,43 @@ def _soundtrack_album_credit(requested_album, requested_secondary_types, candida
     return not added_production_words
 
 
+# When nothing matches within the normal duration tolerance, a second pass allows up to the
+# extended tolerance, but only for the same title by the named artist with no sign of a
+# different edit or recording, and never more than a fraction of the track's length.
+# Prod evidence: Lidarr lists some singles/compilations 20-30s away from the recording
+# everyone knows (Frankie Valli 231s/178s vs 204s; MF DOOM 188s vs 207s).
+_EXTENDED_DURATION_MAX_FRACTION = 0.15
+_LENGTH_CHANGING_WORDS = {
+    "edit", "edited", "radio", "single", "extended", "short", "long", "full", "album",
+    "version", "mix", "remix", "intro", "outro", "demo", "take",
+}
+
+
+def _extended_window_applies(expected_ms, tolerance_seconds, extended_tolerance_seconds):
+    numbers = (int, float)
+    return (
+        bool(expected_ms)
+        and isinstance(tolerance_seconds, numbers)
+        and isinstance(extended_tolerance_seconds, numbers)
+        and extended_tolerance_seconds > tolerance_seconds
+    )
+
+
+def _extended_duration_eligible(requested_title, candidate_title, expected_ms, candidate_seconds):
+    expected_seconds = expected_ms / 1000.0
+    if abs(candidate_seconds - expected_seconds) > expected_seconds * _EXTENDED_DURATION_MAX_FRACTION:
+        return False
+    requested = _normalized_text(requested_title or "")
+    candidate = _normalized_text(candidate_title or "")
+    if not _same_base_title(requested, candidate):
+        return False
+    return not any(
+        _LENGTH_CHANGING_WORDS.intersection(_WORD_RE.findall(group))
+        for text in (requested, candidate)
+        for group in _title_groups(text)
+    )
+
+
 def _base_title(text):
     text = re.sub(r"\s*&\s*", " and ", _canonical_parts((text or "").lower()))
     text = re.sub(r"[^\w\s]", " ", remove_song_keywords(text))
@@ -470,7 +507,23 @@ def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, clean
 
 def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
                  item_wanted_type="song", expected_duration_ms=0, duration_tolerance_seconds=15, trace=None,
-                 album_name=None, album_secondary_types=None):
+                 album_name=None, album_secondary_types=None, extended_duration_tolerance_seconds=None):
+    arguments = (minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
+                 item_wanted_type, expected_duration_ms)
+    pass_trace = []
+    match = _song_matcher_pass(*arguments, duration_tolerance_seconds, pass_trace, album_name, album_secondary_types)
+    if match is None and _extended_window_applies(expected_duration_ms, duration_tolerance_seconds, extended_duration_tolerance_seconds):
+        pass_trace = []
+        match = _song_matcher_pass(*arguments, extended_duration_tolerance_seconds, pass_trace, album_name, album_secondary_types,
+                                   normal_tolerance_seconds=duration_tolerance_seconds)
+    if trace is not None:
+        trace.extend(pass_trace)
+    return match
+
+
+def _song_matcher_pass(minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
+                       item_wanted_type, expected_duration_ms, duration_tolerance_seconds, trace,
+                       album_name, album_secondary_types, normal_tolerance_seconds=None):
     if not search_results:
         return None
     best_match_rating = 0
@@ -496,13 +549,14 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
             _append_trace(trace, "ytmusic", item, candidate_seconds, None, "duration_gate")
             continue
+        beyond_normal_tolerance = (
+            normal_tolerance_seconds is not None
+            and not _duration_ok(expected_duration_ms, candidate_seconds, normal_tolerance_seconds)
+        )
         artist_names = [x["name"] for x in item["artists"]]
         artists_string = "".join(artist_names)
-        artist_credited = (
-            _artist_credited(cleaned_artist, artist_names)
-            or _artist_credited(_normalized_text(artist), artist_names)
-            or _soundtrack_album_credit(album_name, album_secondary_types, _candidate_album_name(item))
-        )
+        artist_named = _artist_credited(cleaned_artist, artist_names) or _artist_credited(_normalized_text(artist), artist_names)
+        artist_credited = artist_named or _soundtrack_album_credit(album_name, album_secondary_types, _candidate_album_name(item))
         raw_artist_match_ratio = fuzz.ratio(artist, artists_string)
         cleaned_artists_string = _normalized_text(artists_string)
         cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
@@ -523,6 +577,12 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         # Acceptance uses the raw score; ranking subtracts penalties for non-original recordings
         # (acoustic, orchestra...) and for studio takes when a live recording was requested.
         penalty = _recording_rank_penalty(song_title, item["title"], requested_live, candidate_live)
+        if beyond_normal_tolerance and not (
+            artist_named and penalty == 0
+            and _extended_duration_eligible(song_title, item["title"], expected_duration_ms, candidate_seconds)
+        ):
+            _append_trace(trace, "ytmusic", item, candidate_seconds, None, "duration_gate")
+            continue
         match_key = (score - penalty, -penalty, artist_similarity + title_similarity)
         _append_trace(trace, "ytmusic", item, candidate_seconds, score, "accepted" if score >= threshold else "below_threshold")
         if best_match_key is None or match_key > best_match_key:
@@ -562,7 +622,21 @@ def _yt_title_score(query_text, cleaned_query, cleaned_query_mk, candidate_text)
 
 def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
                     expected_duration_ms=0, duration_tolerance_seconds=15, trace=None,
-                    album_name=None, album_secondary_types=None):
+                    album_name=None, album_secondary_types=None, extended_duration_tolerance_seconds=None):
+    arguments = (minimum_match_ratio, artist, query_text, search_results, expected_duration_ms)
+    pass_trace = []
+    match = _song_matcher_yt_pass(*arguments, duration_tolerance_seconds, pass_trace, album_name, album_secondary_types)
+    if match is None and _extended_window_applies(expected_duration_ms, duration_tolerance_seconds, extended_duration_tolerance_seconds):
+        pass_trace = []
+        match = _song_matcher_yt_pass(*arguments, extended_duration_tolerance_seconds, pass_trace, album_name, album_secondary_types,
+                                      normal_tolerance_seconds=duration_tolerance_seconds)
+    if trace is not None:
+        trace.extend(pass_trace)
+    return match
+
+
+def _song_matcher_yt_pass(minimum_match_ratio, artist, query_text, search_results, expected_duration_ms,
+                          duration_tolerance_seconds, trace, album_name, album_secondary_types, normal_tolerance_seconds=None):
     if not search_results:
         return None
     best_match_rating = 0
@@ -591,6 +665,16 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
             _append_trace(trace, "yt", item, candidate_seconds, None, "version_gate")
             continue
         if not _duration_ok(expected_duration_ms, candidate_seconds, duration_tolerance_seconds):
+            _append_trace(trace, "yt", item, candidate_seconds, None, "duration_gate")
+            continue
+        if (
+            normal_tolerance_seconds is not None
+            and not _duration_ok(expected_duration_ms, candidate_seconds, normal_tolerance_seconds)
+            and not (
+                _non_original_penalty(requested_title, _without_artist_prefix(title, artist)) == 0
+                and _extended_duration_eligible(requested_title, _without_artist_prefix(title, artist), expected_duration_ms, candidate_seconds)
+            )
+        ):
             _append_trace(trace, "yt", item, candidate_seconds, None, "duration_gate")
             continue
         score = _yt_title_score(query_text, cleaned_query_text, cleaned_query_text_minus_keywords, title)

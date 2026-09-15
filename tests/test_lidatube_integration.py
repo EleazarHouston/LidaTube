@@ -83,6 +83,7 @@ def build_data_handler(module):
     cfg.lidarr_api_timeout = 30
     cfg.lidarr_download_path = "/staging"
     cfg.minimum_match_ratio = 80
+    cfg.extended_duration_tolerance_seconds = 30
     cfg.fallback_to_top_result = False
     cfg.secondary_search = "YTS"
     cfg.thread_limit = 1
@@ -2202,3 +2203,22 @@ def test_youtube_fallback_passes_album_context_for_live_secondary_type(lidatube_
     handler._get_song_links_secondary(req_album, "Three Dog Night", "three dog night", EmptyYTMusic())
 
     assert req_album["missing_tracks"][0]["link"] == "https://youtube.test/live"
+
+
+def test_song_searches_pass_extended_duration_tolerance_from_config(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler.config.duration_tolerance_seconds = 15
+    handler.config.extended_duration_tolerance_seconds = 30
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return [{"resultType": "song", "title": "Can't Take My Eyes off You", "videoId": "original",
+                     "artists": [{"name": "Frankie Valli"}], "duration_seconds": 204}]
+
+    req_album = {
+        "artist": "Frankie Valli", "album_name": "Can’t Take My Eyes Off You", "album_secondary_types": [],
+        "missing_tracks": [{"artist": "Frankie Valli", "track_title": "Can’t Take My Eyes Off You", "link": "", "title_of_link": "", "duration_ms": 231000}],
+    }
+    handler._get_song_links(req_album, "Frankie Valli", "frankie valli", FakeYTMusic())
+
+    assert req_album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=original"

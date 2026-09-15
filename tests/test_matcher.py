@@ -1458,3 +1458,86 @@ def test_song_matcher_still_prefers_credited_artist_over_album_corroborated_perf
         _cast_song("My Favorite Things (Reprise)", "composer", 75, "The Sound Of Music (Original Soundtrack Recording)", artists=("Richard Rodgers",)),
     ]
     assert _rodgers("My Favorite Things (reprise)", results, 74)["videoId"] == "composer"
+
+
+# --- extended duration window: only used when nothing matches within the normal tolerance ---
+
+def _valli(results, seconds, **kwargs):
+    return _matcher.song_matcher(85, "Frankie Valli", "frankie valli", "Can’t Take My Eyes Off You", "can't take my eyes off you",
+                                 results, expected_duration_ms=seconds * 1000, duration_tolerance_seconds=15, **kwargs)
+
+
+def _valli_song(title, video_id, seconds, artists=("Frankie Valli",)):
+    return {"resultType": "song", "title": title, "videoId": video_id, "artists": [{"name": a} for a in artists], "duration_seconds": seconds}
+
+
+def test_song_matcher_uses_extended_duration_window_when_nothing_matches_normally():
+    # Prod: Lidarr lists the 1982 single at 231s; the recording everyone knows is 204s.
+    results = [_valli_song("Can't Take My Eyes off You", "original", 204)]
+    assert _valli(results, 231) is None
+    assert _valli(results, 231, extended_duration_tolerance_seconds=30)["videoId"] == "original"
+
+
+def test_song_matcher_extended_window_never_beats_a_candidate_within_normal_tolerance():
+    results = [
+        _valli_song("Can't Take My Eyes off You", "far", 204),
+        _valli_song("Can't Take My Eyes Off You", "close", 228),
+    ]
+    assert _valli(results, 231, extended_duration_tolerance_seconds=30)["videoId"] == "close"
+
+
+def test_song_matcher_extended_window_is_bounded():
+    results = [_valli_song("Can't Take My Eyes off You", "too-far", 200)]
+    assert _valli(results, 231, extended_duration_tolerance_seconds=30) is None
+
+
+def test_song_matcher_extended_window_still_applies_live_and_version_gates():
+    results = [_valli_song("Can't Take My Eyes Off You (Live)", "live", 205), _valli_song("Can't Take My Eyes Off You (Instrumental)", "inst", 206)]
+    assert _valli(results, 231, extended_duration_tolerance_seconds=30) is None
+
+
+def test_song_matcher_trace_reflects_the_extended_pass_when_it_runs():
+    trace = []
+    _valli([_valli_song("Can't Take My Eyes off You", "original", 204)], 231, extended_duration_tolerance_seconds=30, trace=trace)
+    assert [entry["rejected_by"] for entry in trace] == ["accepted"]
+
+
+def test_song_matcher_yt_uses_extended_duration_window_when_nothing_matches_normally():
+    results = [{"title": "Frankie Valli - Can't Take My Eyes Off You (Official Audio)", "link": "https://original", "duration": "3:23", "channel": {"name": "RHINO"}}]
+    query = "Frankie Valli - Can't Take My Eyes Off You"
+    assert _matcher.song_matcher_yt(85, "Frankie Valli", query, results, expected_duration_ms=178000, duration_tolerance_seconds=15) is None
+    match = _matcher.song_matcher_yt(85, "Frankie Valli", query, results, expected_duration_ms=178000, duration_tolerance_seconds=15,
+                                     extended_duration_tolerance_seconds=30)
+    assert match["link"] == "https://original"
+
+
+@pytest.mark.parametrize("artist, song_title, expected_seconds, candidate_title, candidate_seconds", [
+    ("Patti Page", "One Final Stand", 120, "One Final Stand", 145),                    # within 30s but >15% of a short track
+    ("Nickelback", "This Afternoon (radio edit)", 257, "This Afternoon", 274),          # an edit explains the gap
+    ("Philip Glass", "Etude no. 2", 183, "Etude No. 2 (Edit)", 212),
+    ("Run-D.M.C.", "Walk This Way", 309, "Walk This Way (Demo)", 326),                 # non-original recording
+    ("Santana", "Cry Baby Cry (Album Version)", 231, "Cry Baby Cry", 251),
+])
+def test_song_matcher_extended_window_rejects_risky_candidates(artist, song_title, expected_seconds, candidate_title, candidate_seconds):
+    results = [{"resultType": "song", "title": candidate_title, "videoId": "risky", "artists": [{"name": artist}], "duration_seconds": candidate_seconds}]
+    match = _matcher.song_matcher(85, artist, _matcher._normalized_text(artist), song_title, _matcher._normalized_text(song_title), results,
+                                  expected_duration_ms=expected_seconds * 1000, duration_tolerance_seconds=15, extended_duration_tolerance_seconds=30)
+    assert match is None
+
+
+def test_song_matcher_extended_window_requires_artist_credited_by_name():
+    # The soundtrack album may stand in for the artist inside the normal window, but not beyond it.
+    results = [{"resultType": "song", "title": "My Favorite Things (Reprise)", "videoId": "soundtrack-credit", "artists": [{"name": "Julie Andrews"}],
+                "duration_seconds": 136, "album": {"name": "The Sound Of Music (Original Soundtrack Recording)"}}]
+    match = _matcher.song_matcher(85, "Richard Rodgers", "richard rodgers", "My Favorite Things (reprise)", "my favorite things (reprise)", results,
+                                  expected_duration_ms=120000, duration_tolerance_seconds=15, extended_duration_tolerance_seconds=30,
+                                  album_name="The Sound of Music", album_secondary_types=["Soundtrack"])
+    assert match is None
+
+
+def test_song_matcher_extended_window_accepts_prod_duration_mismatches():
+    doom = [{"resultType": "song", "title": "All Outta Ale", "videoId": "doom", "artists": [{"name": "MF DOOM"}, {"name": "The Prof."}], "duration_seconds": 207}]
+    assert _matcher.song_matcher(85, "MF DOOM", "mf doom", "All Outta Ale", "all outta ale", doom, expected_duration_ms=188000,
+                                 duration_tolerance_seconds=15, extended_duration_tolerance_seconds=30)["videoId"] == "doom"
+    valli = [_valli_song("Can't Take My Eyes off You", "original", 204)]
+    assert _valli(valli, 178, extended_duration_tolerance_seconds=30)["videoId"] == "original"
