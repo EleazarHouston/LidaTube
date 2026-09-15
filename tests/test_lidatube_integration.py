@@ -363,6 +363,7 @@ def test_get_wanted_albums_from_lidarr_populates_missing_tracks(lidatube_module,
             "artistId": 10,
             "artist": {"path": "/music/Alpha", "artistName": "Alpha"},
             "releases": [{"id": 1000}],
+            "secondaryTypes": ["Live"],
         },
     ]
 
@@ -402,11 +403,13 @@ def test_get_wanted_albums_from_lidarr_populates_missing_tracks(lidatube_module,
     assert alpha_album["track_count"] == 2
     assert alpha_album["missing_count"] == 1
     assert alpha_album["missing_tracks"][0]["track_title"] == "Song A"
+    assert alpha_album["album_secondary_types"] == ["Live"]
 
     assert zulu_album["album_name"] == "Zulu+Album!"
     assert zulu_album["track_count"] == 1
     assert zulu_album["missing_count"] == 1
     assert zulu_album["missing_tracks"][0]["track_title"] == "Song Z"
+    assert zulu_album["album_secondary_types"] == []
 
     assert emit_mock.call_args_list[-1].args[0] == "lidarr_update"
     assert emit_mock.call_args_list[-1].args[1]["status"] == "complete"
@@ -2155,3 +2158,47 @@ def test_link_finder_retries_youtube_outages_and_persists_outcome(
             assert tracks[0]["link"] == "https://www.youtube.com/watch?v=recovered"
     finally:
         handler.store.close()
+
+
+
+def _live_album_request(**album_fields):
+    album = {
+        "artist": "Three Dog Night", "album_name": "Three Dog Night", "album_secondary_types": [],
+        "missing_tracks": [{"artist": "Three Dog Night", "track_title": "One", "link": "", "title_of_link": "", "duration_ms": 180000}],
+    }
+    album.update(album_fields)
+    return album
+
+
+def test_song_search_passes_album_context_so_live_album_requests_prefer_live_recordings(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    handler.config.duration_tolerance_seconds = 15
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return [
+                {"resultType": "song", "title": "One", "videoId": "studio", "artists": [{"name": "Three Dog Night"}], "duration_seconds": 180, "album": {"name": "Three Dog Night"}},
+                {"resultType": "song", "title": "One (Live)", "videoId": "live", "artists": [{"name": "Three Dog Night"}], "duration_seconds": 178, "album": {"name": "Live in Concert"}},
+            ]
+
+    req_album = _live_album_request(album_name="Live in Concert")
+    handler._get_song_links(req_album, "Three Dog Night", "three dog night", FakeYTMusic())
+
+    assert req_album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=live"
+
+
+def test_youtube_fallback_passes_album_context_for_live_secondary_type(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler.config.duration_tolerance_seconds = 15
+
+    class EmptyYTMusic:
+        def search(self, query, filter, limit):
+            return []
+
+    monkeypatch.setattr(handler, "_yt_search", lambda query_text: [
+        {"title": "Three Dog Night - One (Live)", "link": "https://youtube.test/live", "duration": "3:00", "channel": {"name": "Three Dog Night"}},
+    ])
+    req_album = _live_album_request(album_name="Harmony Tour", album_secondary_types=["Live"])
+    handler._get_song_links_secondary(req_album, "Three Dog Night", "three dog night", EmptyYTMusic())
+
+    assert req_album["missing_tracks"][0]["link"] == "https://youtube.test/live"

@@ -1225,12 +1225,12 @@ def test_song_matcher_prefers_candidate_without_extra_version_words_when_scores_
     assert match["videoId"] == "studio"
 
 
-def test_song_matcher_still_accepts_live_only_candidate():
+def test_song_matcher_rejects_live_only_candidate_for_studio_request():
     search_results = [
         {"resultType": "song", "title": "Double E (Live)", "videoId": "live", "artists": [{"name": "Neil Young"}], "duration_seconds": 318},
     ]
     match = _matcher.song_matcher(85, "Neil Young", "neil young", "Double E", "double e", search_results, expected_duration_ms=318000)
-    assert match is not None
+    assert match is None
 
 
 @pytest.mark.parametrize("requested,candidate", [
@@ -1251,7 +1251,8 @@ def test_youtube_recording_gate_matches_ytmusic(requested, candidate, channel_on
     assert _matcher.song_matcher_yt(
         0, "Artist", f"Artist - {requested}", [item], trace=trace,
     ) is None
-    assert [entry["rejected_by"] for entry in trace] == ["version_gate"]
+    live_for_studio = _matcher._is_live_title(candidate) and not _matcher._is_live_title(requested)
+    assert [entry["rejected_by"] for entry in trace] == ["live_gate" if live_for_studio else "version_gate"]
 
 
 @pytest.mark.parametrize("title", ["Song (Solo Version)", "Song (Spanish Version)", "Song (Remix)", "Song - Live In Germany"])
@@ -1287,3 +1288,112 @@ def test_youtube_accepts_bounded_channel_credit(artist, credit):
 
 def test_youtube_artist_credit_does_not_join_separate_fields():
     assert not _matcher._artist_in_result("neil young", {"title": "Neil", "channel": "Young"})
+
+
+
+# --- live performances: never accepted for a studio request; preferred for a live request ---
+
+def _song(title, video_id, seconds, artists=("Three Dog Night",), album=None):
+    item = {"resultType": "song", "title": title, "videoId": video_id, "artists": [{"name": a} for a in artists], "duration_seconds": seconds}
+    if album is not None:
+        item["album"] = {"name": album}
+    return item
+
+
+def _three_dog_night(song_title, results, seconds=180, **kwargs):
+    return _matcher.song_matcher(85, "Three Dog Night", "three dog night", song_title, song_title.lower(), results,
+                                 expected_duration_ms=seconds * 1000, **kwargs)
+
+
+@pytest.mark.parametrize("title", [
+    "One (Live)", "One [Live]", "One (Live At The Forum)", "Can't Take My Eyes Off You (In Concert, May 25th, 1992)",
+    "Heart-Shaped Box (MTV Unplugged)", "Song (BBC Session)", "Song - Live at Wembley", "Song live at Wembley 1986",
+])
+def test_is_live_title_detects_live_performances(title):
+    assert _matcher._is_live_title(title)
+
+
+@pytest.mark.parametrize("title", ["Live and Let Die", "Live Forever", "Livin' on a Prayer", "One", "Alive", "Live Wire", "Songs Of Life (From \"The Jazz Singer\")"])
+def test_is_live_title_ignores_song_names_containing_live(title):
+    assert not _matcher._is_live_title(title)
+
+
+@pytest.mark.parametrize("album, live", [
+    ("Live in Concert", True), ("Greatest Hits Live", True), ("Super Hits (Live)", True),
+    ("Captured Live At The Forum", True), ("MTV Unplugged in New York", True), ("Live", True),
+    ("Live Through This", False), ("Live Forever", False), ("Three Dog Night", False), (None, False), ("", False),
+])
+def test_is_live_album(album, live):
+    assert _matcher._is_live_album(album) is live
+
+
+def test_song_matcher_picks_single_version_over_earlier_live_candidate():
+    # Replay of prod: "One (Live)" was downloaded for the 1968 studio album track.
+    results = [
+        _song("One (Single Version)", "single", 186, album="20th Century Masters: The Millennium Collection: Best Of Three Dog Night"),
+        _song("One (Live)", "live", 174, album="Live in Concert"),
+        _song("One (Live)", "live2", 195, album="Greatest Hits Live"),
+    ]
+    assert _three_dog_night("One", results, album_name="Three Dog Night")["videoId"] == "single"
+    assert _three_dog_night("One", list(reversed(results)), album_name="Three Dog Night")["videoId"] == "single"
+
+
+def test_song_matcher_rejects_live_candidates_for_studio_request_and_traces_live_gate():
+    trace = []
+    results = [_song("One (Live)", "live", 174, album="Live in Concert"), _song("One", "plain-on-live-album", 180, album="Greatest Hits Live")]
+    assert _three_dog_night("One", results, album_name="One", trace=trace) is None
+    assert [entry["rejected_by"] for entry in trace] == ["live_gate", "live_gate"]
+
+
+@pytest.mark.parametrize("kwargs, song_title", [
+    ({"album_name": "Three Dog Night"}, "One (live)"),
+    ({"album_name": "Live in Concert"}, "One"),
+    ({"album_name": "Harmony", "album_secondary_types": ["Live"]}, "One"),
+])
+def test_song_matcher_prefers_live_candidate_when_request_is_live(kwargs, song_title):
+    results = [_song("One", "studio", 180, album="Three Dog Night"), _song("One (Live)", "live", 178, album="Live in Concert")]
+    assert _three_dog_night(song_title, results, **kwargs)["videoId"] == "live"
+
+
+def test_song_matcher_down_weights_other_non_original_recordings_below_the_original():
+    results = [
+        _song("One (feat. London Symphony Orchestra)", "orchestra", 181, album="Three Dog Night with the London Symphony Orchestra"),
+        _song("One (Acoustic)", "acoustic", 180),
+        _song("One", "original", 179, album="Three Dog Night"),
+    ]
+    assert _three_dog_night("One", results)["videoId"] == "original"
+
+
+def test_song_matcher_still_accepts_lesser_non_original_when_it_is_the_only_candidate():
+    assert _three_dog_night("One", [_song("One (Acoustic)", "acoustic", 180)]) is not None
+
+
+def test_song_matcher_does_not_penalise_non_original_marker_the_request_asks_for():
+    results = [_song("One", "original", 180), _song("One (Acoustic)", "acoustic", 180)]
+    assert _three_dog_night("One (acoustic)", results)["videoId"] == "acoustic"
+
+
+def test_song_matcher_yt_rejects_live_upload_for_studio_request():
+    results = [
+        {"title": "Frankie Valli - Can't Take My Eyes Off You (Live)", "link": "https://live", "duration": "3:15", "channel": {"name": "Frankie Valli"}},
+        {"title": "Frankie Valli - Can't Take My Eyes Off You (Official Audio)", "link": "https://studio", "duration": "3:23", "channel": {"name": "RHINO"}},
+    ]
+    match = _matcher.song_matcher_yt(85, "Frankie Valli", "Frankie Valli - Can't Take My Eyes Off You", results, expected_duration_ms=203000)
+    assert match["link"] == "https://studio"
+    assert _matcher.song_matcher_yt(85, "Frankie Valli", "Frankie Valli - Can't Take My Eyes Off You", results[:1], expected_duration_ms=203000) is None
+
+
+def test_song_matcher_yt_accepts_live_upload_for_live_request():
+    results = [{"title": "Frankie Valli - Can't Take My Eyes Off You (Live)", "link": "https://live", "duration": "3:15", "channel": {"name": "Frankie Valli"}}]
+    match = _matcher.song_matcher_yt(85, "Frankie Valli", "Frankie Valli - Can't Take My Eyes Off You (Live)", results, expected_duration_ms=195000)
+    assert match["link"] == "https://live"
+
+
+def test_album_matcher_skips_live_album_for_studio_album_request():
+    results = [
+        {"type": "Album", "title": "Three Dog Night (Live)", "artists": [{"name": "Three Dog Night"}], "browseId": "live"},
+        {"type": "Album", "title": "Three Dog Night", "artists": [{"name": "Three Dog Night"}], "browseId": "studio"},
+    ]
+    match = _matcher.album_matcher(85, "Three Dog Night", "Three Dog Night", "three dog night", "three dog night", results)
+    assert match["browseId"] == "studio"
+    assert _matcher.album_matcher(85, "Three Dog Night", "Three Dog Night", "three dog night", "three dog night", results[:1]) is None

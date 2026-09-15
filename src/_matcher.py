@@ -308,6 +308,75 @@ def _without_artist_prefix(title, artist):
     return re.sub(r"^" + re.escape(artist) + r"\s+-\s+", "", title, count=1, flags=re.IGNORECASE)
 
 
+# Live performances are never acceptable stand-ins for a studio recording: a candidate is
+# live when a bracketed/dash group says so ("(Live)", "(BBC Session)"), the title uses a
+# live phrase ("Live at Wembley", "In Concert", "Unplugged"), or its album is a live album.
+_LIVE_PHRASE_RE = re.compile(r"\blive\s+(?:at|in|from|on)\b|\bin concert\b|\bunplugged\b")
+_LIVE_GROUP_RE = re.compile(r"\blive\b|\bconcert\b|\b(?:bbc|peel) sessions?\b")
+# Other non-original recordings rank below the original but remain acceptable when nothing
+# else matches; only words inside bracketed/dash groups count, never the song name itself.
+_NON_ORIGINAL_WORDS = {
+    "acoustic", "demo", "remix", "rerecorded", "rerecording", "orchestral", "orchestra", "symphonic",
+    "philharmonic", "stripped", "rehearsal", "alternate", "alternative", "early", "piano", "reimagined", "redux",
+}
+_NON_ORIGINAL_PENALTY = 10
+_MAX_NON_ORIGINAL_PENALTY = 20
+_STUDIO_FOR_LIVE_REQUEST_PENALTY = 15
+
+
+def _title_groups(text):
+    groups = _BRACKET_GROUP_RE.findall(text)
+    suffix = _DASH_SUFFIX_RE.search(text)
+    if suffix:
+        groups.append(suffix.group(1))
+    return groups
+
+
+def _is_live_title(title):
+    text = _normalized_text(title or "")
+    if _LIVE_PHRASE_RE.search(text):
+        return True
+    return any(_LIVE_GROUP_RE.search(group) for group in _title_groups(text))
+
+
+def _is_live_album(album_name):
+    text = _normalized_text(album_name or "")
+    if not text:
+        return False
+    return bool(re.search(r"\blive$", text)) or _is_live_title(text)
+
+
+def _request_is_live(song_title, album_name=None, album_secondary_types=None):
+    return (
+        _is_live_title(song_title)
+        or _is_live_album(album_name)
+        or any(str(kind).lower() == "live" for kind in (album_secondary_types or []))
+    )
+
+
+def _candidate_album_name(item):
+    album = item.get("album")
+    if isinstance(album, dict):
+        return album.get("name")
+    return album if isinstance(album, str) else None
+
+
+def _non_original_penalty(requested_title, candidate_title):
+    """Ranking penalty for recording-changing words the candidate adds (acoustic, demo, orchestra...)."""
+    requested_words = set(_WORD_RE.findall(_normalized_text(requested_title or "").replace("re-record", "rerecord")))
+    added = set()
+    for group in _title_groups(_normalized_text(candidate_title or "").replace("re-record", "rerecord")):
+        added.update(word for word in _WORD_RE.findall(group) if word in _NON_ORIGINAL_WORDS and word not in requested_words)
+    return min(len(added) * _NON_ORIGINAL_PENALTY, _MAX_NON_ORIGINAL_PENALTY)
+
+
+def _recording_rank_penalty(requested_title, candidate_title, requested_live, candidate_live):
+    penalty = _non_original_penalty(requested_title, candidate_title)
+    if requested_live and not candidate_live:
+        penalty += _STUDIO_FOR_LIVE_REQUEST_PENALTY
+    return penalty
+
+
 def _base_title(text):
     text = re.sub(r"\s*&\s*", " and ", (text or "").lower())
     text = re.sub(r"[^\w\s]", " ", remove_song_keywords(text))
@@ -321,14 +390,18 @@ def _same_base_title(left, right):
 
 
 def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, cleaned_album, search_results,
-                  item_wanted_type="Album", trace=None):
+                  item_wanted_type="Album", trace=None, album_secondary_types=None):
     if not search_results:
         return None
     best_match_rating = 0
     best_match_item = None
+    requested_live = _request_is_live("", album_name, album_secondary_types)
     for item in search_results:
         if item["type"] != item_wanted_type:
             _append_trace(trace, "ytmusic", item, 0, None, "not_song_type")
+            continue
+        if _is_live_album(item.get("title")) and not requested_live:
+            _append_trace(trace, "ytmusic", item, 0, None, "live_gate")
             continue
         raw_album_match_ratio = fuzz.ratio(album_name, item["title"])
         artist_names = [entry["name"] for entry in item.get("artists", [])]
@@ -354,13 +427,14 @@ def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, clean
 
 
 def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
-                 item_wanted_type="song", expected_duration_ms=0, duration_tolerance_seconds=15, trace=None):
+                 item_wanted_type="song", expected_duration_ms=0, duration_tolerance_seconds=15, trace=None,
+                 album_name=None, album_secondary_types=None):
     if not search_results:
         return None
     best_match_rating = 0
     best_match_item = None
     best_match_key = None
-    requested_words = set(_WORD_RE.findall(cleaned_song_title.lower()))
+    requested_live = _request_is_live(song_title, album_name, album_secondary_types)
     cleaned_song_title_minus_keywords = remove_song_keywords(cleaned_song_title)
     threshold = _normalize_min_ratio(minimum_match_ratio)
 
@@ -368,6 +442,10 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         candidate_seconds = item.get("duration_seconds") or 0
         if item["resultType"] != item_wanted_type:
             _append_trace(trace, "ytmusic", item, candidate_seconds, None, "not_song_type")
+            continue
+        candidate_live = _is_live_title(item["title"]) or _is_live_album(_candidate_album_name(item))
+        if candidate_live and not requested_live:
+            _append_trace(trace, "ytmusic", item, candidate_seconds, None, "live_gate")
             continue
         if _recording_mismatch(song_title, item["title"]):
             _append_trace(trace, "ytmusic", item, candidate_seconds, None, "version_gate")
@@ -395,10 +473,10 @@ def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleane
         cleaned_yt_title_minus_keywords = remove_song_keywords(cleaned_yt_song_title)
         cleaned_song_title_minus_keywords_ratio = fuzz.ratio(cleaned_song_title_minus_keywords, cleaned_yt_title_minus_keywords)
         score = (raw_artist_match_ratio + cleaned_artist_match_ratio + cleaned_song_title_ratio + cleaned_song_title_minus_keywords_ratio) / 4
-        # Among equal scores, a candidate adding version words the request lacks ("Live",
-        # "Demo") ranks below one that doesn't, whatever its title length.
-        extra_version_words = len((_VERSION_TYPE_WORDS & set(_WORD_RE.findall(cleaned_yt_song_title))) - requested_words)
-        match_key = (score, -extra_version_words, artist_similarity + title_similarity)
+        # Acceptance uses the raw score; ranking subtracts penalties for non-original recordings
+        # (acoustic, orchestra...) and for studio takes when a live recording was requested.
+        penalty = _recording_rank_penalty(song_title, item["title"], requested_live, candidate_live)
+        match_key = (score - penalty, -penalty, artist_similarity + title_similarity)
         _append_trace(trace, "ytmusic", item, candidate_seconds, score, "accepted" if score >= threshold else "below_threshold")
         if best_match_key is None or match_key > best_match_key:
             best_match_key = match_key
@@ -436,17 +514,20 @@ def _yt_title_score(query_text, cleaned_query, cleaned_query_mk, candidate_text)
 
 
 def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
-                    expected_duration_ms=0, duration_tolerance_seconds=15, trace=None):
+                    expected_duration_ms=0, duration_tolerance_seconds=15, trace=None,
+                    album_name=None, album_secondary_types=None):
     if not search_results:
         return None
     best_match_rating = 0
     best_match_item = None
+    best_match_key = None
     cleaned_query_text = _general.string_cleaner(query_text)
     cleaned_query_text_minus_keywords = remove_song_keywords(cleaned_query_text)
     cleaned_artist = _general.string_cleaner(artist).lower() if artist else ""
     threshold = _normalize_min_ratio(minimum_match_ratio)
     gate_cleared = []
     requested_title = _without_artist_prefix(query_text, artist)
+    requested_live = _request_is_live(requested_title, album_name, album_secondary_types)
 
     for item in search_results:
         title = item.get("title", "")
@@ -454,6 +535,10 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
         candidate_seconds = _parse_duration_string(raw_duration) if isinstance(raw_duration, str) else int(raw_duration or 0)
         if not _artist_in_result(cleaned_artist, item):
             _append_trace(trace, "yt", item, candidate_seconds, None, "artist_gate")
+            continue
+        candidate_live = _is_live_title(_without_artist_prefix(title, artist))
+        if candidate_live and not requested_live:
+            _append_trace(trace, "yt", item, candidate_seconds, None, "live_gate")
             continue
         if _recording_mismatch(requested_title, _without_artist_prefix(title, artist)):
             _append_trace(trace, "yt", item, candidate_seconds, None, "version_gate")
@@ -463,11 +548,14 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
             continue
         score = _yt_title_score(query_text, cleaned_query_text, cleaned_query_text_minus_keywords, title)
         _append_trace(trace, "yt", item, candidate_seconds, score, "accepted" if score >= threshold else "below_threshold")
-        gate_cleared.append((item, title, candidate_seconds))
-        if score > best_match_rating:
+        penalty = _recording_rank_penalty(requested_title, _without_artist_prefix(title, artist), requested_live, candidate_live)
+        gate_cleared.append((item, title, candidate_seconds, penalty))
+        match_key = (score - penalty, -penalty)
+        if best_match_key is None or match_key > best_match_key:
+            best_match_key = match_key
             best_match_rating = score
             best_match_item = item
-            if score == 100:
+            if match_key == (100, 0):
                 break
 
     match = _best_match_or_none(best_match_rating, minimum_match_ratio, best_match_item)
@@ -483,16 +571,19 @@ def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
         return None
     fb_rating = 0
     fb_item = None
-    for item, title, candidate_seconds in gate_cleared:
+    fb_key = None
+    for item, title, candidate_seconds, penalty in gate_cleared:
         channel = _channel_name(item)
         if not channel or not _artist_credited(cleaned_artist, [_youtube_channel_credit(channel)]):
             continue
         augmented = f"{channel} - {title}"
         score = _yt_title_score(query_text, cleaned_query_text, cleaned_query_text_minus_keywords, augmented)
         _append_trace(trace, "yt-channel", item, candidate_seconds, score, "accepted" if score >= threshold else "below_threshold")
-        if score > fb_rating:
+        match_key = (score - penalty, -penalty)
+        if fb_key is None or match_key > fb_key:
+            fb_key = match_key
             fb_rating = score
             fb_item = item
-            if score == 100:
+            if match_key == (100, 0):
                 break
     return _best_match_or_none(fb_rating, minimum_match_ratio, fb_item)
