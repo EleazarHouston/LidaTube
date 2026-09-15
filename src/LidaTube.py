@@ -540,6 +540,7 @@ class DataHandler:
                             "album_release_id": album_release_id,
                             "album_genres": ", ".join(album["genres"]),
                             "album_secondary_types": list(album.get("secondaryTypes") or []),
+                            "artist_genres": ", ".join(artist.get("genres") or []),
                             "track_count": 0,
                             "missing_count": 0,
                             "missing_tracks": [],
@@ -1394,6 +1395,11 @@ class DataHandler:
             if override:
                 self._set_track_link(track, override["forced_url"], "Manual override", "yt")
 
+    @staticmethod
+    def _search_genres(req_album):
+        """Album genres with the artist's genres as a fallback; Lidarr often leaves album genres empty."""
+        return ", ".join(value for value in (req_album.get("album_genres"), req_album.get("artist_genres")) if value)
+
     def _count_found_links(self, req_album):
         return sum(1 for x in req_album["missing_tracks"] if x["link"] != "")
 
@@ -1558,7 +1564,8 @@ class DataHandler:
                     song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
                                                        expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace,
                                                        album_name=req_album.get("album_name"), album_secondary_types=req_album.get("album_secondary_types"),
-                                                       extended_duration_tolerance_seconds=self.config.extended_duration_tolerance_seconds)
+                                                       extended_duration_tolerance_seconds=self.config.extended_duration_tolerance_seconds,
+                                                       album_genres=self._search_genres(req_album))
                     if song_match:
                         self.general_logger.warning(f'Track matched: "{song_title}" -> "{song_match["title"]}"')
                         self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"], "ytmusic")
@@ -1588,7 +1595,8 @@ class DataHandler:
                     song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
                                                        expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace,
                                                        album_name=req_album.get("album_name"), album_secondary_types=req_album.get("album_secondary_types"),
-                                                       extended_duration_tolerance_seconds=self.config.extended_duration_tolerance_seconds)
+                                                       extended_duration_tolerance_seconds=self.config.extended_duration_tolerance_seconds,
+                                                       album_genres=self._search_genres(req_album))
                     if song_match:
                         self.general_logger.warning(f'Secondary YTMusic match: "{song_title}" -> "{song_match["title"]}"')
                         self._set_track_link_from_video_id(missing_track, song_match["videoId"], song_match["title"], "ytmusic_secondary")
@@ -1600,7 +1608,8 @@ class DataHandler:
                         song_match = _matcher.song_matcher_yt(self.config.minimum_match_ratio, artist, query_text, yt_results,
                                                               expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace,
                                                               album_name=req_album.get("album_name"), album_secondary_types=req_album.get("album_secondary_types"),
-                                                              extended_duration_tolerance_seconds=self.config.extended_duration_tolerance_seconds)
+                                                              extended_duration_tolerance_seconds=self.config.extended_duration_tolerance_seconds,
+                                                              album_genres=self._search_genres(req_album))
                         if song_match:
                             if self.config.secondary_search == "YTS":
                                 self.general_logger.warning(f'YTS match: "{song_title}" -> "{song_match["title"]}"')

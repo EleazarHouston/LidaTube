@@ -311,7 +311,7 @@ def _without_artist_prefix(title, artist):
 # Live performances are never acceptable stand-ins for a studio recording: a candidate is
 # live when a bracketed/dash group says so ("(Live)", "(BBC Session)"), the title uses a
 # live phrase ("Live at Wembley", "In Concert", "Unplugged"), or its album is a live album.
-_LIVE_PHRASE_RE = re.compile(r"\blive\s+(?:at|in|from|on)\b|\bin concert\b|\bunplugged\b")
+_LIVE_PHRASE_RE = re.compile(r"\blive\s+(?:at|in|from|on|sessions?)\b|\bin concert\b|\bunplugged\b")
 _LIVE_GROUP_RE = re.compile(r"\blive\b|\bconcert\b|\b(?:bbc|peel) sessions?\b")
 # Other non-original recordings rank below the original but remain acceptable when nothing
 # else matches; only words inside bracketed/dash groups count, never the song name itself.
@@ -431,6 +431,20 @@ _LENGTH_CHANGING_WORDS = {
 }
 
 
+# Classical works are recorded by many performers at different tempos, so a longer duration
+# gap usually means a different performance rather than a Lidarr metadata error. Genres are
+# often missing in Lidarr, so catalogue numbers and key signatures in the title count too.
+_CLASSICAL_TITLE_RE = re.compile(
+    r"\b(?:op|opus)\.?\s*\d|\bbwv\s*\d|\bhwv\s*\d|\brv\s*\d|\bhob\.?\s*[ivx]+|\bk\.?\s*\d{2,3}[a-z]?\b|\bd\.?\s*\d{3}\b"
+    r"|\bin [a-g](?:[- ](?:flat|sharp))? (?:major|minor)\b"
+)
+
+
+def _looks_classical(song_title, genres):
+    genre_text = ", ".join(genres) if isinstance(genres, (list, tuple)) else str(genres or "")
+    return "classical" in genre_text.lower() or bool(_CLASSICAL_TITLE_RE.search(_normalized_text(song_title or "")))
+
+
 def _extended_window_applies(expected_ms, tolerance_seconds, extended_tolerance_seconds):
     numbers = (int, float)
     return (
@@ -507,12 +521,17 @@ def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, clean
 
 def song_matcher(minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
                  item_wanted_type="song", expected_duration_ms=0, duration_tolerance_seconds=15, trace=None,
-                 album_name=None, album_secondary_types=None, extended_duration_tolerance_seconds=None):
+                 album_name=None, album_secondary_types=None, extended_duration_tolerance_seconds=None, album_genres=None):
     arguments = (minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
                  item_wanted_type, expected_duration_ms)
     pass_trace = []
     match = _song_matcher_pass(*arguments, duration_tolerance_seconds, pass_trace, album_name, album_secondary_types)
-    if match is None and _extended_window_applies(expected_duration_ms, duration_tolerance_seconds, extended_duration_tolerance_seconds):
+    if (
+        match is None
+        and _extended_window_applies(expected_duration_ms, duration_tolerance_seconds, extended_duration_tolerance_seconds)
+        and not _request_is_live(song_title, album_name, album_secondary_types)
+        and not _looks_classical(song_title, album_genres)
+    ):
         pass_trace = []
         match = _song_matcher_pass(*arguments, extended_duration_tolerance_seconds, pass_trace, album_name, album_secondary_types,
                                    normal_tolerance_seconds=duration_tolerance_seconds)
@@ -622,11 +641,17 @@ def _yt_title_score(query_text, cleaned_query, cleaned_query_mk, candidate_text)
 
 def song_matcher_yt(minimum_match_ratio, artist, query_text, search_results,
                     expected_duration_ms=0, duration_tolerance_seconds=15, trace=None,
-                    album_name=None, album_secondary_types=None, extended_duration_tolerance_seconds=None):
+                    album_name=None, album_secondary_types=None, extended_duration_tolerance_seconds=None, album_genres=None):
     arguments = (minimum_match_ratio, artist, query_text, search_results, expected_duration_ms)
     pass_trace = []
     match = _song_matcher_yt_pass(*arguments, duration_tolerance_seconds, pass_trace, album_name, album_secondary_types)
-    if match is None and _extended_window_applies(expected_duration_ms, duration_tolerance_seconds, extended_duration_tolerance_seconds):
+    requested_title = _without_artist_prefix(query_text, artist)
+    if (
+        match is None
+        and _extended_window_applies(expected_duration_ms, duration_tolerance_seconds, extended_duration_tolerance_seconds)
+        and not _request_is_live(requested_title, album_name, album_secondary_types)
+        and not _looks_classical(requested_title, album_genres)
+    ):
         pass_trace = []
         match = _song_matcher_yt_pass(*arguments, extended_duration_tolerance_seconds, pass_trace, album_name, album_secondary_types,
                                       normal_tolerance_seconds=duration_tolerance_seconds)

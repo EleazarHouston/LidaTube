@@ -386,7 +386,7 @@ def test_get_wanted_albums_from_lidarr_populates_missing_tracks(lidatube_module,
         return FakeResponse(200, tracks_by_album[album_id])
 
     handler.lidarr_client.get_artists_page.return_value = FakeResponse(200, [
-        {"id": 10, "artistName": "Alpha", "path": "/music/Alpha"},
+        {"id": 10, "artistName": "Alpha", "path": "/music/Alpha", "genres": ["Classical", "Romantic"]},
         {"id": 20, "artistName": "Zulu", "path": "/music/Zulu"},
     ])
     handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
@@ -405,12 +405,14 @@ def test_get_wanted_albums_from_lidarr_populates_missing_tracks(lidatube_module,
     assert alpha_album["missing_count"] == 1
     assert alpha_album["missing_tracks"][0]["track_title"] == "Song A"
     assert alpha_album["album_secondary_types"] == ["Live"]
+    assert alpha_album["artist_genres"] == "Classical, Romantic"
 
     assert zulu_album["album_name"] == "Zulu+Album!"
     assert zulu_album["track_count"] == 1
     assert zulu_album["missing_count"] == 1
     assert zulu_album["missing_tracks"][0]["track_title"] == "Song Z"
     assert zulu_album["album_secondary_types"] == []
+    assert zulu_album["artist_genres"] == ""
 
     assert emit_mock.call_args_list[-1].args[0] == "lidarr_update"
     assert emit_mock.call_args_list[-1].args[1]["status"] == "complete"
@@ -2222,3 +2224,42 @@ def test_song_searches_pass_extended_duration_tolerance_from_config(lidatube_mod
     handler._get_song_links(req_album, "Frankie Valli", "frankie valli", FakeYTMusic())
 
     assert req_album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=original"
+
+
+def test_song_searches_pass_album_genres_so_classical_skips_extended_duration_window(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    handler.config.duration_tolerance_seconds = 15
+    handler.config.extended_duration_tolerance_seconds = 30
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return [{"resultType": "song", "title": "Widmung", "videoId": "other-performance",
+                     "artists": [{"name": "Robert Schumann"}], "duration_seconds": 242}]
+
+    req_album = {
+        "artist": "Robert Schumann", "album_name": "Piano Works", "album_secondary_types": [], "album_genres": "Classical",
+        "missing_tracks": [{"artist": "Robert Schumann", "track_title": "Widmung", "link": "", "title_of_link": "", "duration_ms": 270000}],
+    }
+    handler._get_song_links(req_album, "Robert Schumann", "robert schumann", FakeYTMusic())
+
+    assert req_album["missing_tracks"][0]["link"] == ""
+
+
+
+def test_song_searches_use_artist_genres_when_album_genres_are_missing(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    handler.config.duration_tolerance_seconds = 15
+    handler.config.extended_duration_tolerance_seconds = 30
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return [{"resultType": "song", "title": "Widmung", "videoId": "other-performance",
+                     "artists": [{"name": "Robert Schumann"}], "duration_seconds": 242}]
+
+    req_album = {
+        "artist": "Robert Schumann", "album_name": "Piano Works", "album_secondary_types": [], "album_genres": "", "artist_genres": "Classical",
+        "missing_tracks": [{"artist": "Robert Schumann", "track_title": "Widmung", "link": "", "title_of_link": "", "duration_ms": 270000}],
+    }
+    handler._get_song_links(req_album, "Robert Schumann", "robert schumann", FakeYTMusic())
+
+    assert req_album["missing_tracks"][0]["link"] == ""

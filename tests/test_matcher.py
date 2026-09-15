@@ -1541,3 +1541,45 @@ def test_song_matcher_extended_window_accepts_prod_duration_mismatches():
                                  duration_tolerance_seconds=15, extended_duration_tolerance_seconds=30)["videoId"] == "doom"
     valli = [_valli_song("Can't Take My Eyes off You", "original", 204)]
     assert _valli(valli, 178, extended_duration_tolerance_seconds=30)["videoId"] == "original"
+
+
+@pytest.mark.parametrize("album", ["iTunes Live Sessions", "Live Sessions EP", "Spotify Session (Live)"])
+def test_is_live_album_detects_live_session_albums(album):
+    assert _matcher._is_live_album(album)
+
+
+# --- extended window replay (prod, Sep 15): live requests and classical works recovered different performances ---
+
+@pytest.mark.parametrize("artist, song_title, expected_seconds, candidate_title, candidate_seconds, kwargs", [
+    ("Sara Bareilles", "Many the Miles", 295, "Many the Miles", 312, {"album_name": "iTunes Live Sessions"}),
+    ("R.E.M.", "Belong (live)", 280, "Belong (Live)", 250, {"album_name": "Nightswimming"}),
+    ("Paul Brady", "The World Is What You Make It", 294, "The World is What You Make It", 272,
+     {"album_name": "The Vicar St. Sessions Vol. 1", "album_secondary_types": ["Live"]}),
+])
+def test_song_matcher_extended_window_skips_live_requests(artist, song_title, expected_seconds, candidate_title, candidate_seconds, kwargs):
+    results = [{"resultType": "song", "title": candidate_title, "videoId": "different-performance", "artists": [{"name": artist}], "duration_seconds": candidate_seconds}]
+    match = _matcher.song_matcher(85, artist, _matcher._normalized_text(artist), song_title, _matcher._normalized_text(song_title), results,
+                                  expected_duration_ms=expected_seconds * 1000, duration_tolerance_seconds=15, extended_duration_tolerance_seconds=30, **kwargs)
+    assert match is None
+
+
+@pytest.mark.parametrize("song_title, expected_seconds, candidate_title, candidate_seconds, kwargs", [
+    ("Widmung", 270, "Widmung", 242, {"album_name": "Piano Works", "album_genres": "Classical, Romantic"}),
+    ("Kreisleriana Op. 16: II. Sehr innig und nicht zu rasch", 637, "Kreisleriana, Op. 16: II. Sehr innig und nicht zu rasch", 614, {"album_name": "Schumann"}),
+    ("Symphony No. 40 in G minor, K. 550: I. Molto allegro", 480, "Symphony No. 40 in G Minor, K. 550: I. Molto allegro", 500, {}),
+    ("Cello Suite No. 1 in G major, BWV 1007: I. Prélude", 150, "Cello Suite No. 1 in G Major, BWV 1007: I. Prelude", 170, {}),
+])
+def test_song_matcher_extended_window_skips_classical_works(song_title, expected_seconds, candidate_title, candidate_seconds, kwargs):
+    results = [{"resultType": "song", "title": candidate_title, "videoId": "other-performance", "artists": [{"name": "Robert Schumann"}], "duration_seconds": candidate_seconds}]
+    match = _matcher.song_matcher(85, "Robert Schumann", "robert schumann", song_title, _matcher._normalized_text(song_title), results,
+                                  expected_duration_ms=expected_seconds * 1000, duration_tolerance_seconds=15, extended_duration_tolerance_seconds=30, **kwargs)
+    assert match is None
+
+
+def test_song_matcher_yt_extended_window_skips_live_and_classical_requests():
+    live = [{"title": "Paul Brady - The World Is What You Make It", "link": "https://studio", "duration": "4:32", "channel": {"name": "Paul Brady"}}]
+    assert _matcher.song_matcher_yt(85, "Paul Brady", "Paul Brady - The World Is What You Make It", live, expected_duration_ms=294000,
+                                    duration_tolerance_seconds=15, extended_duration_tolerance_seconds=30, album_secondary_types=["Live"]) is None
+    classical = [{"title": "Robert Schumann - Widmung", "link": "https://other", "duration": "4:02", "channel": {"name": "Robert Schumann"}}]
+    assert _matcher.song_matcher_yt(85, "Robert Schumann", "Robert Schumann - Widmung", classical, expected_duration_ms=270000,
+                                    duration_tolerance_seconds=15, extended_duration_tolerance_seconds=30, album_genres="Classical") is None
