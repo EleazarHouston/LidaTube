@@ -1879,7 +1879,10 @@ def stop_ytdlp():
 
 @socketio.on("reset_ytdlp")
 def reset_ytdlp():
-    data_handler.reset_ytdlp()
+    # Clearing a large queue takes minutes of DB work; keep it off the gevent worker so the
+    # UI stays responsive and gunicorn does not kill the worker for missing its heartbeat.
+    thread = threading.Thread(target=data_handler.reset_ytdlp, name="Reset_Thread", daemon=True)
+    thread.start()
 
 
 @socketio.on("add_to_download_list")

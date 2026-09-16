@@ -97,6 +97,8 @@ class Store:
     """SQLite-backed persistence for sessions, queued albums, results, and overrides."""
 
     QUEUE_STATUSES = ("pending", "in_progress", "done", "error")
+    # Clearing a large queue costs one fsync per commit, so delete in few, large chunks.
+    QUEUE_DELETE_CHUNK = 2000
 
     def __init__(self, path):
         self.path = os.fspath(path)
@@ -118,7 +120,14 @@ class Store:
     def _initialize(self):
         with _DB_LOCK:
             self._connection.execute("PRAGMA journal_mode=WAL")
+            # NORMAL is the usual companion to WAL: durable across application crashes,
+            # only at risk of losing the last commits if the machine loses power, and it
+            # avoids an fsync per commit while bulk-deleting a queue.
+            self._connection.execute("PRAGMA synchronous=NORMAL")
             self._connection.execute("PRAGMA foreign_keys=ON")
+            # Long-lived readers can block automatic checkpoints until the WAL is huge,
+            # which makes every later commit slow; start each run from a truncated WAL.
+            self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             self._migrate()
             # A process restart has no active worker capable of completing a run.
             self._connection.execute(
@@ -329,14 +338,14 @@ class Store:
             self._connection.commit()
             return cursor.rowcount > 0
 
-    def clear_queue(self, session_id, chunk_size=500, on_chunk=None):
+    def clear_queue(self, session_id, chunk_size=None, on_chunk=None):
         """Delete a session's queue in committed chunks.
 
         One DELETE over a large queue holds the process-wide lock for minutes on a
         multi-gigabyte database, which starves the download threads and lets gunicorn
         SIGKILL the worker. `on_chunk` runs between chunks so the caller can yield.
         """
-        chunk_size = max(1, int(chunk_size))
+        chunk_size = self.QUEUE_DELETE_CHUNK if chunk_size is None else max(1, int(chunk_size))
         removed = 0
         while True:
             with _DB_LOCK:

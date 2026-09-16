@@ -334,3 +334,50 @@ def test_track_results_are_indexed_by_session(tmp_path):
         "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM track_results WHERE session_id = 1") for part in row)
     assert "idx_track_results_session_id" in plan
     store.close()
+
+
+def test_store_uses_normal_synchronous_and_truncates_the_wal_on_startup(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "lidatube.db"
+    store = Store(path)
+    session_id = store.start_session(requested_count=1)
+    assert store._connection.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL
+    store.close()
+
+    # Grow a WAL the way prod does: a connection that never checkpoints, left open so
+    # closing it cannot clean the WAL up.
+    keeper = sqlite3.connect(path)
+    keeper.execute("PRAGMA journal_mode=WAL")
+    keeper.execute("PRAGMA wal_autocheckpoint=0")
+    payload = "x" * 400
+    keeper.executemany(
+        "INSERT INTO queue_items (session_id, position, album_json, status, updated_at)"
+        " VALUES (?, ?, ?, 'pending', 'now')",
+        [(session_id, n, payload) for n in range(5000)],
+    )
+    keeper.commit()
+    wal = path.with_name(path.name + "-wal")
+    wal_before = wal.stat().st_size
+    assert wal_before > 50_000
+
+    reopened = Store(path)
+
+    assert wal.stat().st_size < wal_before
+    assert reopened.queue_counts(session_id)["total"] == 5000
+    reopened.close()
+    keeper.close()
+
+
+def test_clear_queue_defaults_to_the_bulk_chunk_size(tmp_path):
+    store = Store(tmp_path / "lidatube.db")
+    assert Store.QUEUE_DELETE_CHUNK >= 2000
+    session_id = store.start_session(requested_count=3)
+    store.enqueue_items(session_id, [{"artist": "A", "album_name": f"Album {n}", "missing_tracks": []} for n in range(3)])
+    chunks = []
+
+    store.clear_queue(session_id, on_chunk=lambda: chunks.append(1))
+
+    assert store.queue_counts(session_id)["total"] == 0
+    assert chunks == []  # one commit for a small queue, no needless yielding
+    store.close()

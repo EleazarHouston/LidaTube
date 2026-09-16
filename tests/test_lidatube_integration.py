@@ -2314,3 +2314,26 @@ def test_reset_ytdlp_lets_the_event_loop_run_while_clearing_the_queue(lidatube_m
     assert callable(kwargs.get("on_chunk"))
     kwargs["on_chunk"]()
     assert slept, "on_chunk must yield to the event loop"
+
+
+def test_reset_socket_handler_runs_off_the_event_loop(lidatube_module, monkeypatch):
+    """Clearing a large queue must not run inside the gevent worker: it starved /api for ~5min."""
+    started = []
+
+    class FakeThread:
+        def __init__(self, target=None, name=None, daemon=None, **kwargs):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            started.append(self.target)
+
+    monkeypatch.setattr(lidatube_module.threading, "Thread", FakeThread)
+    reset_called = []
+    monkeypatch.setattr(lidatube_module.data_handler, "reset_ytdlp", lambda: reset_called.append(1))
+
+    lidatube_module.reset_ytdlp()
+
+    assert len(started) == 1 and reset_called == []
+    started[0]()
+    assert reset_called == [1]
