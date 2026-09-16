@@ -284,18 +284,27 @@ class Store:
             "total": 0,
         }
 
-    def resumable_session(self):
-        """Return the newest unfinished session with persisted work remaining."""
+    def resumable_session(self, include_user_stopped=False):
+        """Return the newest unfinished session with persisted work remaining.
+
+        A session the user stopped is only offered when asked for explicitly: resuming it
+        automatically after a crash would restart work the user had just halted.
+        """
+        statuses = ["running", "interrupted", "failed"]
+        if include_user_stopped:
+            statuses.append("stopped")
+        placeholders = ", ".join("?" for _ in statuses)
         return self._fetchone(
-            """
+            f"""
             SELECT s.* FROM sessions AS s
-            WHERE s.status IN ('running', 'interrupted', 'stopped', 'failed')
+            WHERE s.status IN ({placeholders})
               AND EXISTS (
                   SELECT 1 FROM queue_items AS q
                   WHERE q.session_id = s.id AND q.status IN ('pending', 'in_progress')
               )
             ORDER BY s.started_at DESC, s.id DESC LIMIT 1
-            """
+            """,
+            statuses,
         )
 
     def resume_session(self, session_id):

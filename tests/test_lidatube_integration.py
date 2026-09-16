@@ -2263,3 +2263,35 @@ def test_song_searches_use_artist_genres_when_album_genres_are_missing(lidatube_
     handler._get_song_links(req_album, "Robert Schumann", "robert schumann", FakeYTMusic())
 
     assert req_album["missing_tracks"][0]["link"] == ""
+
+
+def test_stop_ytdlp_persists_the_stop_so_a_crash_does_not_auto_resume(lidatube_module, monkeypatch, tmp_path):
+    """A worker killed after the user pressed Stop must not resume on restart (POLA)."""
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    store = Store(tmp_path / "lidatube.db")
+    handler.store = store
+    session_id = store.start_session(requested_count=1)
+    store.enqueue_items(session_id, [{"artist": "A", "album_name": "B", "missing_tracks": []}])
+    handler.current_session_id = session_id
+    handler.ytdlp_in_progress_flag = True
+
+    handler.stop_ytdlp()
+
+    assert store.list_sessions(10, 0)[0]["status"] == "stopped"
+
+    # Simulate the SIGKILL + restart: a fresh handler auto-resumes only crashed work.
+    restarted = build_data_handler(lidatube_module)
+    restarted.store = Store(tmp_path / "lidatube.db")
+    restarted.config.auto_resume = True
+    started = []
+    monkeypatch.setattr(restarted, "_start_queue_thread", lambda sid: started.append(sid) or True)
+
+    restarted._auto_resume_if_available()
+    assert started == []
+
+    # The user can still resume explicitly.
+    assert restarted.resume_ytdlp(emit=False) is True
+    assert started == [session_id]
+    restarted.store.close()
+    store.close()

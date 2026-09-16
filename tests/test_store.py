@@ -1,3 +1,5 @@
+import pytest
+
 from store import Store
 
 
@@ -249,3 +251,40 @@ def test_store_rolls_back_failed_migration_and_can_retry(tmp_path, monkeypatch):
     store = Store(path)
     assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 2
     store.close()
+
+
+def test_resumable_session_skips_user_stopped_sessions_by_default(tmp_path):
+    store = Store(tmp_path / "lidatube.db")
+    session_id = store.start_session(requested_count=1)
+    store.enqueue_items(session_id, [{"artist": "A", "album_name": "B", "missing_tracks": []}])
+    store.finish_session(session_id, "stopped")
+
+    assert store.resumable_session() is None
+    resumable = store.resumable_session(include_user_stopped=True)
+    assert resumable is not None and resumable["id"] == session_id
+    store.close()
+
+
+@pytest.mark.parametrize("status", ["running", "interrupted", "failed"])
+def test_resumable_session_still_offers_crashed_sessions(tmp_path, status):
+    store = Store(tmp_path / "lidatube.db")
+    session_id = store.start_session(requested_count=1)
+    store.enqueue_items(session_id, [{"artist": "A", "album_name": "B", "missing_tracks": []}])
+    store.finish_session(session_id, status)
+
+    assert store.resumable_session()["id"] == session_id
+    store.close()
+
+
+def test_stopped_status_survives_a_restart(tmp_path):
+    path = tmp_path / "lidatube.db"
+    store = Store(path)
+    session_id = store.start_session(requested_count=1)
+    store.enqueue_items(session_id, [{"artist": "A", "album_name": "B", "missing_tracks": []}])
+    store.finish_session(session_id, "stopped")
+    store.close()
+
+    restarted = Store(path)
+    assert restarted.list_sessions(10, 0)[0]["status"] == "stopped"
+    assert restarted.resumable_session() is None
+    restarted.close()

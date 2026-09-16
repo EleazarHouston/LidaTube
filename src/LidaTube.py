@@ -838,8 +838,9 @@ class DataHandler:
     # --- Download queue ---
 
     def _auto_resume_if_available(self):
+        # Crash recovery only: a session the user stopped stays stopped until they resume it.
         if getattr(self.config, "auto_resume", True):
-            self.resume_ytdlp(emit=False)
+            self.resume_ytdlp(emit=False, include_user_stopped=False)
 
     def _start_queue_thread(self, session_id):
         if self.ytdlp_in_progress_flag:
@@ -857,10 +858,10 @@ class DataHandler:
         thread.start()
         return True
 
-    def resume_ytdlp(self, emit=True):
+    def resume_ytdlp(self, emit=True, include_user_stopped=True):
         if self.ytdlp_in_progress_flag:
             return False
-        session = self.store.resumable_session()
+        session = self.store.resumable_session(include_user_stopped=include_user_stopped)
         if session is None:
             return False
         self.batch_number = 0
@@ -1160,6 +1161,11 @@ class DataHandler:
     def stop_ytdlp(self):
         try:
             self.ytdlp_stop_event.set()
+            # Persist the stop before unwinding: if the worker is killed before the queue
+            # thread finishes, the session must still read as stopped and not auto-resume.
+            session_id = self.current_session_id or self.queue_progress.get("session_id")
+            if session_id is not None and getattr(self, "store", None) is not None:
+                self.store.finish_session(session_id, "stopped")
             for future in self.ytdlp_futures:
                 if not future.done():
                     future.cancel()
