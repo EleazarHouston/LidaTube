@@ -86,6 +86,10 @@ _MIGRATIONS = (
         created_at TEXT NOT NULL
     );
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_track_results_session_id
+        ON track_results(session_id);
+    """,
 )
 
 
@@ -325,13 +329,29 @@ class Store:
             self._connection.commit()
             return cursor.rowcount > 0
 
-    def clear_queue(self, session_id):
-        with _DB_LOCK:
-            cursor = self._connection.execute(
-                "DELETE FROM queue_items WHERE session_id = ?", (session_id,)
-            )
-            self._connection.commit()
-            return cursor.rowcount
+    def clear_queue(self, session_id, chunk_size=500, on_chunk=None):
+        """Delete a session's queue in committed chunks.
+
+        One DELETE over a large queue holds the process-wide lock for minutes on a
+        multi-gigabyte database, which starves the download threads and lets gunicorn
+        SIGKILL the worker. `on_chunk` runs between chunks so the caller can yield.
+        """
+        chunk_size = max(1, int(chunk_size))
+        removed = 0
+        while True:
+            with _DB_LOCK:
+                cursor = self._connection.execute(
+                    "DELETE FROM queue_items WHERE id IN ("
+                    "SELECT id FROM queue_items WHERE session_id = ? LIMIT ?)",
+                    (session_id, chunk_size),
+                )
+                self._connection.commit()
+                deleted = cursor.rowcount
+            removed += deleted
+            if deleted < chunk_size:
+                return removed
+            if on_chunk is not None:
+                on_chunk()
 
     def record_track_result(
         self,

@@ -198,6 +198,8 @@ def test_clear_queue_removes_only_requested_session(tmp_path):
 def test_store_adopts_unversioned_database_without_losing_data(tmp_path):
     import sqlite3
 
+    import store as store_module
+
     path = tmp_path / "legacy.db"
     store = Store(path)
     session_id = store.start_session()
@@ -207,7 +209,7 @@ def test_store_adopts_unversioned_database_without_losing_data(tmp_path):
         connection.execute("PRAGMA user_version = 0")
     for _ in range(2):
         store = Store(path)
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == len(store_module._MIGRATIONS)
         assert store.list_sessions()[0]["id"] == session_id
         assert store.list_sessions()[0]["status"] == "interrupted"
         assert store.get_override(42)["note"] == "keep me"
@@ -245,11 +247,11 @@ def test_store_rolls_back_failed_migration_and_can_retry(tmp_path, monkeypatch):
     with pytest.raises(sqlite3.OperationalError):
         Store(path)
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == len(migrations)
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'example'").fetchone() is None
     monkeypatch.setattr(store_module, "_MIGRATIONS", migrations + ("CREATE TABLE example (id INTEGER);",))
     store = Store(path)
-    assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert store._connection.execute("PRAGMA user_version").fetchone()[0] == len(migrations) + 1
     store.close()
 
 
@@ -288,3 +290,47 @@ def test_stopped_status_survives_a_restart(tmp_path):
     assert restarted.list_sessions(10, 0)[0]["status"] == "stopped"
     assert restarted.resumable_session() is None
     restarted.close()
+
+
+def test_clear_queue_deletes_in_chunks_and_yields_between_them(tmp_path):
+    store = Store(tmp_path / "lidatube.db")
+    session_id = store.start_session(requested_count=5)
+    store.enqueue_items(session_id, [{"artist": "A", "album_name": f"Album {n}", "missing_tracks": []} for n in range(5)])
+    yields = []
+
+    removed = store.clear_queue(session_id, chunk_size=2, on_chunk=lambda: yields.append(1))
+
+    assert removed == 5
+    assert store.queue_counts(session_id)["total"] == 0
+    assert len(yields) >= 2
+    store.close()
+
+
+def test_clear_queue_commits_each_chunk(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "lidatube.db"
+    store = Store(path)
+    session_id = store.start_session(requested_count=4)
+    store.enqueue_items(session_id, [{"artist": "A", "album_name": f"Album {n}", "missing_tracks": []} for n in range(4)])
+
+    observed = []
+
+    def observe():
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as other:
+            observed.append(other.execute("SELECT COUNT(*) FROM queue_items").fetchone()[0])
+
+    store.clear_queue(session_id, chunk_size=2, on_chunk=observe)
+
+    assert observed and min(observed) < 4
+    store.close()
+
+
+def test_track_results_are_indexed_by_session(tmp_path):
+    store = Store(tmp_path / "lidatube.db")
+    indexes = {row[0] for row in store._connection.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "idx_track_results_session_id" in indexes
+    plan = " ".join(str(part) for row in store._connection.execute(
+        "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM track_results WHERE session_id = 1") for part in row)
+    assert "idx_track_results_session_id" in plan
+    store.close()

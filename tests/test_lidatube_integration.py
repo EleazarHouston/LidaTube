@@ -1594,7 +1594,9 @@ def test_reset_ytdlp_clears_queue_and_completion(lidatube_module, monkeypatch):
     assert handler.ytdlp_status == "idle"
     assert handler.index == 0
     assert handler.percent_completion == 0
-    handler.store.clear_queue.assert_called_once_with(8)
+    clear_call = handler.store.clear_queue.call_args
+    assert clear_call.args == (8,)
+    assert callable(clear_call.kwargs["on_chunk"])
     handler.store.finish_session.assert_called_once_with(8, "reset", matched_count=0, failed_count=0)
 
 
@@ -2295,3 +2297,20 @@ def test_stop_ytdlp_persists_the_stop_so_a_crash_does_not_auto_resume(lidatube_m
     assert started == [session_id]
     restarted.store.close()
     store.close()
+
+
+def test_reset_ytdlp_lets_the_event_loop_run_while_clearing_the_queue(lidatube_module, monkeypatch):
+    """The queue delete must not block the gevent worker: gunicorn SIGKILLs it after 300s."""
+    handler = build_data_handler(lidatube_module)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    slept = []
+    monkeypatch.setattr(lidatube_module.socketio, "sleep", lambda *args: slept.append(args))
+    handler.current_session_id = 7
+    handler.store.clear_queue.return_value = 3
+
+    handler.reset_ytdlp()
+
+    kwargs = handler.store.clear_queue.call_args.kwargs
+    assert callable(kwargs.get("on_chunk"))
+    kwargs["on_chunk"]()
+    assert slept, "on_chunk must yield to the event loop"

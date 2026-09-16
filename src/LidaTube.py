@@ -842,6 +842,11 @@ class DataHandler:
         if getattr(self.config, "auto_resume", True):
             self.resume_ytdlp(emit=False, include_user_stopped=False)
 
+    @staticmethod
+    def _yield_to_event_loop():
+        """Let the gevent worker heartbeat during long DB work; gunicorn SIGKILLs it after its timeout."""
+        socketio.sleep(0)
+
     def _start_queue_thread(self, session_id):
         if self.ytdlp_in_progress_flag:
             return False
@@ -1189,7 +1194,7 @@ class DataHandler:
                     future.cancel()
             if session_id is not None:
                 self._reset_session_ids.add(session_id)
-                self.store.clear_queue(session_id)
+                self.store.clear_queue(session_id, on_chunk=self._yield_to_event_loop)
                 counts = self.store.get_session_result_counts(session_id)
                 self.store.finish_session(session_id, "reset", **counts)
             self.current_session_id = None
