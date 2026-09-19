@@ -244,6 +244,21 @@ class TestPersistenceApiRoutes:
         assert client.post("/api/session/stop").status_code == 202
         stop_mock.assert_called_once_with()
 
+    @pytest.mark.parametrize("path, running, resumed, status", [
+        ("/api/session/resume", True, True, 409),
+        ("/api/session/resume", False, False, 404),
+        ("/api/session/stop", False, None, 409),
+    ])
+    def test_session_endpoints_refuse_conflicting_requests(self, app_client, monkeypatch, path, running, resumed, status):
+        client, module = app_client
+        module.data_handler.ytdlp_in_progress_flag = running
+        monkeypatch.setattr(module.data_handler, "resume_ytdlp", Mock(return_value=resumed))
+        stop_mock = Mock()
+        monkeypatch.setattr(module.data_handler, "stop_ytdlp", stop_mock)
+
+        assert client.post(path).status_code == status
+        stop_mock.assert_not_called()
+
     def test_persistence_api_rejects_invalid_pagination(self, app_client):
         client, _ = app_client
         assert client.get("/api/sessions?limit=0").status_code == 400
@@ -1781,22 +1796,56 @@ def test_yt_search_ytdlp_returns_empty_when_stop_requested(lidatube_module, monk
     assert handler._yt_search("artist - song") == []
 
 
-def test_update_settings_socket_route_forwards_payload(lidatube_module, monkeypatch):
-    update_mock = Mock()
-    monkeypatch.setattr(lidatube_module.data_handler, "update_settings", update_mock)
-    payload = {"minimum_match_ratio": "90"}
+class _InlineThread:
+    """Runs a thread's target on start() so socket handlers can be asserted synchronously."""
 
-    lidatube_module.update_settings(payload)
+    def __init__(self, target=None, args=(), name=None, daemon=None, **kwargs):
+        self.target = target
+        self.args = args
 
-    update_mock.assert_called_once_with(payload)
+    def start(self):
+        self.target(*self.args)
+
+    def join(self, timeout=None):
+        pass
 
 
-def test_add_to_download_list_socket_route_forwards_payload(lidatube_module, monkeypatch):
-    add_mock = Mock()
-    monkeypatch.setattr(lidatube_module.data_handler, "add_items_to_download", add_mock)
-    payload = [0, 2, 5]
+@pytest.mark.parametrize("event, args, method", [
+    ("lidarr_get_wanted", (), "get_wanted_albums_from_lidarr"),
+    ("reset_lidarr", (), "reset_lidarr"),
+    ("stop_ytdlp", (), "stop_ytdlp"),
+    ("reset_ytdlp", (), "reset_ytdlp"),
+    ("add_to_download_list", ([0, 2, 5],), "add_items_to_download"),
+    ("load_settings", (), "load_settings"),
+    ("update_settings", ({"minimum_match_ratio": "90"},), "update_settings"),
+])
+def test_socket_events_dispatch_to_the_data_handler(lidatube_module, monkeypatch, event, args, method):
+    monkeypatch.setattr(lidatube_module.threading, "Thread", _InlineThread)
+    handler_method = Mock()
+    monkeypatch.setattr(lidatube_module.data_handler, method, handler_method)
+    client = lidatube_module.socketio.test_client(lidatube_module.app)
 
-    lidatube_module.add_to_download_list(payload)
+    client.emit(event, *args)
+
+    handler_method.assert_called_once_with(*args)
+
+
+def test_stop_lidarr_socket_event_signals_the_running_scan(lidatube_module):
+    lidatube_module.data_handler.lidarr_stop_event.clear()
+    client = lidatube_module.socketio.test_client(lidatube_module.app)
+
+    client.emit("stop_lidarr")
+
+    assert lidatube_module.data_handler.lidarr_stop_event.is_set()
+
+
+def test_socket_connect_and_disconnect_track_connected_clients(lidatube_module):
+    handler = lidatube_module.data_handler
+    client = lidatube_module.socketio.test_client(lidatube_module.app)
+    assert handler.clients_connected_counter == 1
+
+    client.disconnect()
+    assert handler.clients_connected_counter == 0
 
 
 def _make_track(n):
@@ -2419,3 +2468,121 @@ def test_youtube_search_block_backs_off_like_youtube_music(lidatube_module, monk
 
     assert len(searches) == 2
     assert album["missing_tracks"][0]["link"] == "https://youtube.test/found"
+
+
+# --- Characterization: scheduler, Lidarr import and rescan ---
+
+
+class _StopScheduler(BaseException):
+    """Escapes the scheduler's infinite loop without going through its error handling."""
+
+
+def _run_scheduler_once(module, handler, monkeypatch, hour):
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        raise _StopScheduler
+
+    monkeypatch.setattr(module.time, "localtime", lambda: Mock(tm_hour=hour))
+    monkeypatch.setattr(module.time, "sleep", fake_sleep)
+    monkeypatch.setattr(module.threading, "Thread", _InlineThread)
+    with pytest.raises(_StopScheduler):
+        handler.schedule_checker()
+    return sleeps
+
+
+@pytest.mark.parametrize("queue_running", [False, True])
+def test_scheduler_in_sync_window_streams_a_lidarr_fetch_into_the_queue(lidatube_module, monkeypatch, queue_running):
+    handler = build_data_handler(lidatube_module)
+    handler.config.sync_schedule = [3]
+    handler.ytdlp_in_progress_flag = queue_running
+    handler.ytdlp_stop_event.set()
+    start_queue = Mock()
+    monkeypatch.setattr(handler, "_start_queue_thread", start_queue)
+    streaming_during_fetch = []
+    monkeypatch.setattr(handler, "get_wanted_albums_from_lidarr", lambda: streaming_during_fetch.append(handler.streaming_mode))
+
+    sleeps = _run_scheduler_once(lidatube_module, handler, monkeypatch, hour=3)
+
+    assert streaming_during_fetch == [True]
+    assert handler.streaming_mode is False
+    assert not handler.ytdlp_stop_event.is_set()
+    assert sleeps == [3600]
+    if queue_running:
+        handler.store.start_session.assert_not_called()
+        start_queue.assert_not_called()
+    else:
+        handler.store.start_session.assert_called_once_with(requested_count=0)
+        start_queue.assert_called_once_with(1)
+
+
+def test_scheduler_outside_sync_window_checks_again_in_ten_minutes(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler.config.sync_schedule = [3]
+    fetch = Mock()
+    monkeypatch.setattr(handler, "get_wanted_albums_from_lidarr", fetch)
+
+    sleeps = _run_scheduler_once(lidatube_module, handler, monkeypatch, hour=4)
+
+    assert sleeps == [600]
+    fetch.assert_not_called()
+
+
+_IMPORT_ALBUM = {
+    "artist": "Artist",
+    "album_name": "Album",
+    "artist_path": "/music/Artist/",
+    "album_folder": "Album (2024)",
+    "album_full_path": "/music/Artist/Album (2024)",
+}
+
+
+@pytest.mark.parametrize("download_path, scanned_folder", [
+    ("/staging", "/staging/Artist/Album (2024)"),
+    ("", "/music/Artist/Album (2024)"),
+])
+def test_import_album_scans_the_staging_or_in_place_folder(lidatube_module, download_path, scanned_folder):
+    handler = build_data_handler(lidatube_module)
+    handler.config.lidarr_download_path = download_path
+    handler.lidarr_client.scan_import_candidates.return_value = FakeResponse(200, [{"path": "x"}])
+    handler.lidarr_client.import_candidates.return_value = (FakeResponse(201, {}), 1)
+
+    handler.import_album(dict(_IMPORT_ALBUM))
+
+    handler.lidarr_client.scan_import_candidates.assert_called_once_with(scanned_folder)
+    handler.lidarr_client.import_candidates.assert_called_once_with([{"path": "x"}], import_mode="move")
+
+
+def test_import_album_does_not_import_when_the_folder_scan_fails(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    scan = FakeResponse(500, None, text="boom")
+    scan.close = Mock()
+    handler.lidarr_client.scan_import_candidates.return_value = scan
+
+    handler.import_album(dict(_IMPORT_ALBUM))
+
+    handler.lidarr_client.import_candidates.assert_not_called()
+    scan.close.assert_called_once_with()
+
+
+def test_trigger_lidarr_scan_rescans_every_root_folder(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    response = FakeResponse(201, {})
+    response.close = Mock()
+    handler.lidarr_client.get_root_folders.return_value = ["/music", "/audiobooks"]
+    handler.lidarr_client.trigger_library_scan.return_value = response
+
+    handler.trigger_lidarr_scan()
+
+    handler.lidarr_client.trigger_library_scan.assert_called_once_with(["/music", "/audiobooks"])
+    response.close.assert_called_once_with()
+
+
+def test_trigger_lidarr_scan_skips_the_rescan_without_root_folders(lidatube_module):
+    handler = build_data_handler(lidatube_module)
+    handler.lidarr_client.get_root_folders.return_value = []
+
+    handler.trigger_lidarr_scan()
+
+    handler.lidarr_client.trigger_library_scan.assert_not_called()
