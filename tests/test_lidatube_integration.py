@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 from fd_governor import FdGovernor
+from lidarr_scan import LidarrScanner
 from store import Store
 
 
@@ -33,23 +34,6 @@ def lidatube_module(tmp_path):
 def build_data_handler(module):
     handler = module.DataHandler.__new__(module.DataHandler)
     handler.general_logger = Mock()
-
-    handler.lidarr_items = []
-    handler.lidarr_futures = []
-    handler.lidarr_status = "idle"
-    handler.lidarr_stop_event = threading.Event()
-    handler.lidarr_scan_guard = threading.Lock()
-    handler.lidarr_scan_progress = {
-        "phase": "Idle",
-        "pages_scanned": 0,
-        "albums_discovered": 0,
-        "albums_processed": 0,
-        "albums_total": 0,
-        "percent": 0,
-    }
-    handler.lidarr_scan_started_at = None
-    handler.lidarr_scan_completed_at = None
-    handler.lidarr_scan_error = None
 
     handler.ytdlp_items = []
     handler.ytdlp_futures = []
@@ -121,6 +105,10 @@ def build_data_handler(module):
     handler.lidarr_client.get_artists_page.return_value = FakeResponse(200, [])
     handler.downloader = Mock()
     handler.searcher = Mock()
+    handler.scanner = LidarrScanner(
+        cfg, handler.lidarr_client, handler.fd, emit=Mock(), logger=handler.general_logger,
+        download_stop_event=handler.ytdlp_stop_event, on_album_scanned=handler._enqueue_streamed_album,
+    )
 
     return handler
 
@@ -168,7 +156,7 @@ class TestPersistenceApiRoutes:
 
     def test_lidarr_api_pages_and_filters_attention_items(self, app_client):
         client, module = app_client
-        module.data_handler.lidarr_items = [
+        module.data_handler.scanner.items = [
             {"artist": "Artist", "album_name": "One", "missing_count": 1, "track_count": 2, "scan_ready": True},
             {"artist": "Artist", "album_name": "Complete", "missing_count": 0, "track_count": 2, "scan_ready": True},
             {"artist": "Other", "album_name": "Two", "missing_count": 1, "track_count": 1, "scan_ready": True},
@@ -180,7 +168,7 @@ class TestPersistenceApiRoutes:
 
     def test_lidarr_api_ids_only_returns_all_matching_indices(self, app_client):
         client, module = app_client
-        module.data_handler.lidarr_items = [
+        module.data_handler.scanner.items = [
             {"artist": "Artist", "album_name": "One", "missing_count": 1, "track_count": 2, "scan_ready": True},
             {"artist": "Artist", "album_name": "Complete", "missing_count": 0, "track_count": 2, "scan_ready": True},
             {"artist": "Other", "album_name": "Two", "missing_count": 1, "track_count": 1, "scan_ready": True},
@@ -198,7 +186,7 @@ class TestPersistenceApiRoutes:
         whole list, not from whichever rows the virtualized table happened to load.
         """
         client, module = app_client
-        module.data_handler.lidarr_items = [
+        module.data_handler.scanner.items = [
             {"artist": "A", "album_name": "One", "missing_count": 1, "track_count": 2, "scan_ready": True, "checked": True},
             {"artist": "B", "album_name": "Two", "missing_count": 1, "track_count": 1, "scan_ready": True, "checked": False},
             {"artist": "C", "album_name": "Three", "missing_count": 3, "track_count": 3, "scan_ready": True, "checked": True},
@@ -357,83 +345,6 @@ class FakeResponse:
         pass
 
 
-def test_get_wanted_albums_from_lidarr_populates_missing_tracks(lidatube_module, monkeypatch):
-    handler = build_data_handler(lidatube_module)
-    emit_mock = Mock()
-    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
-
-    page_one_records = [
-        {
-            "id": 200,
-            "title": "Zulu/Album?",
-            "releaseDate": "2025-01-02T00:00:00Z",
-            "genres": ["Metal"],
-            "artistId": 20,
-            "artist": {"path": "/music/Zulu", "artistName": "Zulu"},
-            "releases": [{"id": 2000}],
-        },
-        {
-            "id": 100,
-            "title": "Alpha:Album*",
-            "releaseDate": "2024-05-01T00:00:00Z",
-            "genres": ["Rock"],
-            "artistId": 10,
-            "artist": {"path": "/music/Alpha", "artistName": "Alpha"},
-            "releases": [{"id": 1000}],
-            "secondaryTypes": ["Live"],
-        },
-    ]
-
-    tracks_by_album = {
-        100: [
-            {"title": "Song A", "trackNumber": 1, "absoluteTrackNumber": 1, "id": 10001, "hasFile": False},
-            {"title": "Song B", "trackNumber": 2, "absoluteTrackNumber": 2, "id": 10002, "hasFile": True},
-        ],
-        200: [
-            {"title": "Song Z", "trackNumber": 1, "absoluteTrackNumber": 1, "id": 20001, "hasFile": False},
-        ],
-    }
-
-    def fake_get_wanted(page, page_size=2000):
-        records = page_one_records if page == 1 else []
-        return FakeResponse(200, {"records": records})
-
-    def fake_get_tracks(album_id):
-        return FakeResponse(200, tracks_by_album[album_id])
-
-    handler.lidarr_client.get_artists_page.return_value = FakeResponse(200, [
-        {"id": 10, "artistName": "Alpha", "path": "/music/Alpha", "genres": ["Classical", "Romantic"]},
-        {"id": 20, "artistName": "Zulu", "path": "/music/Zulu"},
-    ])
-    handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
-    handler.lidarr_client.get_tracks_for_album.side_effect = fake_get_tracks
-
-    handler.get_wanted_albums_from_lidarr()
-
-    assert handler.lidarr_status == "complete"
-    assert [item["artist"] for item in handler.lidarr_items] == ["Alpha", "Zulu"]
-
-    alpha_album = handler.lidarr_items[0]
-    zulu_album = handler.lidarr_items[1]
-
-    assert alpha_album["album_name"] == "Alpha-Album-"
-    assert alpha_album["track_count"] == 2
-    assert alpha_album["missing_count"] == 1
-    assert alpha_album["missing_tracks"][0]["track_title"] == "Song A"
-    assert alpha_album["album_secondary_types"] == ["Live"]
-    assert alpha_album["artist_genres"] == "Classical, Romantic"
-
-    assert zulu_album["album_name"] == "Zulu+Album!"
-    assert zulu_album["track_count"] == 1
-    assert zulu_album["missing_count"] == 1
-    assert zulu_album["missing_tracks"][0]["track_title"] == "Song Z"
-    assert zulu_album["album_secondary_types"] == []
-    assert zulu_album["artist_genres"] == ""
-
-    assert emit_mock.call_args_list[-1].args[0] == "lidarr_update"
-    assert emit_mock.call_args_list[-1].args[1]["status"] == "complete"
-
-
 def test_home_route_returns_html(lidatube_module):
     client = lidatube_module.app.test_client()
     response = client.get("/")
@@ -461,22 +372,18 @@ def test_streaming_mode_persists_scan_ready_album(lidatube_module, monkeypatch):
         "scan_in_progress": False,
         "status": "",
     }
-    handler.lidarr_client.get_tracks_for_album.return_value = FakeResponse(
-        200,
-        [{"title": "Track 1", "trackNumber": 1, "absoluteTrackNumber": 1, "id": 1, "hasFile": False}],
-    )
+    album["missing_tracks"] = [{"track_title": "Track 1", "track_id": 1}]
 
-    handler.get_missing_tracks_for_album(album)
+    handler._enqueue_streamed_album(album)
 
-    assert album["scan_ready"] is True
     assert handler.ytdlp_items == []
     handler.store.enqueue_items.assert_called_once_with(1, [album])
     handler.store.increment_session_requested_count.assert_called_once_with(1, 1)
     assert album["status"] == "Queued"
 
 
-def test_streaming_mode_off_does_not_add_to_ytdlp_items(lidatube_module, monkeypatch):
-    """When streaming_mode=False, scan_ready albums are NOT added to ytdlp_items."""
+def test_streaming_mode_off_does_not_queue_scanned_albums(lidatube_module, monkeypatch):
+    """Outside a scheduled sync, scanned albums wait for the user to select them."""
     handler = build_data_handler(lidatube_module)
     handler.streaming_mode = False
     monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
@@ -492,19 +399,17 @@ def test_streaming_mode_off_does_not_add_to_ytdlp_items(lidatube_module, monkeyp
         "scan_in_progress": False,
         "status": "",
     }
-    handler.lidarr_client.get_tracks_for_album.return_value = FakeResponse(200, [])
+    handler._enqueue_streamed_album(album)
 
-    handler.get_missing_tracks_for_album(album)
-
-    assert album["scan_ready"] is True
-    assert len(handler.ytdlp_items) == 0
+    handler.store.enqueue_items.assert_not_called()
+    assert album["status"] == ""
 
 
 def test_master_queue_exits_when_empty_and_not_streaming(lidatube_module, monkeypatch):
     """master_queue exits immediately when queue is empty and not in streaming mode."""
     handler = build_data_handler(lidatube_module)
     handler.streaming_mode = False
-    handler.lidarr_status = "complete"
+    handler.scanner.status = "complete"
     handler.ytdlp_in_progress_flag = True
     handler.index = 0
     monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
@@ -520,7 +425,7 @@ def test_master_queue_waits_when_streaming_and_fetch_busy(lidatube_module, monke
     """master_queue stays alive while streaming_mode=True and lidarr is busy, then exits once fetch is done."""
     handler = build_data_handler(lidatube_module)
     handler.streaming_mode = True
-    handler.lidarr_status = "busy"
+    handler.scanner.status = "busy"
     handler.ytdlp_in_progress_flag = True
     handler.index = 0
     monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
@@ -528,7 +433,7 @@ def test_master_queue_waits_when_streaming_and_fetch_busy(lidatube_module, monke
 
     def finish_fetch():
         time.sleep(0.3)
-        handler.lidarr_status = "complete"
+        handler.scanner.status = "complete"
         handler.streaming_mode = False
 
     t = threading.Thread(target=finish_fetch)
@@ -545,7 +450,7 @@ def test_master_queue_processes_persisted_item_added_during_streaming(lidatube_m
     """The running queue polls persisted albums added by the streaming scanner."""
     handler = build_data_handler(lidatube_module)
     handler.streaming_mode = True
-    handler.lidarr_status = "busy"
+    handler.scanner.status = "busy"
     handler.ytdlp_in_progress_flag = True
     handler.current_session_id = 1
     handler.index = 0
@@ -575,7 +480,7 @@ def test_master_queue_processes_persisted_item_added_during_streaming(lidatube_m
         time.sleep(0.1)
         persisted_rows.append({"id": 10, "album_json": json.dumps(album)})
         time.sleep(0.2)
-        handler.lidarr_status = "complete"
+        handler.scanner.status = "complete"
         handler.streaming_mode = False
 
     t = threading.Thread(target=add_item_then_finish)
@@ -596,7 +501,7 @@ def test_add_items_persists_selected_albums_without_growing_memory_queue(
     monkeypatch.setattr(lidatube_module.socketio, "sleep", Mock())
     start_mock = Mock(return_value=True)
     monkeypatch.setattr(handler, "_start_queue_thread", start_mock)
-    handler.lidarr_items = [
+    handler.scanner.items = [
         {
             "artist": "Artist",
             "album_name": f"Album {index}",
@@ -612,7 +517,7 @@ def test_add_items_persists_selected_albums_without_growing_memory_queue(
     queued = handler.store.enqueue_items.call_args.args[1]
     assert [item["album_name"] for item in queued] == ["Album 0", "Album 2"]
     handler.store.increment_session_requested_count.assert_called_once_with(1, 4)
-    assert [item["checked"] for item in handler.lidarr_items] == [True, False, True]
+    assert [item["checked"] for item in handler.scanner.items] == [True, False, True]
     start_mock.assert_called_once_with(1)
 
 
@@ -695,122 +600,6 @@ def test_persisted_batches_resume_after_simulated_restart_without_drops(
     reopened.close()
 
 
-def test_emit_lidarr_update_strips_missing_tracks(lidatube_module, monkeypatch):
-    """lidarr_update socket event must not include missing_tracks (large, not needed by UI)."""
-    handler = build_data_handler(lidatube_module)
-    emitted = {}
-    monkeypatch.setattr(lidatube_module.socketio, "emit", lambda event, data: emitted.update({event: data}))
-
-    handler.lidarr_items = [
-        {
-            "artist": "A",
-            "album_name": "B",
-            "checked": True,
-            "scan_ready": True,
-            "track_count": 2,
-            "missing_count": 1,
-            "missing_tracks": [{"track_title": "secret", "link": ""}],
-        }
-    ]
-    handler._emit_lidarr_update()
-
-    assert "lidarr_update" in emitted
-    item = emitted["lidarr_update"]["data"][0]
-    assert "missing_tracks" not in item
-
-
-def test_emit_lidarr_update_filters_complete_albums(lidatube_module, monkeypatch):
-    """Albums with missing_count=0 and scan_ready=True are excluded from the emit to keep payload small."""
-    handler = build_data_handler(lidatube_module)
-    emitted = {}
-    monkeypatch.setattr(lidatube_module.socketio, "emit", lambda event, data: emitted.update({event: data}))
-
-    handler.lidarr_items = [
-        {"artist": "A", "album_name": "complete", "scan_ready": True, "missing_count": 0, "missing_tracks": []},
-        {"artist": "B", "album_name": "has_missing", "scan_ready": True, "missing_count": 2, "missing_tracks": []},
-        {"artist": "C", "album_name": "still_scanning", "scan_ready": False, "missing_count": 0, "missing_tracks": []},
-    ]
-    handler._emit_lidarr_update()
-
-    data = emitted["lidarr_update"]["data"]
-    names = [item["album_name"] for item in data]
-    assert "complete" not in names
-    assert "has_missing" in names
-    assert "still_scanning" in names
-
-
-def test_emit_lidarr_update_includes_index_and_total_count(lidatube_module, monkeypatch):
-    """Each emitted item carries its original lidarr_items index; total_count reflects full list size."""
-    handler = build_data_handler(lidatube_module)
-    emitted = {}
-    monkeypatch.setattr(lidatube_module.socketio, "emit", lambda event, data: emitted.update({event: data}))
-
-    handler.lidarr_items = [
-        {"artist": "A", "album_name": "complete", "scan_ready": True, "missing_count": 0, "missing_tracks": []},
-        {"artist": "B", "album_name": "has_missing", "scan_ready": True, "missing_count": 1, "missing_tracks": []},
-    ]
-    handler._emit_lidarr_update()
-
-    payload = emitted["lidarr_update"]
-    assert payload["total_count"] == 2
-    assert len(payload["data"]) == 1
-    assert payload["data"][0]["index"] == 1
-
-
-def test_save_lidarr_cache_is_atomic(lidatube_module, monkeypatch, tmp_path):
-    """Cache write uses a .tmp file then renames to prevent corruption on kill."""
-    handler = build_data_handler(lidatube_module)
-    handler.config.CONFIG_FOLDER = str(tmp_path)
-    handler.lidarr_items = [{"artist": "X", "album_name": "Y", "missing_tracks": []}]
-
-    rename_calls = []
-    real_replace = lidatube_module.os.replace
-    monkeypatch.setattr(lidatube_module.os, "replace", lambda src, dst: rename_calls.append((src, dst)) or real_replace(src, dst))
-
-    handler._save_lidarr_cache()
-
-    assert len(rename_calls) == 1
-    src, dst = rename_calls[0]
-    assert src.endswith(".tmp")
-    assert not src.endswith(".tmp") or dst == src[: -len(".tmp")]
-
-
-def test_cache_checkpointed_periodically(lidatube_module, monkeypatch):
-    """Growing caches are checkpointed periodically instead of rewritten per page."""
-    handler = build_data_handler(lidatube_module)
-    emit_mock = Mock()
-    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
-
-    save_calls = []
-    monkeypatch.setattr(handler, "_save_lidarr_cache", lambda: save_calls.append(1))
-
-    page_one_records = [
-        {
-            "id": 1,
-            "title": "Album A",
-            "releaseDate": "2024-01-01T00:00:00Z",
-            "genres": [],
-            "artistId": 1,
-            "artist": {"path": "/music/A", "artistName": "Artist A"},
-            "releases": [{"id": 10}],
-        }
-    ]
-
-    def fake_get_wanted(page, page_size=2000):
-        return FakeResponse(200, {"records": page_one_records if page <= 6 else []})
-
-    handler.lidarr_client.get_artists_page.return_value = FakeResponse(200, [
-        {"id": 1, "artistName": "Artist A", "path": "/music/A"},
-    ])
-    handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
-    handler.lidarr_client.get_tracks_for_album.return_value = FakeResponse(200, [])
-
-    handler.get_wanted_albums_from_lidarr()
-
-    # One checkpoint at page 5 plus the final completed-state write.
-    assert len(save_calls) == 2
-
-
 def test_missing_tracks_preserved_after_download(lidatube_module, monkeypatch):
     """missing_tracks must NOT be cleared after download — clearing it corrupts the cache
     for the next session (album re-queued with no tracks = silent no-op download)."""
@@ -838,7 +627,7 @@ def test_missing_tracks_preserved_after_download(lidatube_module, monkeypatch):
         "status": "",
         "checked": True,
     }
-    handler.lidarr_items = [req_album]
+    handler.scanner.items = [req_album]
     handler.ytdlp_items = [req_album]
 
     monkeypatch.setattr(handler.searcher, "find_links", lambda album, session_id=None: None)
@@ -848,54 +637,11 @@ def test_missing_tracks_preserved_after_download(lidatube_module, monkeypatch):
     assert req_album["missing_tracks"] is original_tracks
 
 
-def test_response_closed_on_non_200_track_fetch(lidatube_module, monkeypatch):
-    """Response must be closed even when Lidarr returns a non-200 status (prevents FD leak)."""
-    handler = build_data_handler(lidatube_module)
-    handler.streaming_mode = False
-    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
-
-    close_called = []
-    error_response = FakeResponse(500, None, "Server Error")
-    error_response.close = lambda: close_called.append(1)
-
-    handler.lidarr_client.get_tracks_for_album.return_value = error_response
-
-    album = {
-        "artist": "A", "album_name": "B", "album_id": 1,
-        "missing_tracks": [], "track_count": 0, "missing_count": 0,
-        "scan_ready": False, "scan_in_progress": False, "status": "",
-    }
-    handler.get_missing_tracks_for_album(album)
-
-    assert len(close_called) >= 1
-    assert album["scan_state"] == "error"
-    assert album["scan_ready"] is False
-    assert album["scan_in_progress"] is False
-    assert album["missing_count"] == 0
-    assert "500" in album["scan_error"]
-
-
-def test_drain_lidarr_futures_releases_completed_references(lidatube_module):
-    handler = build_data_handler(lidatube_module)
-    future = Mock()
-    future.done.return_value = True
-    future.result.return_value = True
-    album = {"scan_state": "complete"}
-    future_map = {future: album}
-    handler.lidarr_futures = [future]
-
-    processed, failed = handler._drain_lidarr_futures(future_map)
-
-    assert (processed, failed) == (1, 0)
-    assert future_map == {}
-    assert handler.lidarr_futures == []
-
-
 def test_connect_emits_updates_and_increments_client_counter(lidatube_module, monkeypatch):
     handler = build_data_handler(lidatube_module)
     emit_mock = Mock()
     monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
-    monkeypatch.setattr(handler, "_emit_lidarr_update", Mock())
+    monkeypatch.setattr(handler.scanner, "emit_update", Mock())
 
     handler.ytdlp_status = "running"
     handler.ytdlp_items = [{"album_name": "A"}]
@@ -903,7 +649,7 @@ def test_connect_emits_updates_and_increments_client_counter(lidatube_module, mo
 
     handler.connect()
 
-    handler._emit_lidarr_update.assert_called_once()
+    handler.scanner.emit_update.assert_called_once()
     emit_mock.assert_any_call(
         "ytdlp_update",
         {
@@ -987,274 +733,10 @@ def test_update_settings_logs_error_on_bad_payload(lidatube_module, monkeypatch)
     handler.general_logger.error.assert_called_once()
 
 
-def test_load_lidarr_cache_restores_cached_state(lidatube_module, tmp_path):
-    handler = build_data_handler(lidatube_module)
-    handler.config.CONFIG_FOLDER = str(tmp_path)
-
-    cache_payload = {
-        "lidarr_items": [{"artist": "A", "album_name": "B"}],
-        "lidarr_scan_progress": {"phase": "Fetching", "albums_processed": 5, "albums_total": 10, "percent": 50},
-    }
-    (tmp_path / "lidarr_cache.json").write_text(json.dumps(cache_payload))
-
-    handler._load_lidarr_cache()
-
-    assert handler.lidarr_status == "complete"
-    assert handler.lidarr_items[0]["artist"] == "A"
-    assert handler.lidarr_items[0]["album_name"] == "B"
-    assert handler.lidarr_items[0]["scan_state"] == "pending"
-    assert handler.lidarr_scan_progress["phase"] == "Complete (cached)"
-    assert handler.lidarr_scan_progress["albums_processed"] == 5
-
-
-def test_incomplete_lidarr_cache_remains_incomplete_after_restart(lidatube_module, tmp_path):
-    handler = build_data_handler(lidatube_module)
-    handler.config.CONFIG_FOLDER = str(tmp_path)
-    handler.lidarr_items = [{"artist": "A", "album_name": "B", "scan_ready": False}]
-    handler._set_album_scan_state(handler.lidarr_items[0], "error", "track API failed")
-    handler._set_lidarr_scan_progress(phase="Incomplete — Lidarr error on page 2", pages_scanned=1)
-    handler._set_lidarr_scan_state("error", error="Lidarr page 2 returned 500")
-    handler._save_lidarr_cache()
-
-    payload = json.loads((tmp_path / "lidarr_cache.json").read_text())
-    assert payload["schema_version"] == 2
-    assert payload["lidarr_scan_state"]["complete"] is False
-    assert payload["lidarr_scan_state"]["last_successful_page"] == 1
-
-    restarted = build_data_handler(lidatube_module)
-    restarted.config.CONFIG_FOLDER = str(tmp_path)
-    restarted._load_lidarr_cache()
-
-    assert restarted.lidarr_status == "error"
-    assert restarted.lidarr_scan_progress["phase"].startswith("Incomplete")
-    assert restarted.lidarr_items[0]["scan_state"] == "error"
-    assert restarted.lidarr_items[0]["scan_ready"] is False
-
-
-def test_load_lidarr_cache_logs_error_on_invalid_json(lidatube_module, tmp_path):
-    handler = build_data_handler(lidatube_module)
-    handler.config.CONFIG_FOLDER = str(tmp_path)
-    (tmp_path / "lidarr_cache.json").write_text("{not-json")
-
-    handler._load_lidarr_cache()
-
-    handler.general_logger.error.assert_called_once()
-
-
-def test_get_wanted_albums_handles_non_200_and_emits_toast(lidatube_module, monkeypatch):
-    handler = build_data_handler(lidatube_module)
-    emit_mock = Mock()
-    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
-    monkeypatch.setattr(handler.lidarr_stop_event, "wait", lambda *a, **k: False)
-
-    close_called = []
-    response = FakeResponse(503, {"records": []}, "Service unavailable")
-    response.close = lambda: close_called.append(1)
-    handler.lidarr_client.get_wanted_albums.return_value = response
-
-    handler.get_wanted_albums_from_lidarr()
-
-    # The page is retried before giving up, and every response is closed.
-    assert len(close_called) == 3
-    assert any(call.args[0] == "new_toast_msg" for call in emit_mock.call_args_list)
-    # A failed fetch must NOT be reported as a finished scan.
-    assert handler.lidarr_status == "error"
-
-
-def test_wanted_fetch_error_midway_is_not_reported_complete(lidatube_module, monkeypatch):
-    """Regression: Lidarr 500 on page N truncated the album list but reported 'Complete'.
-
-    A busy Lidarr (concurrent rescan) returned 500 on page 26; the loop broke and the
-    partial 25,000-album list was cached as a finished scan, hiding ~64k albums.
-    """
-    handler = build_data_handler(lidatube_module)
-    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
-    monkeypatch.setattr(handler.lidarr_stop_event, "wait", lambda *a, **k: False)
-    monkeypatch.setattr(handler, "get_missing_tracks_for_album", lambda item: None)
-    monkeypatch.setattr(handler, "_save_lidarr_cache", Mock())
-
-    def album(i):
-        return {"artistId": 1, "id": i, "title": f"Album {i}", "releaseDate": "2020-01-01T00:00:00Z",
-                "genres": [], "releases": [{"id": 100 + i}]}
-
-    calls = {"n": 0}
-
-    def fake_get_wanted(page, page_size):
-        calls["n"] += 1
-        if page == 1:
-            return FakeResponse(200, {"records": [album(1), album(2)]})
-        return FakeResponse(500, {}, "Internal Server Error")  # page 2 always fails
-
-    handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
-    handler.get_wanted_albums_from_lidarr()
-
-    assert len(handler.lidarr_items) == 2          # page 1 kept
-    assert handler.lidarr_status == "error"        # not "complete"
-    assert "Incomplete" in handler.lidarr_scan_progress["phase"]
-    assert calls["n"] == 1 + 3                     # page 1, then page 2 retried 3x
-
-
-def test_artist_prefetch_retries_then_succeeds(lidatube_module, monkeypatch):
-    """Artist fetch retries on failure and succeeds before exhausting attempts."""
-    handler = build_data_handler(lidatube_module)
-    handler._ARTIST_RETRY_WAIT = 0
-    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
-
-    attempts = []
-
-    def fake_get_artists(page, page_size=1000):
-        attempts.append(page)
-        if len(attempts) < 2:
-            raise ConnectionError("timeout")
-        return FakeResponse(200, [{"id": 1, "artistName": "Artist A", "path": "/music/A"}])
-
-    handler.lidarr_client.get_artists_page.side_effect = fake_get_artists
-    handler.lidarr_client.get_wanted_albums.return_value = FakeResponse(200, {"records": []})
-
-    handler.get_wanted_albums_from_lidarr()
-
-    assert handler.lidarr_status == "complete"
-    assert len(attempts) == 2
-    assert len(handler.lidarr_items) == 0
-
-
-def test_artist_prefetch_exhausts_retries_sets_error(lidatube_module, monkeypatch):
-    """Artist fetch sets error status after all retry attempts fail."""
-    handler = build_data_handler(lidatube_module)
-    handler._ARTIST_RETRY_WAIT = 0
-    emit_mock = Mock()
-    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
-
-    handler.lidarr_client.get_artists_page.side_effect = ConnectionError("timeout")
-
-    handler.get_wanted_albums_from_lidarr()
-
-    assert handler.lidarr_status == "error"
-    assert handler.lidarr_client.get_artists_page.call_count == 3
-
-
-def test_artist_prefetch_failure_sets_error_status(lidatube_module, monkeypatch):
-    """Non-200 from get_artists_page aborts the scan and sets status to error."""
-    handler = build_data_handler(lidatube_module)
-    handler._ARTIST_RETRY_WAIT = 0
-    emit_mock = Mock()
-    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
-
-    handler.lidarr_client.get_artists_page.return_value = FakeResponse(503, None, "Service unavailable")
-
-    handler.get_wanted_albums_from_lidarr()
-
-    assert handler.lidarr_status == "error"
-    assert handler.lidarr_items == []
-    assert any(call.args[0] == "new_toast_msg" for call in emit_mock.call_args_list)
-
-
-def test_artist_prefetch_paginated_response(lidatube_module, monkeypatch):
-    """Artist endpoint returning paginated records object is handled correctly."""
-    handler = build_data_handler(lidatube_module)
-    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
-
-    pages = {
-        1: {"records": [{"id": 1, "artistName": "Artist A", "path": "/music/A"}]},
-        2: {"records": []},
-    }
-    handler.lidarr_client.get_artists_page.side_effect = lambda page, page_size=1000: FakeResponse(200, pages[page])
-    handler.lidarr_client.get_wanted_albums.return_value = FakeResponse(200, {"records": []})
-
-    handler.get_wanted_albums_from_lidarr()
-
-    assert handler.lidarr_status == "complete"
-    handler.lidarr_client.get_artists_page.assert_called_with(2)
-
-
-def test_artist_prefetch_flat_array_response(lidatube_module, monkeypatch):
-    """Artist endpoint returning a flat array (non-paginated Lidarr builds) is handled correctly."""
-    handler = build_data_handler(lidatube_module)
-    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
-
-    handler.lidarr_client.get_artists_page.return_value = FakeResponse(200, [
-        {"id": 5, "artistName": "Flat Artist", "path": "/music/flat"},
-    ])
-    handler.lidarr_client.get_wanted_albums.return_value = FakeResponse(200, {"records": [
-        {
-            "id": 99,
-            "title": "Flat Album",
-            "releaseDate": "2020-01-01T00:00:00Z",
-            "genres": [],
-            "artistId": 5,
-            "releases": [{"id": 999}],
-        }
-    ]})
-    handler.lidarr_client.get_tracks_for_album.return_value = FakeResponse(200, [])
-
-    def fake_get_wanted(page, page_size=1000):
-        return FakeResponse(200, {"records": [
-            {"id": 99, "title": "Flat Album", "releaseDate": "2020-01-01T00:00:00Z",
-             "genres": [], "artistId": 5, "releases": [{"id": 999}]}
-        ] if page == 1 else []})
-
-    handler.lidarr_client.get_wanted_albums.side_effect = fake_get_wanted
-
-    handler.get_wanted_albums_from_lidarr()
-
-    # Flat array: get_artists_page should only be called once (no further pages)
-    assert handler.lidarr_client.get_artists_page.call_count == 1
-    assert handler.lidarr_items[0]["artist"] == "Flat Artist"
-    assert handler.lidarr_items[0]["artist_path"] == "/music/flat"
-
-
-def test_get_missing_tracks_retries_after_fd_exhaustion(lidatube_module, monkeypatch):
-    handler = build_data_handler(lidatube_module)
-    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
-
-    started = []
-
-    class FakeThread:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def start(self):
-            started.append(1)
-
-    monkeypatch.setattr(lidatube_module.threading, "Thread", FakeThread)
-
-    call_count = {"count": 0}
-
-    def fake_get_tracks(album_id):
-        call_count["count"] += 1
-        if call_count["count"] == 1:
-            raise OSError(24, "Too many open files")
-        return FakeResponse(
-            200,
-            [{"title": "Track 1", "trackNumber": 1, "absoluteTrackNumber": 1, "id": 1, "hasFile": False}],
-        )
-
-    handler.lidarr_client.get_tracks_for_album.side_effect = fake_get_tracks
-
-    album = {
-        "artist": "Retry Artist",
-        "album_name": "Retry Album",
-        "album_id": 10,
-        "missing_tracks": [],
-        "track_count": 0,
-        "missing_count": 0,
-        "scan_ready": False,
-        "scan_in_progress": False,
-        "status": "",
-    }
-
-    handler.get_missing_tracks_for_album(album)
-
-    assert call_count["count"] == 2
-    assert started == [1]
-    assert album["scan_ready"] is True
-    assert album["missing_count"] == 1
-
-
 def test_wait_for_album_scan_data_returns_false_when_not_busy(lidatube_module, monkeypatch):
     handler = build_data_handler(lidatube_module)
     monkeypatch.setattr(handler, "_emit_ytdlp_update", Mock())
-    handler.lidarr_status = "complete"
+    handler.scanner.status = "complete"
 
     req_album = {"scan_ready": False, "scan_in_progress": True, "status": ""}
 
@@ -1404,62 +886,6 @@ def test_reset_ytdlp_clears_queue_and_completion(lidatube_module, monkeypatch):
     handler.store.finish_session.assert_called_once_with(8, "reset", matched_count=0, failed_count=0)
 
 
-def test_reset_lidarr_clears_cache_and_restores_idle_state(lidatube_module, monkeypatch, tmp_path):
-    handler = build_data_handler(lidatube_module)
-    emit_mock = Mock()
-    monkeypatch.setattr(lidatube_module.socketio, "emit", emit_mock)
-    monkeypatch.setattr(handler, "_emit_lidarr_update", Mock())
-
-    cache_path = tmp_path / "lidarr_cache.json"
-    cache_path.write_text(json.dumps({"lidarr_items": [{"artist": "A"}]}))
-    handler.config.CONFIG_FOLDER = str(tmp_path)
-
-    class FakeFuture:
-        def __init__(self, done_state=False):
-            self._done_state = done_state
-            self.cancel_called = False
-
-        def done(self):
-            return self._done_state
-
-        def cancel(self):
-            self.cancel_called = True
-
-    pending = FakeFuture(done_state=False)
-    completed = FakeFuture(done_state=True)
-    handler.lidarr_futures = [pending, completed]
-    handler.lidarr_items = [{"artist": "Artist", "album_name": "Album", "missing_tracks": []}]
-    handler.lidarr_status = "busy"
-    handler.lidarr_scan_progress = {
-        "phase": "Fetching missing tracks",
-        "pages_scanned": 4,
-        "albums_discovered": 10,
-        "albums_processed": 8,
-        "albums_total": 10,
-        "percent": 80,
-    }
-
-    handler.reset_lidarr()
-
-    assert handler.lidarr_stop_event.is_set() is True
-    assert pending.cancel_called is True
-    assert completed.cancel_called is False
-    assert handler.lidarr_futures == []
-    assert handler.lidarr_items == []
-    assert handler.lidarr_status == "idle"
-    assert handler.lidarr_scan_progress == {
-        "phase": "Idle",
-        "pages_scanned": 0,
-        "albums_discovered": 0,
-        "albums_processed": 0,
-        "albums_total": 0,
-        "percent": 0,
-    }
-    assert cache_path.exists() is False
-    handler._emit_lidarr_update.assert_called_once()
-    assert any(call.args[0] == "new_toast_msg" and call.args[1]["title"] == "Lidarr Reset" for call in emit_mock.call_args_list)
-
-
 class _InlineThread:
     """Runs a thread's target on start() so socket handlers can be asserted synchronously."""
 
@@ -1475,20 +901,22 @@ class _InlineThread:
 
 
 @pytest.mark.parametrize("event, args, method", [
-    ("lidarr_get_wanted", (), "get_wanted_albums_from_lidarr"),
-    ("reset_lidarr", (), "reset_lidarr"),
+    ("lidarr_get_wanted", (), "scanner.fetch_wanted_albums"),
+    ("reset_lidarr", (), "scanner.reset"),
     ("stop_ytdlp", (), "stop_ytdlp"),
     ("reset_ytdlp", (), "reset_ytdlp"),
     ("add_to_download_list", ([0, 2, 5],), "add_items_to_download"),
     ("load_settings", (), "load_settings"),
     ("update_settings", ({"minimum_match_ratio": "90"},), "update_settings"),
 ])
-
-
 def test_socket_events_dispatch_to_the_data_handler(lidatube_module, monkeypatch, event, args, method):
     monkeypatch.setattr(lidatube_module.threading, "Thread", _InlineThread)
     handler_method = Mock()
-    monkeypatch.setattr(lidatube_module.data_handler, method, handler_method)
+    owner = lidatube_module.data_handler
+    *path, name = method.split(".")
+    for attr in path:
+        owner = getattr(owner, attr)
+    monkeypatch.setattr(owner, name, handler_method)
     client = lidatube_module.socketio.test_client(lidatube_module.app)
 
     client.emit(event, *args)
@@ -1497,12 +925,12 @@ def test_socket_events_dispatch_to_the_data_handler(lidatube_module, monkeypatch
 
 
 def test_stop_lidarr_socket_event_signals_the_running_scan(lidatube_module):
-    lidatube_module.data_handler.lidarr_stop_event.clear()
+    lidatube_module.data_handler.scanner.stop_event.clear()
     client = lidatube_module.socketio.test_client(lidatube_module.app)
 
     client.emit("stop_lidarr")
 
-    assert lidatube_module.data_handler.lidarr_stop_event.is_set()
+    assert lidatube_module.data_handler.scanner.stop_event.is_set()
 
 
 def test_socket_connect_and_disconnect_track_connected_clients(lidatube_module):
@@ -1686,7 +1114,7 @@ def test_scheduler_in_sync_window_streams_a_lidarr_fetch_into_the_queue(lidatube
     start_queue = Mock()
     monkeypatch.setattr(handler, "_start_queue_thread", start_queue)
     streaming_during_fetch = []
-    monkeypatch.setattr(handler, "get_wanted_albums_from_lidarr", lambda: streaming_during_fetch.append(handler.streaming_mode))
+    monkeypatch.setattr(handler.scanner, "fetch_wanted_albums", lambda: streaming_during_fetch.append(handler.streaming_mode))
 
     sleeps = _run_scheduler_once(lidatube_module, handler, monkeypatch, hour=3)
 
@@ -1706,7 +1134,7 @@ def test_scheduler_outside_sync_window_checks_again_in_ten_minutes(lidatube_modu
     handler = build_data_handler(lidatube_module)
     handler.config.sync_schedule = [3]
     fetch = Mock()
-    monkeypatch.setattr(handler, "get_wanted_albums_from_lidarr", fetch)
+    monkeypatch.setattr(handler.scanner, "fetch_wanted_albums", fetch)
 
     sleeps = _run_scheduler_once(lidatube_module, handler, monkeypatch, hour=4)
 

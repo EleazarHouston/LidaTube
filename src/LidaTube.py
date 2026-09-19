@@ -3,7 +3,6 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO
 import concurrent.futures
@@ -14,16 +13,10 @@ from downloader import Downloader
 from store import Store
 from fd_governor import FdGovernor
 from link_search import LinkSearcher
+from lidarr_scan import LidarrScanner
 
 
 class DataHandler:
-    _ARTIST_RETRY_WAIT = 10  # seconds per attempt; override in tests
-    _LIDARR_CACHE_SCHEMA_VERSION = 2
-    _LIDARR_CACHE_CHECKPOINT_PAGES = 5
-    _LIDARR_MAX_PENDING_MULTIPLIER = 4
-    _LIDARR_STATUSES = {"idle", "busy", "complete", "stopped", "error"}
-    _ALBUM_SCAN_STATES = {"pending", "scanning", "complete", "error"}
-
     def __init__(self):
         logging.basicConfig(level=logging.WARNING, format="%(message)s")
         self.general_logger = logging.getLogger()
@@ -42,17 +35,6 @@ class DataHandler:
         self.fd = FdGovernor(self.general_logger)
         self.fd.apply_safety_limits(self.config)
 
-        # Lidarr state
-        self.lidarr_items = []
-        self.lidarr_futures = []
-        self.lidarr_status = "idle"
-        self.lidarr_stop_event = threading.Event()
-        self.lidarr_scan_guard = threading.Lock()
-        self.lidarr_scan_progress = self._default_lidarr_scan_progress()
-
-        self.lidarr_scan_started_at = None
-        self.lidarr_scan_completed_at = None
-        self.lidarr_scan_error = None
         # Download state
         self.ytdlp_items = []
         self.ytdlp_futures = []
@@ -85,8 +67,12 @@ class DataHandler:
             self.config, self.store, self.fd, self.ytdlp_stop_event, self.general_logger,
             on_status_change=self._emit_ytdlp_update,
         )
+        self.scanner = LidarrScanner(
+            self.config, self.lidarr_client, self.fd, socketio.emit, self.general_logger,
+            download_stop_event=self.ytdlp_stop_event, on_album_scanned=self._enqueue_streamed_album,
+        )
 
-        self._load_lidarr_cache()
+        self.scanner.load_cache()
         self.general_logger.warning(
             "Thread limits in use: downloads=%s, lidarr_scan=%s, ytmusic_parallel=%s",
             self.config.thread_limit,
@@ -102,7 +88,7 @@ class DataHandler:
     # --- SocketIO connection ---
 
     def connect(self):
-        self._emit_lidarr_update()
+        self.scanner.emit_update()
         self.queue_status()
         self._emit_ytdlp_update()
         self.clients_connected_counter += 1
@@ -155,14 +141,14 @@ class DataHandler:
                         self.current_session_id = self.store.start_session(requested_count=0)
                         self._start_queue_thread(self.current_session_id)
 
-                    fetch_thread = threading.Thread(target=self.get_wanted_albums_from_lidarr, name="Lidarr_Fetch_Thread")
+                    fetch_thread = threading.Thread(target=self.scanner.fetch_wanted_albums, name="Lidarr_Fetch_Thread")
                     fetch_thread.daemon = True
                     fetch_thread.start()
 
                     fetch_thread.join()
                     self.streaming_mode = False
 
-                    if not self.lidarr_items:
+                    if not self.scanner.items:
                         self.general_logger.warning("No Missing Albums")
                     self.general_logger.warning("Big sleep for 1 Hour")
                     time.sleep(3600)
@@ -173,101 +159,6 @@ class DataHandler:
         except Exception as e:
             self.general_logger.error(f"Error in Scheduler: {e}")
             self.general_logger.error("Scheduler Stopped")
-
-    # --- Lidarr scan state helpers ---
-
-    def _default_lidarr_scan_progress(self):
-        return {
-            "phase": "Idle",
-            "pages_scanned": 0,
-            "albums_discovered": 0,
-            "albums_processed": 0,
-            "albums_total": 0,
-            "percent": 0,
-        }
-
-    def _set_lidarr_scan_progress(self, **kwargs):
-        self.lidarr_scan_progress.update(kwargs)
-
-    def _set_lidarr_scan_state(self, status, *, phase=None, error=None, **progress):
-        """Update global scan state and its persisted metadata as one transition."""
-        if status not in self._LIDARR_STATUSES:
-            raise ValueError(f"Invalid Lidarr scan status: {status}")
-
-        now = datetime.now().astimezone().isoformat()
-        previous_status = self.lidarr_status
-        self.lidarr_status = status
-        if status == "busy" and previous_status != "busy":
-            self.lidarr_scan_started_at = now
-            self.lidarr_scan_completed_at = None
-            self.lidarr_scan_error = None
-        elif status in {"complete", "stopped", "error"}:
-            self.lidarr_scan_completed_at = now
-            self.lidarr_scan_error = str(error) if error else None
-        elif status == "idle":
-            self.lidarr_scan_started_at = None
-            self.lidarr_scan_completed_at = None
-            self.lidarr_scan_error = None
-
-        if phase is not None:
-            progress["phase"] = phase
-        self._set_lidarr_scan_progress(**progress)
-
-    def _set_album_scan_state(self, req_album, state, error=None):
-        """Maintain the explicit album state and legacy flags as one invariant."""
-        if state not in self._ALBUM_SCAN_STATES:
-            raise ValueError(f"Invalid album scan state: {state}")
-        req_album["scan_state"] = state
-        req_album["scan_in_progress"] = state == "scanning"
-        req_album["scan_ready"] = state == "complete"
-        req_album["scan_error"] = str(error) if error else None
-
-    def _drain_lidarr_futures(self, future_map, *, wait_for_one=False):
-        """Consume completed futures and release their result/album references."""
-        if not future_map:
-            return 0, 0
-
-        futures = tuple(future_map)
-        if wait_for_one:
-            done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
-        else:
-            done = {future for future in futures if future.done()}
-
-        failed = 0
-        for future in done:
-            req_album = future_map.pop(future)
-            try:
-                future.result()
-            except Exception as exc:
-                self._set_album_scan_state(req_album, "error", exc)
-                self.general_logger.error(f'Error Getting Missing Tracks for {req_album["artist"]} - {req_album["album_name"]}: {exc}')
-            if req_album.get("scan_state") == "error":
-                failed += 1
-
-        self.lidarr_futures = list(future_map)
-        return len(done), failed
-
-    def _emit_lidarr_update(self):
-        # Only send albums that need attention: unscanned (still processing) or have missing tracks.
-        # Fully-downloaded albums (missing_count=0, scan_ready=True) are omitted to keep the
-        # payload small — serialising 90k+ items on every connect blocks the gevent event loop.
-        # Each item carries its original index so the client can reference self.lidarr_items correctly.
-        slim_items = []
-        for i, item in enumerate(self.lidarr_items):
-            if item.get("missing_count", 0) > 0 or not item.get("scan_ready", False):
-                slim = {k: v for k, v in item.items() if k != "missing_tracks"}
-                slim["index"] = i
-                slim_items.append(slim)
-        socketio.emit("lidarr_update", {
-            "status": self.lidarr_status,
-            "data": slim_items,
-            "scan_progress": self.lidarr_scan_progress,
-            "total_count": len(self.lidarr_items),
-        })
-
-    def _emit_lidarr_progress(self):
-        """Emit only scan progress stats — no data array. Use during tight loops to avoid O(n²) socket traffic."""
-        socketio.emit("lidarr_update", {"status": self.lidarr_status, "data": None, "scan_progress": self.lidarr_scan_progress})
 
     def _emit_ytdlp_update(self):
         # The current batch is bounded; omit its per-track arrays from frequent updates.
@@ -314,446 +205,6 @@ class DataHandler:
         if session_id is not None:
             self._refresh_queue_progress(session_id)
         return dict(self.queue_progress)
-
-    # --- Lidarr cache ---
-
-    def _lidarr_cache_path(self):
-        return os.path.join(self.config.CONFIG_FOLDER, "lidarr_cache.json")
-
-    def _save_lidarr_cache(self, *, status=None, error=None):
-        try:
-            import json
-            cache_path = self._lidarr_cache_path()
-            tmp_path = cache_path + ".tmp"
-            persisted_status = status or self.lidarr_status
-            if persisted_status == "busy":
-                # A checkpoint is incomplete if the process exits before the final write.
-                persisted_status = "error"
-                if error is None:
-                    error = "Lidarr scan was interrupted before completion"
-            scan_state = {
-                "status": persisted_status,
-                "complete": persisted_status == "complete",
-                "last_successful_page": self.lidarr_scan_progress.get("pages_scanned", 0),
-                "scan_started_at": self.lidarr_scan_started_at,
-                "scan_completed_at": self.lidarr_scan_completed_at,
-                "error": str(error) if error else self.lidarr_scan_error,
-            }
-            with open(tmp_path, "w") as f:
-                json.dump(
-                    {
-                        "schema_version": self._LIDARR_CACHE_SCHEMA_VERSION,
-                        "lidarr_items": self.lidarr_items,
-                        "lidarr_scan_progress": self.lidarr_scan_progress,
-                        "lidarr_scan_state": scan_state,
-                    },
-                    f,
-                )
-            os.replace(tmp_path, cache_path)
-            self.general_logger.warning(f"Saved {len(self.lidarr_items)} albums to Lidarr cache")
-        except Exception as e:
-            self.general_logger.error(f"Error saving Lidarr cache: {e}")
-
-    def _load_lidarr_cache(self):
-        try:
-            import json
-            cache_path = self._lidarr_cache_path()
-            if os.path.exists(cache_path):
-                with open(cache_path, "r") as f:
-                    cache = json.load(f)
-                self.lidarr_items = cache.get("lidarr_items", [])
-                cached_progress = cache.get("lidarr_scan_progress", {})
-                cached_state = cache.get("lidarr_scan_state")
-                if isinstance(cached_state, dict):
-                    cached_status = cached_state.get("status", "error")
-                    if cached_status not in self._LIDARR_STATUSES or cached_status == "busy":
-                        cached_status = "error"
-                        cached_progress["phase"] = "Interrupted cached scan"
-                    self.lidarr_status = cached_status
-                    self.lidarr_scan_started_at = cached_state.get("scan_started_at")
-                    self.lidarr_scan_completed_at = cached_state.get("scan_completed_at")
-                    self.lidarr_scan_error = cached_state.get("error")
-                else:
-                    # Version 1 caches predate explicit state. Preserve their historical
-                    # complete-cache behavior while all newly written caches carry state.
-                    self.lidarr_status = "complete"
-                    cached_progress["phase"] = "Complete (cached)"
-                self.lidarr_scan_progress.update(cached_progress)
-                for item in self.lidarr_items:
-                    state = item.get("scan_state")
-                    if state == "scanning" or state not in self._ALBUM_SCAN_STATES:
-                        state = "complete" if item.get("scan_ready", False) else "pending"
-                    self._set_album_scan_state(item, state, item.get("scan_error"))
-                self.general_logger.warning(f"Loaded {len(self.lidarr_items)} albums from Lidarr cache")
-        except Exception as e:
-            self.general_logger.error(f"Error loading Lidarr cache: {e}")
-
-    def _clear_lidarr_cache(self):
-        removed = 0
-        cache_path = self._lidarr_cache_path()
-        for path in (cache_path, cache_path + ".tmp"):
-            if os.path.exists(path):
-                os.remove(path)
-                removed += 1
-        self.general_logger.warning(f"Cleared {removed} Lidarr cache file(s)")
-        return removed
-
-    # --- Lidarr wanted albums ---
-
-    def get_wanted_albums_from_lidarr(self):
-        try:
-            self.general_logger.warning("Accessing Lidarr API")
-            self._set_lidarr_scan_state("busy")
-            self.lidarr_stop_event.clear()
-            self.lidarr_items = []
-            self._set_lidarr_scan_progress(
-                phase="Fetching wanted albums",
-                pages_scanned=0,
-                albums_discovered=0,
-                albums_processed=0,
-                albums_total=0,
-                percent=0,
-            )
-            self._emit_lidarr_update()
-
-            self.general_logger.warning("Pre-fetching artists from Lidarr")
-            self._set_lidarr_scan_progress(phase="Fetching artists")
-            self._emit_lidarr_update()
-            artist_lookup = {}
-            artist_page = 1
-            artist_max_retries = 3
-            while True:
-                last_error = None
-                for attempt in range(artist_max_retries):
-                    try:
-                        response = self.lidarr_client.get_artists_page(artist_page)
-                        try:
-                            if response.status_code != 200:
-                                raise RuntimeError(f"Lidarr artist API error {response.status_code}: {response.text}")
-                            data = response.json()
-                        finally:
-                            response.close()
-                        last_error = None
-                        break
-                    except Exception as e:
-                        last_error = e
-                        wait = self._ARTIST_RETRY_WAIT * (attempt + 1)
-                        self.general_logger.warning(f"Artist fetch attempt {attempt + 1}/{artist_max_retries} failed: {e} — retrying in {wait}s")
-                        socketio.emit("new_toast_msg", {"title": f"Artist fetch retry {attempt + 1}/{artist_max_retries}", "message": str(e)})
-                        self._interruptible_sleep(wait)
-                if last_error:
-                    raise last_error
-                # Lidarr may return a flat array or a paginated object depending on version
-                if isinstance(data, list):
-                    for a in data:
-                        artist_lookup[a["id"]] = a
-                    break
-                records = data.get("records", [])
-                if not records:
-                    break
-                for a in records:
-                    artist_lookup[a["id"]] = a
-                artist_page += 1
-            self.general_logger.warning(f"Fetched {len(artist_lookup)} artists")
-
-            page = 1
-            page_size = 1000
-            scan_worker_count = max(1, int(self.config.lidarr_scan_thread_limit))
-            self.general_logger.warning(f"Fetching wanted albums (pageSize={page_size}) and missing tracks with {scan_worker_count} worker(s)")
-
-            future_map = {}
-            total_albums = 0
-            albums_processed = 0
-            album_scan_errors = 0
-            max_pending = scan_worker_count * self._LIDARR_MAX_PENDING_MULTIPLIER
-            wanted_fetch_incomplete = False
-            last_wanted_error = None
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=scan_worker_count) as executor:
-                while True:
-                    if self.lidarr_stop_event.is_set():
-                        break
-
-                    # Retry a failed page before giving up: Lidarr returns 500s when it is
-                    # busy (e.g. a concurrent library rescan), and abandoning the loop there
-                    # silently truncates the wanted list.
-                    wanted_missing_albums = None
-                    for attempt in range(3):
-                        response = self.lidarr_client.get_wanted_albums(page, page_size)
-                        try:
-                            if response.status_code == 200:
-                                wanted_missing_albums = response.json()
-                                break
-                            self.general_logger.error(f"Lidarr Wanted API Error Code: {response.status_code} (page {page}, attempt {attempt + 1}/3)")
-                            self.general_logger.error(f"Lidarr Wanted API Error Text: {response.text}")
-                            last_wanted_error = f"{response.status_code}: {response.text[:200]}"
-                        finally:
-                            response.close()
-                        if attempt < 2:
-                            self.lidarr_stop_event.wait(2 ** attempt)
-
-                    if wanted_missing_albums is None:
-                        # Do not present a truncated list as a finished scan.
-                        wanted_fetch_incomplete = True
-                        self.general_logger.error(
-                            f"Aborting wanted-album fetch at page {page}: Lidarr did not return a page after 3 attempts. "
-                            f"The album list is INCOMPLETE ({len(self.lidarr_items)} albums fetched so far)."
-                        )
-                        socketio.emit("new_toast_msg", {
-                            "title": "Lidarr fetch incomplete",
-                            "message": f"Lidarr errored on page {page}; only {len(self.lidarr_items)} albums were fetched. Refresh again to get the rest.",
-                        })
-                        break
-
-                    if not wanted_missing_albums["records"]:
-                        break
-                    albums_on_page = wanted_missing_albums["records"]
-                    del wanted_missing_albums
-
-                    for album in albums_on_page:
-                        if self.lidarr_stop_event.is_set():
-                            break
-                        artist = artist_lookup.get(album["artistId"], {})
-                        parsed_date = datetime.fromisoformat(album["releaseDate"].replace("Z", "+00:00"))
-                        album_year = parsed_date.year
-                        album_name = _general.convert_to_lidarr_format(album["title"])
-                        album_folder = f"{album_name} ({album_year})"
-                        album_full_path = os.path.join(artist.get("path", ""), album_folder)
-                        album_release_id = album["releases"][0]["id"]
-                        new_item = {
-                            "artist_id": album["artistId"],
-                            "artist_path": artist.get("path", ""),
-                            "artist": artist.get("artistName", ""),
-                            "album_name": album_name,
-                            "album_folder": album_folder,
-                            "album_full_path": album_full_path,
-                            "album_year": album_year,
-                            "album_id": album["id"],
-                            "album_release_id": album_release_id,
-                            "album_genres": ", ".join(album["genres"]),
-                            "album_secondary_types": list(album.get("secondaryTypes") or []),
-                            "artist_genres": ", ".join(artist.get("genres") or []),
-                            "track_count": 0,
-                            "missing_count": 0,
-                            "missing_tracks": [],
-                            "checked": True,
-                            "scan_ready": False,
-                            "scan_in_progress": False,
-                            "scan_state": "pending",
-                            "scan_error": None,
-                            "status": "",
-                        }
-                        self.lidarr_items.append(new_item)
-                        while len(future_map) >= max_pending and not self.lidarr_stop_event.is_set():
-                            processed, failed = self._drain_lidarr_futures(future_map, wait_for_one=True)
-                            albums_processed += processed
-                            album_scan_errors += failed
-                        if self.lidarr_stop_event.is_set():
-                            break
-                        future = executor.submit(self.get_missing_tracks_for_album, new_item)
-                        future_map[future] = new_item
-                        self.lidarr_futures = list(future_map)
-                    del albums_on_page
-
-                    # Drain completed track futures while next page is being fetched
-                    processed, failed = self._drain_lidarr_futures(future_map)
-                    albums_processed += processed
-                    album_scan_errors += failed
-                    discovered = len(self.lidarr_items)
-                    self._set_lidarr_scan_progress(
-                        phase="Fetching albums & tracks",
-                        pages_scanned=page,
-                        albums_discovered=discovered,
-                        albums_processed=albums_processed,
-                        albums_total=discovered,
-                        percent=int(albums_processed / discovered * 100) if discovered else 0,
-                    )
-                    self._emit_lidarr_update()
-                    if page % self._LIDARR_CACHE_CHECKPOINT_PAGES == 0:
-                        self._save_lidarr_cache()
-                    page += 1
-
-                self.lidarr_items.sort(key=lambda x: (x["artist"], x["album_name"]))
-                total_albums = len(self.lidarr_items)
-                self._set_lidarr_scan_progress(
-                    phase="Fetching missing tracks",
-                    albums_total=total_albums,
-                    albums_processed=albums_processed,
-                    percent=int(albums_processed / total_albums * 100) if total_albums else 100,
-                )
-                self._emit_lidarr_update()
-
-                while future_map:
-                    if self.lidarr_stop_event.is_set():
-                        break
-                    processed, failed = self._drain_lidarr_futures(future_map, wait_for_one=True)
-                    albums_processed += processed
-                    album_scan_errors += failed
-                    percent = int((albums_processed / total_albums) * 100) if total_albums else 100
-                    self._set_lidarr_scan_progress(phase="Fetching missing tracks", albums_processed=albums_processed, percent=percent)
-                    self._emit_lidarr_progress()
-                self._emit_lidarr_update()
-
-            self.lidarr_futures = []
-            if self.lidarr_stop_event.is_set():
-                self._set_lidarr_scan_state("stopped", phase="Stopped")
-            elif wanted_fetch_incomplete:
-                # The list is truncated — say so instead of reporting a finished scan.
-                self._set_lidarr_scan_state(
-                    "error",
-                    phase=f"Incomplete — Lidarr error on page {page} ({total_albums} albums fetched)",
-                    error=last_wanted_error,
-                    albums_processed=albums_processed, albums_total=total_albums, percent=100,
-                )
-                self.general_logger.error(f"Wanted-album fetch incomplete; last Lidarr error: {last_wanted_error}")
-                self._save_lidarr_cache()
-            elif album_scan_errors:
-                message = f"{album_scan_errors} album track scan(s) failed"
-                self._set_lidarr_scan_state(
-                    "error",
-                    phase=f"Incomplete — {message}",
-                    error=message,
-                    albums_processed=albums_processed,
-                    albums_total=total_albums,
-                    percent=100,
-                )
-                self._save_lidarr_cache()
-            else:
-                self._set_lidarr_scan_state("complete", phase="Complete", albums_processed=total_albums, albums_total=total_albums, percent=100)
-                self._save_lidarr_cache()
-
-        except Exception as e:
-            self.general_logger.error(f"Error Getting Missing Albums: {e}")
-            self._set_lidarr_scan_state("error", phase="Error", error=e)
-            socketio.emit("new_toast_msg", {"title": "Error Getting Missing Albums", "message": str(e)})
-
-        finally:
-            self._emit_lidarr_update()
-
-    def get_missing_tracks_for_album(self, req_album):
-        while True:
-            with self.lidarr_scan_guard:
-                if req_album.get("scan_ready", False):
-                    return True
-                if not req_album.get("scan_in_progress", False):
-                    self._set_album_scan_state(req_album, "scanning")
-                    break
-            if self.ytdlp_stop_event.is_set() or self.lidarr_stop_event.is_set():
-                self._set_album_scan_state(req_album, "pending")
-                return False
-            time.sleep(0.1)
-
-        self.general_logger.warning(f'Reading Missing Track list of {req_album["artist"]} - {req_album["album_name"]} from Lidarr API')
-        last_error = None
-
-        for attempt in range(3):
-            req_album["scan_attempts"] = attempt + 1
-            try:
-                req_album["missing_tracks"] = []
-                req_album["track_count"] = 0
-                req_album["missing_count"] = 0
-                self.fd.wait_if_pressure()
-                if self.lidarr_stop_event.is_set():
-                    self._set_album_scan_state(req_album, "pending")
-                    return False
-
-                response = self.lidarr_client.get_tracks_for_album(req_album["album_id"])
-                try:
-                    if response.status_code == 200:
-                        tracks = response.json()
-                        track_count = len(tracks)
-                        for track in tracks:
-                            if self.lidarr_stop_event.is_set():
-                                del tracks
-                                self._set_album_scan_state(req_album, "pending")
-                                return False
-                            if not track.get("hasFile", False):
-                                new_item = {
-                                    "artist": req_album["artist"],
-                                    "track_title": track["title"],
-                                    "track_number": track["trackNumber"],
-                                    "absolute_track_number": track["absoluteTrackNumber"],
-                                    "track_id": track["id"],
-                                    "duration_ms": track.get("duration", 0),
-                                    "link": "",
-                                    "title_of_link": "",
-                                }
-                                req_album["missing_tracks"].append(new_item)
-                        del tracks
-                        req_album["track_count"] = track_count
-                        req_album["missing_count"] = len(req_album["missing_tracks"])
-                        last_error = None
-                    else:
-                        last_error = RuntimeError(
-                            f"Lidarr Track API error {response.status_code}: {response.text[:200]}"
-                        )
-                        self.general_logger.error(req_album["album_name"])
-                        self.general_logger.error(f"Lidarr Track API Error Code: {response.status_code}")
-                        self.general_logger.error(f"Lidarr Track API Error Text: {response.text}")
-                finally:
-                    response.close()
-                break
-
-            except Exception as e:
-                last_error = e
-                if _general.is_resource_exhaustion_error(e) and attempt < 2:
-                    self.general_logger.warning(f'FD exhaustion on track fetch attempt {attempt + 1}, backing off: {req_album["album_name"]}')
-                    self.fd.signal_exhaustion_in_background()
-                    continue
-                break
-
-        if last_error is not None:
-            self.general_logger.error(req_album["album_name"])
-            self.general_logger.error(f"Error Getting Missing Tracks: {last_error}")
-            socketio.emit("new_toast_msg", {"title": "Error Getting Missing Tracks", "message": str(last_error)})
-            self._set_album_scan_state(req_album, "error", last_error)
-            return False
-
-        self._set_album_scan_state(req_album, "complete")
-        self.general_logger.warning(
-            f'Track scan complete: {req_album["artist"]} - {req_album["album_name"]} '
-            f'({req_album["missing_count"]} missing of {req_album["track_count"]} tracks)'
-        )
-
-        if self.streaming_mode:
-            req_album["status"] = "Queued"
-            if self.current_session_id is None:
-                self.current_session_id = self.store.start_session(requested_count=0)
-                self._start_queue_thread(self.current_session_id)
-            self.store.enqueue_items(self.current_session_id, [req_album])
-            self.store.increment_session_requested_count(
-                self.current_session_id, len(req_album.get("missing_tracks", []))
-            )
-
-        return True
-
-    def reset_lidarr(self):
-        cache_cleanup_error = None
-        cache_removed_count = 0
-        try:
-            self.lidarr_stop_event.set()
-            for future in self.lidarr_futures:
-                if not future.done():
-                    future.cancel()
-            self.lidarr_futures = []
-            self.lidarr_items = []
-            self._set_lidarr_scan_state("idle")
-            self.lidarr_scan_progress = self._default_lidarr_scan_progress()
-            cache_removed_count = self._clear_lidarr_cache()
-            self.general_logger.warning("Lidarr reset complete")
-        except Exception as e:
-            cache_cleanup_error = str(e)
-            self.general_logger.error(f"Lidarr reset failed: {e}")
-        finally:
-            self._emit_lidarr_update()
-            if cache_cleanup_error:
-                socketio.emit("new_toast_msg", {"title": "Lidarr Reset Error", "message": cache_cleanup_error})
-            else:
-                if cache_removed_count:
-                    msg = f"Reset complete. Cleared {cache_removed_count} cache file(s)."
-                else:
-                    msg = "Reset complete. No cache files were present."
-                socketio.emit("new_toast_msg", {"title": "Lidarr Reset", "message": msg})
 
     # --- Download queue ---
 
@@ -806,7 +257,7 @@ class DataHandler:
         try:
             selected = {
                 int(index) for index in data
-                if isinstance(index, int) and 0 <= index < len(self.lidarr_items)
+                if isinstance(index, int) and 0 <= index < len(self.scanner.items)
             }
             if not selected:
                 raise ValueError("No valid albums were selected")
@@ -825,7 +276,7 @@ class DataHandler:
 
             chunk = []
             chunk_tracks = 0
-            for index, item in enumerate(self.lidarr_items):
+            for index, item in enumerate(self.scanner.items):
                 item["checked"] = index in selected
                 if not item["checked"]:
                     continue
@@ -982,6 +433,19 @@ class DataHandler:
             self._refresh_queue_progress(self.current_session_id)
             self._emit_ytdlp_update()
 
+    def _enqueue_streamed_album(self, req_album):
+        """During a scheduled sync, queue each album for download as soon as its scan completes."""
+        if not self.streaming_mode:
+            return
+        req_album["status"] = "Queued"
+        if self.current_session_id is None:
+            self.current_session_id = self.store.start_session(requested_count=0)
+            self._start_queue_thread(self.current_session_id)
+        self.store.enqueue_items(self.current_session_id, [req_album])
+        self.store.increment_session_requested_count(
+            self.current_session_id, len(req_album.get("missing_tracks", []))
+        )
+
     def _wait_for_album_scan_data(self, req_album):
         if req_album.get("scan_ready", True):
             return True
@@ -991,14 +455,14 @@ class DataHandler:
 
         if not req_album.get("scan_in_progress", False):
             self.general_logger.warning(f'Prioritizing scan for queued album: {req_album["artist"]} - {req_album["album_name"]}')
-            self.get_missing_tracks_for_album(req_album)
+            self.scanner.scan_album_tracks(req_album)
             if req_album.get("scan_ready", False):
                 return True
 
         while not self.ytdlp_stop_event.is_set():
             if req_album.get("scan_ready", False):
                 return True
-            if self.lidarr_status != "busy":
+            if self.scanner.status != "busy":
                 return req_album.get("scan_ready", False)
             self.ytdlp_stop_event.wait(0.5)
 
@@ -1145,10 +609,6 @@ class DataHandler:
         finally:
             self._emit_ytdlp_update()
 
-    def _interruptible_sleep(self, seconds):
-        """Sleep for up to `seconds`, returning early if the lidarr stop event fires."""
-        self.lidarr_stop_event.wait(timeout=seconds)
-
 
 app = Flask(__name__)
 app.secret_key = "secret_key"
@@ -1172,21 +632,6 @@ def _page_args():
     return limit, offset
 
 
-def _filtered_lidarr_indices(query, checked_only=False):
-    """Positional indices of albums that still have missing/pending tracks, filtered by query."""
-    indices = []
-    for index, item in enumerate(data_handler.lidarr_items):
-        if item.get("missing_count", 0) <= 0 and item.get("scan_ready", False):
-            continue
-        if checked_only and not item.get("checked", False):
-            continue
-        label = f"{item.get('artist', '')} {item.get('album_name', '')}".lower()
-        if query and query not in label:
-            continue
-        indices.append(index)
-    return indices
-
-
 @app.route("/api/lidarr")
 def api_lidarr():
     query = request.args.get("q", "").strip().lower()
@@ -1195,16 +640,16 @@ def api_lidarr():
     # server currently has selected, which is the default download set.
     if request.args.get("ids_only"):
         checked_only = bool(request.args.get("checked_only"))
-        indices = _filtered_lidarr_indices(query, checked_only=checked_only)
+        indices = data_handler.scanner.filtered_indices(query, checked_only=checked_only)
         return jsonify({"ids": indices, "total": len(indices)})
-    indices = _filtered_lidarr_indices(query)
+    indices = data_handler.scanner.filtered_indices(query)
     page = _page_args()
     if page is None:
         return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
     limit, offset = page
     items = []
     for index in indices[offset:offset + limit]:
-        item = data_handler.lidarr_items[index]
+        item = data_handler.scanner.items[index]
         slim = {key: value for key, value in item.items() if key != "missing_tracks"}
         slim["index"] = index
         items.append(slim)
@@ -1331,19 +776,19 @@ def delete_cookies():
 
 @socketio.on("lidarr_get_wanted")
 def lidarr():
-    thread = threading.Thread(target=data_handler.get_wanted_albums_from_lidarr, name="Lidarr_Thread")
+    thread = threading.Thread(target=data_handler.scanner.fetch_wanted_albums, name="Lidarr_Thread")
     thread.daemon = True
     thread.start()
 
 
 @socketio.on("stop_lidarr")
 def stop_lidarr():
-    data_handler.lidarr_stop_event.set()
+    data_handler.scanner.stop_event.set()
 
 
 @socketio.on("reset_lidarr")
 def reset_lidarr():
-    data_handler.reset_lidarr()
+    data_handler.scanner.reset()
 
 
 @socketio.on("stop_ytdlp")
