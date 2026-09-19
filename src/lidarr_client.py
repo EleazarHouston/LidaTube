@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import requests
 from requests.adapters import HTTPAdapter
@@ -110,3 +111,58 @@ class LidarrClient:
         headers = {"X-Api-Key": self.config.lidarr_api_key, "Content-Type": "application/json"}
         data = {"name": "ManualImport", "importMode": import_mode, "files": files}
         return self.session.post(endpoint, json=data, headers=headers, timeout=self.config.lidarr_api_timeout), len(files)
+
+    def import_album(self, req_album):
+        """Import a downloaded album into the library via Lidarr's manual import.
+
+        Scans the album's folder (staging when lidarr_download_path is set, else the
+        in-place library folder), then posts a ManualImport 'move' command using
+        Lidarr's own parsed candidates.
+        """
+        if self.config.lidarr_download_path:
+            artist_str = os.path.basename(req_album["artist_path"].rstrip("/"))
+            folder = os.path.join(self.config.lidarr_download_path, artist_str, req_album["album_folder"])
+        else:
+            folder = req_album["album_full_path"]
+        scan = None
+        response = None
+        try:
+            scan = self.scan_import_candidates(folder)
+            if scan.status_code != 200:
+                self.logger.error(f"Import scan failed ({scan.status_code}) for {folder}")
+                return
+            response, count = self.import_candidates(scan.json(), import_mode="move")
+            if count == 0:
+                self.logger.warning(f"No importable files found in {folder}")
+            elif response.status_code in (200, 201):
+                self.logger.warning(
+                    f'Import queued for {count} file(s): {req_album["artist"]} - {req_album["album_name"]}'
+                )
+            else:
+                self.logger.error(f"Import command failed ({response.status_code}): {response.text}")
+        except Exception as e:
+            self.logger.error(f"Error importing album via Lidarr: {e}")
+        finally:
+            if response is not None:
+                response.close()
+            if scan is not None:
+                scan.close()
+
+    def rescan_library(self):
+        """Ask Lidarr to rescan every root folder so it picks up newly written files."""
+        response = None
+        try:
+            root_folders = self.get_root_folders()
+            if not root_folders:
+                self.logger.warning("No Lidarr root folders found")
+                return
+            response = self.trigger_library_scan(root_folders)
+            if response.status_code != 201:
+                self.logger.warning("Failed to start lidarr library scan")
+            else:
+                self.logger.warning("Lidarr library scan started")
+        except Exception as e:
+            self.logger.error(f"Lidarr library scan failed: {e}")
+        finally:
+            if response is not None:
+                response.close()

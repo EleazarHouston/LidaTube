@@ -939,27 +939,6 @@ def test_response_closed_on_non_200_track_fetch(lidatube_module, monkeypatch):
     assert "500" in album["scan_error"]
 
 
-def test_import_album_closes_scan_and_command_responses(lidatube_module):
-    handler = build_data_handler(lidatube_module)
-    scan = FakeResponse(200, [{"path": "/staging/file.mp3"}])
-    response = FakeResponse(201, {})
-    scan.close = Mock()
-    response.close = Mock()
-    handler.lidarr_client.scan_import_candidates.return_value = scan
-    handler.lidarr_client.import_candidates.return_value = (response, 1)
-
-    handler.import_album({
-        "artist": "Artist",
-        "album_name": "Album",
-        "artist_path": "/music/Artist",
-        "album_folder": "Album (2024)",
-        "album_full_path": "/music/Artist/Album (2024)",
-    })
-
-    scan.close.assert_called_once_with()
-    response.close.assert_called_once_with()
-
-
 def test_link_finder_does_not_retry_secondary_after_emfile(lidatube_module, monkeypatch):
     handler = build_data_handler(lidatube_module)
 
@@ -2529,62 +2508,3 @@ def test_scheduler_outside_sync_window_checks_again_in_ten_minutes(lidatube_modu
 
     assert sleeps == [600]
     fetch.assert_not_called()
-
-
-_IMPORT_ALBUM = {
-    "artist": "Artist",
-    "album_name": "Album",
-    "artist_path": "/music/Artist/",
-    "album_folder": "Album (2024)",
-    "album_full_path": "/music/Artist/Album (2024)",
-}
-
-
-@pytest.mark.parametrize("download_path, scanned_folder", [
-    ("/staging", "/staging/Artist/Album (2024)"),
-    ("", "/music/Artist/Album (2024)"),
-])
-def test_import_album_scans_the_staging_or_in_place_folder(lidatube_module, download_path, scanned_folder):
-    handler = build_data_handler(lidatube_module)
-    handler.config.lidarr_download_path = download_path
-    handler.lidarr_client.scan_import_candidates.return_value = FakeResponse(200, [{"path": "x"}])
-    handler.lidarr_client.import_candidates.return_value = (FakeResponse(201, {}), 1)
-
-    handler.import_album(dict(_IMPORT_ALBUM))
-
-    handler.lidarr_client.scan_import_candidates.assert_called_once_with(scanned_folder)
-    handler.lidarr_client.import_candidates.assert_called_once_with([{"path": "x"}], import_mode="move")
-
-
-def test_import_album_does_not_import_when_the_folder_scan_fails(lidatube_module):
-    handler = build_data_handler(lidatube_module)
-    scan = FakeResponse(500, None, text="boom")
-    scan.close = Mock()
-    handler.lidarr_client.scan_import_candidates.return_value = scan
-
-    handler.import_album(dict(_IMPORT_ALBUM))
-
-    handler.lidarr_client.import_candidates.assert_not_called()
-    scan.close.assert_called_once_with()
-
-
-def test_trigger_lidarr_scan_rescans_every_root_folder(lidatube_module):
-    handler = build_data_handler(lidatube_module)
-    response = FakeResponse(201, {})
-    response.close = Mock()
-    handler.lidarr_client.get_root_folders.return_value = ["/music", "/audiobooks"]
-    handler.lidarr_client.trigger_library_scan.return_value = response
-
-    handler.trigger_lidarr_scan()
-
-    handler.lidarr_client.trigger_library_scan.assert_called_once_with(["/music", "/audiobooks"])
-    response.close.assert_called_once_with()
-
-
-def test_trigger_lidarr_scan_skips_the_rescan_without_root_folders(lidatube_module):
-    handler = build_data_handler(lidatube_module)
-    handler.lidarr_client.get_root_folders.return_value = []
-
-    handler.trigger_lidarr_scan()
-
-    handler.lidarr_client.trigger_library_scan.assert_not_called()

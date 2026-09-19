@@ -735,62 +735,6 @@ class DataHandler:
 
         return True
 
-    # --- Lidarr actions ---
-
-    def import_album(self, req_album):
-        """Import a downloaded album into the library via Lidarr's manual import.
-
-        Scans the album's folder (staging when lidarr_download_path is set, else the
-        in-place library folder), then posts a ManualImport 'move' command using
-        Lidarr's own parsed candidates.
-        """
-        if self.config.lidarr_download_path:
-            artist_str = os.path.basename(req_album["artist_path"].rstrip("/"))
-            folder = os.path.join(self.config.lidarr_download_path, artist_str, req_album["album_folder"])
-        else:
-            folder = req_album["album_full_path"]
-        scan = None
-        response = None
-        try:
-            scan = self.lidarr_client.scan_import_candidates(folder)
-            if scan.status_code != 200:
-                self.general_logger.error(f"Import scan failed ({scan.status_code}) for {folder}")
-                return
-            response, count = self.lidarr_client.import_candidates(scan.json(), import_mode="move")
-            if count == 0:
-                self.general_logger.warning(f"No importable files found in {folder}")
-            elif response.status_code in (200, 201):
-                self.general_logger.warning(
-                    f'Import queued for {count} file(s): {req_album["artist"]} - {req_album["album_name"]}'
-                )
-            else:
-                self.general_logger.error(f"Import command failed ({response.status_code}): {response.text}")
-        except Exception as e:
-            self.general_logger.error(f"Error importing album via Lidarr: {e}")
-        finally:
-            if response is not None:
-                response.close()
-            if scan is not None:
-                scan.close()
-
-    def trigger_lidarr_scan(self):
-        response = None
-        try:
-            root_folders = self.lidarr_client.get_root_folders()
-            if not root_folders:
-                self.general_logger.warning("No Lidarr root folders found")
-                return
-            response = self.lidarr_client.trigger_library_scan(root_folders)
-            if response.status_code != 201:
-                self.general_logger.warning("Failed to start lidarr library scan")
-            else:
-                self.general_logger.warning("Lidarr library scan started")
-        except Exception as e:
-            self.general_logger.error(f"Lidarr library scan failed: {e}")
-        finally:
-            if response is not None:
-                response.close()
-
     def reset_lidarr(self):
         cache_cleanup_error = None
         cache_removed_count = 0
@@ -1010,7 +954,7 @@ class DataHandler:
                 self.ytdlp_status = "complete"
                 self.general_logger.warning("Downloading Finished")
                 if self.config.library_scan_on_completion:
-                    self.trigger_lidarr_scan()
+                    self.lidarr_client.rescan_library()
 
         except Exception as e:
             self.general_logger.error(f"Error in Master Queue: {e}")
@@ -1121,7 +1065,7 @@ class DataHandler:
                 self._emit_ytdlp_update()
 
             if self.config.attempt_lidarr_import and grabbed_count > 0 and not self.ytdlp_stop_event.is_set():
-                self.import_album(req_album)
+                self.lidarr_client.import_album(req_album)
 
             if self.ytdlp_stop_event.is_set():
                 req_album["status"] = "Download Stopped"

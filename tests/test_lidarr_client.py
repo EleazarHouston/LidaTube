@@ -173,6 +173,72 @@ def test_import_candidates_skips_unmatched_candidates(client):
 # --- thread-local sessions ---
 
 
+# --- import_album / rescan_library ---
+
+
+_ALBUM = {
+    "artist": "Artist",
+    "album_name": "Album",
+    "artist_path": "/music/Artist/",
+    "album_folder": "Album (2024)",
+    "album_full_path": "/music/Artist/Album (2024)",
+}
+
+
+@pytest.mark.parametrize("download_path, scanned_folder", [
+    ("/staging", "/staging/Artist/Album (2024)"),
+    ("", "/music/Artist/Album (2024)"),
+])
+def test_import_album_imports_the_staging_or_in_place_folder(client, download_path, scanned_folder):
+    client.config.lidarr_download_path = download_path
+    scan = FakeResponse(200, [{"path": "x"}])
+    command = FakeResponse(201, {})
+    scan.close, command.close = Mock(), Mock()
+    with patch.object(client, "scan_import_candidates", return_value=scan) as scan_mock, \
+            patch.object(client, "import_candidates", return_value=(command, 1)) as import_mock:
+        client.import_album(dict(_ALBUM))
+
+    scan_mock.assert_called_once_with(scanned_folder)
+    import_mock.assert_called_once_with([{"path": "x"}], import_mode="move")
+    scan.close.assert_called_once_with()
+    command.close.assert_called_once_with()
+
+
+def test_import_album_does_not_import_when_the_folder_scan_fails(client):
+    scan = FakeResponse(500, None, text="boom")
+    scan.close = Mock()
+    with patch.object(client, "scan_import_candidates", return_value=scan), \
+            patch.object(client, "import_candidates") as import_mock:
+        client.import_album(dict(_ALBUM))
+
+    import_mock.assert_not_called()
+    scan.close.assert_called_once_with()
+
+
+def test_import_album_logs_instead_of_raising_on_lidarr_errors(client):
+    with patch.object(client, "scan_import_candidates", side_effect=ConnectionError("down")):
+        client.import_album(dict(_ALBUM))
+    client.logger.error.assert_called_once()
+
+
+def test_rescan_library_rescans_every_root_folder(client):
+    response = FakeResponse(201, {})
+    response.close = Mock()
+    with patch.object(client, "get_root_folders", return_value=["/music", "/audiobooks"]), \
+            patch.object(client, "trigger_library_scan", return_value=response) as scan_mock:
+        client.rescan_library()
+
+    scan_mock.assert_called_once_with(["/music", "/audiobooks"])
+    response.close.assert_called_once_with()
+
+
+def test_rescan_library_skips_the_rescan_without_root_folders(client):
+    with patch.object(client, "get_root_folders", return_value=[]), \
+            patch.object(client, "trigger_library_scan") as scan_mock:
+        client.rescan_library()
+    scan_mock.assert_not_called()
+
+
 def test_different_threads_get_different_sessions(client):
     """Each thread must have its own session so connections don't share a pool."""
     sessions = {}
