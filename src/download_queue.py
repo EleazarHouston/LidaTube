@@ -109,6 +109,7 @@ class DownloadQueue:
         """Run session_id on the queue thread; False if a session is already running."""
         if self.in_progress:
             return False
+        previous_session_id, previous_status = self.current_session_id, self.status
         self.current_session_id = session_id
         self.stop_event.clear()
         self.status = "running"
@@ -119,7 +120,13 @@ class DownloadQueue:
             name="Queue_Thread",
             daemon=True,
         )
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            # Without a thread nothing is running; don't leave the UI and API reporting a live session.
+            self.current_session_id, self.status = previous_session_id, previous_status
+            self.in_progress = False
+            raise
         return True
 
     def resume(self, emit=True, include_user_stopped=True):
@@ -325,12 +332,17 @@ class DownloadQueue:
         """Take albums from a scheduled Lidarr scan as they are scanned, starting a session if none is running."""
         self.streaming_mode = True
         self.stop_event.clear()
-        if not self.in_progress:
-            self.items = []
-            self.percent_completion = 0
-            self.index = 0
-            self.current_session_id = self.store.start_session(requested_count=0)
-            self.start(self.current_session_id)
+        try:
+            if not self.in_progress:
+                self.items = []
+                self.percent_completion = 0
+                self.index = 0
+                self.current_session_id = self.store.start_session(requested_count=0)
+                self.start(self.current_session_id)
+        except Exception:
+            # Left on, streaming mode keeps the next session waiting for albums that never arrive.
+            self.streaming_mode = False
+            raise
 
     def end_streaming(self):
         self.streaming_mode = False

@@ -645,3 +645,57 @@ def test_begin_streaming_joins_the_running_session_or_starts_one(monkeypatch, qu
 
     queue.end_streaming()
     assert queue.streaming_mode is False
+
+
+class _UnstartableThread:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        raise RuntimeError("can't start new thread")
+
+
+class _NoopThread:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        pass
+
+
+def test_begin_streaming_leaves_streaming_off_when_the_session_cannot_start():
+    import sqlite3
+
+    queue = build_queue()
+    queue.store.start_session.side_effect = sqlite3.OperationalError("database is locked")
+
+    with pytest.raises(sqlite3.OperationalError):
+        queue.begin_streaming()
+
+    assert queue.streaming_mode is False
+    assert queue.in_progress is False
+
+
+def test_start_rolls_back_the_running_state_when_the_queue_thread_cannot_start(monkeypatch):
+    queue = build_queue()
+    status_before = queue.status
+    monkeypatch.setattr(download_queue.threading, "Thread", _UnstartableThread)
+
+    with pytest.raises(RuntimeError):
+        queue.start(5)
+
+    assert queue.in_progress is False
+    assert queue.status == status_before
+    monkeypatch.setattr(download_queue.threading, "Thread", _NoopThread)
+    assert queue.start(5) is True
+
+
+def test_begin_streaming_leaves_streaming_off_when_the_queue_thread_cannot_start(monkeypatch):
+    queue = build_queue()
+    monkeypatch.setattr(download_queue.threading, "Thread", _UnstartableThread)
+
+    with pytest.raises(RuntimeError):
+        queue.begin_streaming()
+
+    assert queue.streaming_mode is False
+    assert queue.in_progress is False
