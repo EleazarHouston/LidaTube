@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import _matcher
+from fd_governor import FdGovernor
 from store import Store
 
 
@@ -55,7 +56,8 @@ def build_data_handler(module):
     handler.ytdlp_futures = []
     handler.ytdlp_status = "idle"
     handler.ytdlp_stop_event = threading.Event()
-    handler.fd_exhaustion_event = threading.Event()
+    handler.fd = FdGovernor(Mock())
+    handler.fd.fd_limit = None
     handler._ytmusic_semaphore = threading.Semaphore(2)
     handler.ytdlp_in_progress_flag = False
     handler._reset_session_ids = set()
