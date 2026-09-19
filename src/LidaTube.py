@@ -741,22 +741,6 @@ class DataHandler:
 
     # --- Lidarr actions ---
 
-    def attempt_lidarr_song_import(self, req_album, song, filename):
-        response = None
-        try:
-            self.general_logger.warning("Attempting import of song via Lidarr API")
-            response = self.lidarr_client.import_song(req_album, song, filename)
-            if response.status_code == 202:
-                self.general_logger.warning("Song import initiated")
-            else:
-                self.general_logger.error(f"Import Attempt - Failed to initiate song import: {response.status_code}")
-                self.general_logger.error(f"Import Attempt - Error message: {response.text}")
-        except Exception as e:
-            self.general_logger.error(f"Error occurred while attempting import of song: {e}")
-        finally:
-            if response is not None:
-                response.close()
-
     def import_album(self, req_album):
         """Import a downloaded album into the library via Lidarr's manual import.
 

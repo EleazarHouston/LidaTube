@@ -131,63 +131,6 @@ def test_trigger_library_scan_uses_api_key_header(client):
     assert headers["X-Api-Key"] == "test-api-key"
 
 
-# --- import_song ---
-
-
-def test_import_song_posts_to_manualimport(client):
-    req_album = {"album_full_path": "/music/Album", "artist_id": 1, "album_id": 10, "album_release_id": 100}
-    song = {"track_id": 42, "track_title": "My Song"}
-    with patch.object(client.session, "post", return_value=FakeResponse(202, {})) as mock_post:
-        client.import_song(req_album, song, "My Song.mp3")
-    url = mock_post.call_args[0][0]
-    assert "manualimport" in url
-
-
-def test_import_song_sends_correct_ids(client):
-    req_album = {"album_full_path": "/music/Album", "artist_id": 1, "album_id": 10, "album_release_id": 100}
-    song = {"track_id": 42, "track_title": "My Song"}
-    with patch.object(client.session, "post", return_value=FakeResponse(202, {})) as mock_post:
-        client.import_song(req_album, song, "My Song.mp3")
-    payload = mock_post.call_args[1]["json"][0]
-    assert payload["id"] == 42
-    assert payload["artistId"] == 1
-    assert payload["albumId"] == 10
-    assert payload["albumReleaseId"] == 100
-
-
-def test_import_song_returns_response(client):
-    req_album = {"album_full_path": "/music/Album", "artist_id": 1, "album_id": 10, "album_release_id": 100}
-    song = {"track_id": 42, "track_title": "My Song"}
-    with patch.object(client.session, "post", return_value=FakeResponse(202, {})):
-        response = client.import_song(req_album, song, "My Song.mp3")
-    assert response.status_code == 202
-
-
-def test_import_song_legacy_uses_album_full_path(client):
-    req_album = {"album_full_path": "/media/library/music/Artist/Album (2020)",
-                 "artist_path": "/media/library/music/Artist", "album_folder": "Album (2020)",
-                 "artist_id": 1, "album_id": 10, "album_release_id": 100}
-    song = {"track_id": 42, "track_title": "My Song"}
-    with patch.object(client.session, "post", return_value=FakeResponse(202, {})) as mock_post:
-        client.import_song(req_album, song, "My Song.mp3")
-    payload = mock_post.call_args[1]["json"][0]
-    assert payload["path"] == "/media/library/music/Artist/Album (2020)/My Song.mp3"
-    assert mock_post.call_args[1]["params"]["importMode"] == "move"
-
-
-def test_import_song_staging_uses_lidarr_download_path(client):
-    client.config.lidarr_download_path = "/media/downloads/lidatube"
-    req_album = {"album_full_path": "/media/library/music/Artist/Album (2020)",
-                 "artist_path": "/media/library/music/Artist", "album_folder": "Album (2020)",
-                 "artist_id": 1, "album_id": 10, "album_release_id": 100}
-    song = {"track_id": 42, "track_title": "My Song"}
-    with patch.object(client.session, "post", return_value=FakeResponse(202, {})) as mock_post:
-        client.import_song(req_album, song, "My Song.mp3")
-    payload = mock_post.call_args[1]["json"][0]
-    # Staging path in Lidarr's namespace, so Lidarr moves it into the library.
-    assert payload["path"] == "/media/downloads/lidatube/Artist/Album (2020)/My Song.mp3"
-
-
 def _candidate(**over):
     c = {
         "path": "/media/downloads/lidatube/Artist/Album (2020)/track.mp3",
@@ -260,16 +203,4 @@ def test_get_root_folders_uses_api_key_header(client):
         client.get_root_folders()
 
     headers = mock_get.call_args[1]["headers"]
-    assert headers["X-Api-Key"] == "test-api-key"
-
-
-def test_import_song_sends_path_and_api_key_header(client):
-    req_album = {"album_full_path": "/music/Album", "artist_id": 1, "album_id": 10, "album_release_id": 100}
-    song = {"track_id": 42, "track_title": "My Song"}
-    with patch.object(client.session, "post", return_value=FakeResponse(202, {})) as mock_post:
-        client.import_song(req_album, song, "My Song.mp3")
-
-    payload = mock_post.call_args[1]["json"][0]
-    headers = mock_post.call_args[1]["headers"]
-    assert payload["path"] == "/music/Album/My Song.mp3"
     assert headers["X-Api-Key"] == "test-api-key"

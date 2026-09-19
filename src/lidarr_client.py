@@ -1,5 +1,4 @@
 import logging
-import os
 import threading
 import requests
 from requests.adapters import HTTPAdapter
@@ -69,32 +68,6 @@ class LidarrClient:
         data = {"name": "RescanFolders", "folders": folders}
         return self.session.post(endpoint, json=data, headers=headers, timeout=self.config.lidarr_api_timeout)
 
-    def import_song(self, req_album, song, filename):
-        self.logger.warning(f'Importing song via Lidarr: {req_album.get("artist", "?")} - {song["track_title"]} ({filename})')
-        endpoint = f"{self.config.lidarr_address}/api/v1/manualimport"
-        headers = {"X-Api-Key": self.config.lidarr_api_key, "Content-Type": "application/json"}
-        full_file_path = self._lidarr_import_path(req_album, filename)
-        data = {
-            "id": song["track_id"],
-            "path": full_file_path,
-            "name": song["track_title"],
-            "artistId": req_album["artist_id"],
-            "albumId": req_album["album_id"],
-            "albumReleaseId": req_album["album_release_id"],
-            "quality": {},
-            "releaseGroup": "",
-            "indexerFlags": 0,
-            "downloadId": "",
-            "additionalFile": False,
-            "replaceExistingFiles": False,
-            "disableReleaseSwitching": False,
-            "rejections": [],
-        }
-        # importMode 'move' relocates staged files into the library; harmless for
-        # in-place (legacy) imports where source and destination already coincide.
-        params = {"importMode": "move"}
-        return self.session.post(endpoint, json=[data], params=params, headers=headers, timeout=self.config.lidarr_api_timeout)
-
     def scan_import_candidates(self, folder):
         """GET Lidarr's parsed import candidates for a folder (it detects quality + tracks)."""
         endpoint = f"{self.config.lidarr_address}/api/v1/manualimport"
@@ -137,16 +110,3 @@ class LidarrClient:
         headers = {"X-Api-Key": self.config.lidarr_api_key, "Content-Type": "application/json"}
         data = {"name": "ManualImport", "importMode": import_mode, "files": files}
         return self.session.post(endpoint, json=data, headers=headers, timeout=self.config.lidarr_api_timeout), len(files)
-
-    def _lidarr_import_path(self, req_album, filename):
-        """Path (in Lidarr's namespace) of the file to import.
-
-        With lidarr_download_path set, files are staged under that root as
-        <root>/<artist>/<album_folder>/<filename>; otherwise they are already at
-        their final library location (album_full_path).
-        """
-        staging_root = getattr(self.config, "lidarr_download_path", "")
-        if staging_root:
-            artist_str = os.path.basename(req_album["artist_path"].rstrip("/"))
-            return os.path.join(staging_root, artist_str, req_album["album_folder"], filename)
-        return os.path.join(req_album["album_full_path"], filename)
