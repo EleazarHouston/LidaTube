@@ -327,7 +327,10 @@ config_modal.addEventListener('show.bs.modal', function () {
 
     function handle_settings_loaded(settings) {
         lidarr_address.value = settings.lidarr_address;
-        lidarr_api_key.value = settings.lidarr_api_key;
+        lidarr_api_key.value = '';
+        lidarr_api_key.placeholder = settings.lidarr_api_key_set
+            ? 'Saved (leave blank to keep the current key)'
+            : 'Enter Lidarr API Key';
         sleep_interval.value = settings.sleep_interval;
         sync_schedule.value = settings.sync_schedule.join(', ');
         minimum_match_ratio.value = settings.minimum_match_ratio;

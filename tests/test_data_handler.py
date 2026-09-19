@@ -73,25 +73,41 @@ def test_disconnect_clamps_counter_to_zero(handler):
     assert handler.clients_connected_counter == 0
 
 
-def test_load_settings_emits_current_config(handler):
+@pytest.mark.parametrize("api_key, key_set", [("abc123", True), ("", False)])
+def test_load_settings_sends_current_config_to_one_client_without_the_api_key(handler, api_key, key_set):
     handler.config.lidarr_address = "http://lidarr.local"
-    handler.config.lidarr_api_key = "abc123"
+    handler.config.lidarr_api_key = api_key
     handler.config.sleep_interval = 1.5
     handler.config.sync_schedule = [1, 14]
     handler.config.minimum_match_ratio = 92
 
-    handler.load_settings()
+    handler.load_settings(to="sid-1")
 
     handler.emit.assert_called_once_with(
         "settings_loaded",
         {
             "lidarr_address": "http://lidarr.local",
-            "lidarr_api_key": "abc123",
+            "lidarr_api_key": "",
+            "lidarr_api_key_set": key_set,
             "sleep_interval": 1.5,
             "sync_schedule": [1, 14],
             "minimum_match_ratio": 92,
         },
+        to="sid-1",
     )
+
+
+@pytest.mark.parametrize("submitted, kept", [("", "old-key"), ("   ", "old-key"), (None, "old-key"), (" new-key ", "new-key")])
+def test_update_settings_keeps_the_saved_api_key_when_the_field_is_left_blank(handler, monkeypatch, submitted, kept):
+    monkeypatch.setattr(handler.config, "save", Mock())
+    handler.config.lidarr_api_key = "old-key"
+
+    handler.update_settings({
+        "lidarr_address": "http://lidarr", "lidarr_api_key": submitted,
+        "sleep_interval": "0", "minimum_match_ratio": "90", "sync_schedule": "",
+    })
+
+    assert handler.config.lidarr_api_key == kept
 
 
 def test_update_settings_parses_sync_schedule_and_saves(handler, monkeypatch):

@@ -161,7 +161,7 @@ LidaTube currently supports a single application process. The shipped Gunicorn c
 
 ## Security
 
-LidaTube has no login. Anyone who can reach port 5000 can change its settings, start or stop downloads, upload a cookies file, and read the Lidarr API key from the settings dialog. Run it only on a trusted network, or put it behind a reverse proxy that requires authentication.
+LidaTube has no login. Anyone who can reach port 5000 can change its settings, start or stop downloads and upload a cookies file. The settings dialog never shows the saved Lidarr API key (leave the field blank to keep it), but anyone who can change the Lidarr address can point LidaTube, and its key, at another server. Run it only on a trusted network, or put it behind a reverse proxy that requires authentication.
 
 
 ## Library audit tools

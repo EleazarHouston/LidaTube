@@ -277,7 +277,6 @@ class _InlineThread:
     ("stop_ytdlp", (), "queue.stop"),
     ("reset_ytdlp", (), "queue.reset"),
     ("add_to_download_list", ([0, 2, 5],), "queue.add_albums"),
-    ("load_settings", (), "load_settings"),
     ("update_settings", ({"minimum_match_ratio": "90"},), "update_settings"),
 ])
 def test_socket_events_dispatch_to_the_data_handler(lidatube_module, monkeypatch, event, args, method):
@@ -293,6 +292,22 @@ def test_socket_events_dispatch_to_the_data_handler(lidatube_module, monkeypatch
     client.emit(event, *args)
 
     handler_method.assert_called_once_with(*args)
+
+
+def test_settings_go_only_to_the_requesting_client_and_never_carry_the_api_key(lidatube_module):
+    lidatube_module.data_handler.config.lidarr_api_key = "secret-lidarr-key"
+    requester = lidatube_module.socketio.test_client(lidatube_module.app)
+    bystander = lidatube_module.socketio.test_client(lidatube_module.app)
+    requester.get_received()
+    bystander.get_received()
+
+    requester.emit("load_settings")
+
+    loaded = [event for event in requester.get_received() if event["name"] == "settings_loaded"]
+    assert len(loaded) == 1
+    assert "secret-lidarr-key" not in repr(loaded)
+    assert loaded[0]["args"][0]["lidarr_api_key_set"] is True
+    assert not [event for event in bystander.get_received() if event["name"] == "settings_loaded"]
 
 
 def test_stop_lidarr_socket_event_signals_the_running_scan(lidatube_module):

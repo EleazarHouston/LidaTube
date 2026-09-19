@@ -188,7 +188,7 @@ def register_routes(app, socketio, data_handler):
 
     @socketio.on("load_settings")
     def load_settings():
-        data_handler.load_settings()
+        data_handler.load_settings(to=request.sid)
 
     @socketio.on("update_settings")
     def update_settings(data):

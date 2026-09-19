@@ -83,20 +83,25 @@ class DataHandler:
 
     # --- Settings ---
 
-    def load_settings(self):
+    def load_settings(self, to=None):
+        """Send settings to one client (to=its sid). The Lidarr API key is never sent, only whether one is set."""
         data = {
             "lidarr_address": self.config.lidarr_address,
-            "lidarr_api_key": self.config.lidarr_api_key,
+            "lidarr_api_key": "",
+            "lidarr_api_key_set": bool(self.config.lidarr_api_key),
             "sleep_interval": self.config.sleep_interval,
             "sync_schedule": self.config.sync_schedule,
             "minimum_match_ratio": self.config.minimum_match_ratio,
         }
-        self.emit("settings_loaded", data)
+        self.emit("settings_loaded", data, to=to)
 
     def update_settings(self, data):
         try:
             self.config.lidarr_address = data["lidarr_address"]
-            self.config.lidarr_api_key = data["lidarr_api_key"]
+            # The UI never receives the saved key, so a blank field means "keep the current key".
+            api_key = (data["lidarr_api_key"] or "").strip()
+            if api_key:
+                self.config.lidarr_api_key = api_key
             self.config.sleep_interval = float(data["sleep_interval"])
             self.config.minimum_match_ratio = float(data["minimum_match_ratio"])
             self.config.sync_schedule = AppConfig.parse_sync_schedule(data["sync_schedule"])
