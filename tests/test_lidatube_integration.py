@@ -2337,3 +2337,85 @@ def test_reset_socket_handler_runs_off_the_event_loop(lidatube_module, monkeypat
     assert len(started) == 1 and reset_called == []
     started[0]()
     assert reset_called == [1]
+
+
+def test_link_finder_backs_off_and_retries_when_youtube_music_blocks(lidatube_module, monkeypatch):
+    import json
+
+    handler = build_data_handler(lidatube_module)
+    handler._SEARCH_RETRY_DELAYS = (0,)
+    handler._YOUTUBE_BLOCK_RETRY_DELAYS = (0, 0, 0)
+    handler.config.duration_tolerance_seconds = 15
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    calls = []
+
+    class BlockedThenOpenYTMusic:
+        def search(self, query, filter, limit):
+            calls.append(query)
+            if len(calls) <= 2:
+                raise json.JSONDecodeError("Expecting value", "", 0)
+            return [{"resultType": "song", "title": "Wouldn't That Be Fine", "videoId": "vid-1",
+                     "artists": [{"name": "Nanci Griffith"}], "duration_seconds": 200}]
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", BlockedThenOpenYTMusic)
+    monkeypatch.setattr(handler, "_yt_search", lambda query_text: [])
+    album = _network_retry_album()
+
+    handler._link_finder(album)
+
+    assert len(calls) == 3
+    assert album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
+
+
+def test_link_finder_records_error_when_youtube_block_outlasts_the_schedule(lidatube_module, monkeypatch, tmp_path):
+    import json
+
+    handler = build_data_handler(lidatube_module)
+    handler._SEARCH_RETRY_DELAYS = (0,)
+    handler._YOUTUBE_BLOCK_RETRY_DELAYS = (0, 0)
+    handler.store = Store(tmp_path / "lidatube.db")
+    handler.current_session_id = handler.store.start_session(requested_count=1)
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+    calls = []
+
+    class BlockedYTMusic:
+        def search(self, query, filter, limit):
+            calls.append(query)
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", BlockedYTMusic)
+
+    handler._link_finder(_network_retry_album())
+
+    assert len(calls) == 3
+    assert [track["outcome"] for track in handler.store.get_session_tracks(handler.current_session_id)] == ["error"]
+    handler.store.close()
+
+
+def test_youtube_search_block_backs_off_like_youtube_music(lidatube_module, monkeypatch):
+    handler = build_data_handler(lidatube_module)
+    handler._SEARCH_RETRY_DELAYS = (0,)
+    handler._YOUTUBE_BLOCK_RETRY_DELAYS = (0,)
+    handler.config.duration_tolerance_seconds = 15
+    monkeypatch.setattr(lidatube_module.socketio, "emit", Mock())
+
+    class EmptyYTMusic:
+        def search(self, query, filter, limit):
+            return []
+
+    monkeypatch.setattr(lidatube_module, "YTMusic", EmptyYTMusic)
+    searches = []
+
+    def blocked_then_found(query_text):
+        searches.append(query_text)
+        if len(searches) == 1:
+            raise Exception(f'ERROR: query "{query_text}" page 1: Unable to download API page: HTTP Error 403: Forbidden')
+        return [{"title": "Nanci Griffith - Wouldn't That Be Fine", "link": "https://youtube.test/found", "duration": "3:20"}]
+
+    monkeypatch.setattr(handler, "_yt_search", blocked_then_found)
+    album = _network_retry_album()
+
+    handler._link_finder(album)
+
+    assert len(searches) == 2
+    assert album["missing_tracks"][0]["link"] == "https://youtube.test/found"

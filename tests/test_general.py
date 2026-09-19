@@ -290,3 +290,31 @@ def test_is_network_error_ignores_other_errors():
     assert not _general.is_network_error(None)
     assert not _general.is_network_error(ValueError("bad json"))
     assert not _general.is_network_error(OSError(24, "Too many open files"))
+
+
+def test_is_youtube_block_error_detects_non_json_youtube_music_responses():
+    import json
+
+    try:
+        json.loads("<html>unusual traffic</html>")
+    except json.JSONDecodeError as decode_error:
+        assert _general.is_youtube_block_error(decode_error)
+        wrapped = RuntimeError("search failed")
+        wrapped.__cause__ = decode_error
+        assert _general.is_youtube_block_error(wrapped)
+
+
+def test_is_youtube_block_error_detects_ytdlp_forbidden_search_pages():
+    error = Exception('ERROR: query "BANNERS - My Empire" page 1: Unable to download API page: HTTP Error 403: Forbidden')
+    assert _general.is_youtube_block_error(error)
+
+
+def test_is_youtube_block_error_includes_rate_limit_and_bot_checks():
+    assert _general.is_youtube_block_error(Exception("HTTP Error 429: Too Many Requests"))
+    assert _general.is_youtube_block_error(Exception("Sign in to confirm you're not a bot"))
+
+
+def test_is_youtube_block_error_ignores_other_errors():
+    assert not _general.is_youtube_block_error(None)
+    assert not _general.is_youtube_block_error(ValueError("unexpected response shape"))
+    assert not _general.is_youtube_block_error(Exception("HTTP Error 403: Forbidden while downloading a video"))

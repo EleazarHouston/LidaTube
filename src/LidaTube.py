@@ -14,6 +14,7 @@ import concurrent.futures
 from thefuzz import fuzz
 import _matcher
 import _general
+from _backoff import BackoffPolicy, call_with_backoff
 import library_suspicion
 from config import AppConfig
 from lidarr_client import LidarrClient
@@ -24,6 +25,9 @@ from store import Store
 class DataHandler:
     _ARTIST_RETRY_WAIT = 10  # seconds per attempt; override in tests
     _SEARCH_RETRY_DELAYS = (5, 10, 20, 40)  # back-off between link searches after network errors
+    # YouTube soft-blocks last from minutes to hours; while a search waits here it holds the
+    # YouTube Music semaphore, which pauses searching instead of burning through the queue.
+    _YOUTUBE_BLOCK_RETRY_DELAYS = (60, 300, 900, 1800)
     _LIDARR_CACHE_SCHEMA_VERSION = 2
     _LIDARR_CACHE_CHECKPOINT_PAGES = 5
     _LIDARR_MAX_PENDING_MULTIPLIER = 4
@@ -1457,7 +1461,7 @@ class DataHandler:
                 return
             ytmusic = YTMusic()
             self._apply_saved_overrides(req_album)
-            self._search_links_with_network_retry(req_album, ytmusic)
+            self._search_links_with_backoff(req_album, ytmusic)
 
         except Exception as e:
             search_error = e
@@ -1470,28 +1474,34 @@ class DataHandler:
             if semaphore_acquired:
                 self._ytmusic_semaphore.release()
 
-    def _search_links_with_network_retry(self, req_album, ytmusic):
-        """Run all search stages, backing off and retrying when the network is unreachable.
+    def _search_backoff_policies(self):
+        """Transient search failures and their retry schedules; add a policy to back off on more."""
+        return (
+            BackoffPolicy("Network error", tuple(self._SEARCH_RETRY_DELAYS), _general.is_network_error),
+            BackoffPolicy("YouTube block", tuple(self._YOUTUBE_BLOCK_RETRY_DELAYS), _general.is_youtube_block_error),
+        )
 
-        A container can start searching before its VPN's DNS is ready; without a retry
-        every album searched in that window is recorded as a permanent miss.
+    def _search_links_with_backoff(self, req_album, ytmusic):
+        """Run all search stages, backing off and retrying on transient failures.
+
+        A container can start searching before its VPN's DNS is ready, and YouTube can
+        soft-block the VPN's exit IP for hours; without a retry every album searched in
+        those windows is recorded as a permanent miss.
         """
-        delays = tuple(self._SEARCH_RETRY_DELAYS)
-        for attempt in range(len(delays) + 1):
-            try:
-                self._search_links(req_album, ytmusic)
-                return
-            except Exception as e:
-                if attempt == len(delays) or not _general.is_network_error(e):
-                    raise
-                self.general_logger.warning(
-                    f'Network error searching {req_album["artist"]} - {req_album["album_name"]}, '
-                    f"retrying in {delays[attempt]}s ({attempt + 1}/{len(delays)}): {e}"
-                )
-                for track in req_album.get("missing_tracks", []):
-                    track.pop("_match_trace", None)
-                if self.ytdlp_stop_event.wait(delays[attempt]):
-                    raise
+        def on_retry(policy, attempt, delay, error):
+            self.general_logger.warning(
+                f'{policy.name} searching {req_album["artist"]} - {req_album["album_name"]}, '
+                f"retrying in {delay}s ({attempt}/{len(policy.delays)}): {error}"
+            )
+            for track in req_album.get("missing_tracks", []):
+                track.pop("_match_trace", None)
+
+        call_with_backoff(
+            lambda: self._search_links(req_album, ytmusic),
+            self._search_backoff_policies(),
+            self.ytdlp_stop_event,
+            on_retry=on_retry,
+        )
 
     def _search_links(self, req_album, ytmusic):
         artist = req_album["artist"]

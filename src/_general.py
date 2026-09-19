@@ -1,3 +1,4 @@
+import json
 import re
 import requests
 import unidecode
@@ -121,6 +122,26 @@ def is_network_error(error):
             return True
         message = str(current).lower()
         if any(fragment in message for fragment in _NETWORK_ERROR_MESSAGES):
+            return True
+    return False
+
+
+def is_youtube_block_error(error):
+    """Return True when YouTube or YouTube Music is refusing this client (soft block or rate limit).
+
+    Blocked YouTube Music searches return an HTML page, which ytmusicapi fails to parse
+    as JSON ("Expecting value: line 1 column 1"); blocked yt-dlp searches report that the
+    API page could not be downloaded (403). Rate limits and bot checks count as blocks too.
+    """
+    if error is None:
+        return False
+    if is_rate_limit_error(error):
+        return True
+    for current in _walk_exception_chain(error):
+        if isinstance(current, json.JSONDecodeError):
+            return True
+        message = str(current).lower()
+        if "unable to download api page" in message and ("403" in message or "forbidden" in message):
             return True
     return False
 
