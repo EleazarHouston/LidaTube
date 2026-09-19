@@ -1,0 +1,17 @@
+# `docker build .` copies the whole directory (COPY . /lidatube). Keep local state out of
+# the image, especially runtime settings, which hold the Lidarr API key and cookies.
+# CI builds from a clean checkout; this matters for local builds.
+.git
+.github
+.venv
+.pytest_cache
+.coverage
+coverage.xml
+.ui-review
+.claude
+tmp
+**/__pycache__
+config
+downloads
+src/config
+src/downloads
