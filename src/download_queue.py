@@ -321,6 +321,20 @@ class DownloadQueue:
             self._refresh_progress(self.current_session_id)
             self.emit_update()
 
+    def begin_streaming(self):
+        """Take albums from a scheduled Lidarr scan as they are scanned, starting a session if none is running."""
+        self.streaming_mode = True
+        self.stop_event.clear()
+        if not self.in_progress:
+            self.items = []
+            self.percent_completion = 0
+            self.index = 0
+            self.current_session_id = self.store.start_session(requested_count=0)
+            self.start(self.current_session_id)
+
+    def end_streaming(self):
+        self.streaming_mode = False
+
     def enqueue_scanned_album(self, req_album):
         """During a scheduled sync, queue each album for download as soon as its scan completes."""
         if not self.streaming_mode:

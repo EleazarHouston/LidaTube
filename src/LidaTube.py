@@ -1,7 +1,6 @@
 import logging
 import os
 import threading
-import time
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO
 from config import AppConfig
@@ -12,6 +11,7 @@ from fd_governor import FdGovernor
 from link_search import LinkSearcher
 from lidarr_scan import LidarrScanner
 from download_queue import DownloadQueue
+from scheduler import SyncScheduler
 
 
 class DataHandler:
@@ -59,9 +59,8 @@ class DataHandler:
         )
 
         self.queue.auto_resume()
-        thread = threading.Thread(target=self.schedule_checker, name="Schedule_Thread")
-        thread.daemon = True
-        thread.start()
+        self.scheduler = SyncScheduler(self.config, self.scanner, self.queue, self.general_logger)
+        self.scheduler.start()
 
     # --- SocketIO connection ---
 
@@ -98,45 +97,6 @@ class DataHandler:
         except Exception as e:
             self.general_logger.error(f"Failed to update settings: {e}")
             socketio.emit("new_toast_msg", {"title": "Settings Error", "message": str(e)})
-
-    # --- Scheduler ---
-
-    def schedule_checker(self):
-        try:
-            while True:
-                current_hour = time.localtime().tm_hour
-                within_time_window = any(t == current_hour for t in self.config.sync_schedule)
-
-                if within_time_window:
-                    self.general_logger.warning(f"Time to Start - as in a time window: {self.config.sync_schedule}")
-                    self.queue.streaming_mode = True
-                    self.queue.stop_event.clear()
-
-                    if not self.queue.in_progress:
-                        self.queue.items = []
-                        self.queue.percent_completion = 0
-                        self.queue.index = 0
-                        self.queue.current_session_id = self.store.start_session(requested_count=0)
-                        self.queue.start(self.queue.current_session_id)
-
-                    fetch_thread = threading.Thread(target=self.scanner.fetch_wanted_albums, name="Lidarr_Fetch_Thread")
-                    fetch_thread.daemon = True
-                    fetch_thread.start()
-
-                    fetch_thread.join()
-                    self.queue.streaming_mode = False
-
-                    if not self.scanner.items:
-                        self.general_logger.warning("No Missing Albums")
-                    self.general_logger.warning("Big sleep for 1 Hour")
-                    time.sleep(3600)
-                    self.general_logger.warning(f"Checking every 10 minutes as not in a sync time window: {self.config.sync_schedule}")
-                else:
-                    time.sleep(600)
-
-        except Exception as e:
-            self.general_logger.error(f"Error in Scheduler: {e}")
-            self.general_logger.error("Scheduler Stopped")
 
 
 app = Flask(__name__)

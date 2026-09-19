@@ -622,3 +622,26 @@ def test_run_rescans_the_lidarr_library_when_a_session_completes(scan_on_complet
 
     assert queue.status == "complete"
     assert queue.lidarr_client.rescan_library.called is scan_on_completion
+
+
+@pytest.mark.parametrize("queue_running", [False, True])
+def test_begin_streaming_joins_the_running_session_or_starts_one(monkeypatch, queue_running):
+    queue = build_queue()
+    queue.in_progress = queue_running
+    queue.stop_event.set()
+    start = Mock()
+    monkeypatch.setattr(queue, "start", start)
+
+    queue.begin_streaming()
+
+    assert queue.streaming_mode is True
+    assert not queue.stop_event.is_set()
+    if queue_running:
+        queue.store.start_session.assert_not_called()
+        start.assert_not_called()
+    else:
+        queue.store.start_session.assert_called_once_with(requested_count=0)
+        start.assert_called_once_with(1)
+
+    queue.end_streaming()
+    assert queue.streaming_mode is False
