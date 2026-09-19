@@ -68,7 +68,8 @@ class Downloader:
             "ffmpeg_location": "/usr/bin/ffmpeg",
             "format": "bestaudio/best",
             "socket_timeout": 30,
-            "outtmpl": f"{file_name}.%(ext)s",
+            # file_name holds the YouTube title, so escape it: yt-dlp would expand "%(id)s" in it.
+            "outtmpl": f"{file_name.replace('%', '%%')}.%(ext)s",
             "paths": {"home": self.config.download_folder, "temp": temp_dir},
             "quiet": False,
             "progress_hooks": [self._progress_hook],

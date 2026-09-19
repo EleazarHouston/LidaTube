@@ -1,5 +1,6 @@
 import threading
 import pytest
+import yt_dlp
 from unittest.mock import Mock, patch, MagicMock, call
 
 from downloader import Downloader, RATE_LIMIT_BACKOFF_SECONDS, CONSECUTIVE_UNAVAILABLE_THRESHOLD, UNAVAILABLE_BACKOFF_SECONDS
@@ -363,3 +364,15 @@ def test_download_waits_backoff_between_empty_file_retries(dl, stop_event):
 
     wait_durations = [c.args[0] for c in mock_wait.call_args_list]
     assert wait_durations == RATE_LIMIT_BACKOFF_SECONDS
+
+
+def test_ydl_output_path_keeps_percent_signs_from_titles_literal(dl):
+    """A YouTube title is part of the file name; yt-dlp must not expand it as a template."""
+    name = "Artist/Album (2020)/Artist - Album - 01 - Weird %(id)s 100% title"
+    opts = dl._get_ydl_opts(name, "/tmp")
+
+    rendered = yt_dlp.YoutubeDL({"outtmpl": opts["outtmpl"], "quiet": True}).prepare_filename(
+        {"id": "abc", "ext": "mp3", "title": "t"}
+    )
+
+    assert rendered == f"{name}.mp3"
