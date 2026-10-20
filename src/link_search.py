@@ -18,7 +18,7 @@ from ytmusicapi import YTMusic
 import _general
 import _matcher
 import library_suspicion
-from _backoff import BackoffPolicy, call_with_backoff
+from _backoff import BackoffPolicy, SharedCooldown, call_with_backoff
 
 
 class LinkSearcher:
@@ -26,6 +26,9 @@ class LinkSearcher:
     # YouTube soft-blocks last from minutes to hours; while a search waits here it holds the
     # YouTube Music semaphore, which pauses searching instead of burning through the queue.
     _YOUTUBE_BLOCK_RETRY_DELAYS = (60, 300, 900, 1800)
+    # How many cooldown waits one album may sit through before it is recorded as an error:
+    # without a cap a blocked album occupied a search slot for the whole schedule.
+    _MAX_BLOCK_ATTEMPTS = 3
 
     def __init__(self, config, store, fd_governor, stop_event, logger=None, on_status_change=None):
         self.config = config
@@ -36,6 +39,8 @@ class LinkSearcher:
         self.on_status_change = on_status_change or (lambda: None)
         self.parallel = max(1, min(2, int(config.thread_limit)))
         self._ytmusic_semaphore = threading.Semaphore(self.parallel)
+        # A YouTube block hits every search alike, so all searches share one pause.
+        self._block_cooldown = SharedCooldown(self._YOUTUBE_BLOCK_RETRY_DELAYS)
 
     def _set_track_link(self, track, link, title, matched_via=None):
         track["link"] = link
@@ -136,23 +141,10 @@ class LinkSearcher:
 
     def find_links(self, req_album, session_id=None):
         """Find a YouTube link for each missing track and record every outcome under session_id."""
-        ytmusic = None
-        semaphore_acquired = False
         search_error = None
         try:
             self.logger.warning(f'Searching for: {req_album["artist"]} - {req_album["album_name"]}')
-
-            self.fd.wait_if_pressure()
-            while not self.stop_event.is_set():
-                if self._ytmusic_semaphore.acquire(timeout=0.5):
-                    semaphore_acquired = True
-                    break
-            if not semaphore_acquired:
-                return
-            ytmusic = YTMusic()
-            self._apply_saved_overrides(req_album)
-            self._search_links_with_backoff(req_album, ytmusic)
-
+            self._search_links_with_backoff(req_album)
         except Exception as e:
             search_error = e
             self.logger.error(f"Error in Link Finder: {e}")
@@ -160,24 +152,73 @@ class LinkSearcher:
                 self.fd.signal_exhaustion_in_background()
         finally:
             self._record_link_results(req_album, session_id, search_error=search_error)
-            self._close_ytmusic_client(ytmusic)
-            if semaphore_acquired:
-                self._ytmusic_semaphore.release()
 
-    def _search_backoff_policies(self):
-        """Transient search failures and their retry schedules; add a policy to back off on more."""
-        return (
-            BackoffPolicy("Network error", tuple(self._SEARCH_RETRY_DELAYS), _general.is_network_error),
-            BackoffPolicy("YouTube block", tuple(self._YOUTUBE_BLOCK_RETRY_DELAYS), _general.is_youtube_block_error),
-        )
+    def _cooldown(self):
+        """The shared cooldown, following the configured block schedule without losing its state."""
+        delays = tuple(self._YOUTUBE_BLOCK_RETRY_DELAYS)
+        if self._block_cooldown.delays != delays:
+            self._block_cooldown.delays = delays
+        return self._block_cooldown
 
-    def _search_links_with_backoff(self, req_album, ytmusic):
-        """Run all search stages, backing off and retrying on transient failures.
+    def _search_links_with_backoff(self, req_album):
+        """Search the album, pausing on the shared cooldown whenever YouTube blocks us.
 
-        A container can start searching before its VPN's DNS is ready, and YouTube can
-        soft-block the VPN's exit IP for hours; without a retry every album searched in
-        those windows is recorded as a permanent miss.
+        A container can start searching before its VPN's DNS is ready (a per-album network
+        retry handles that), and YouTube can soft-block the VPN's exit IP for hours. A block
+        is not this album's problem: it sets one cooldown every searcher waits out, and the
+        album releases its search slot while waiting rather than holding one of the few slots
+        asleep. After `_MAX_BLOCK_ATTEMPTS` waits the album is recorded as an error and the
+        queue moves on, leaving it for a later session.
         """
+        waits = 0
+        while True:
+            try:
+                self._search_attempt(req_album)
+                return
+            except Exception as error:
+                if not _general.is_youtube_block_error(error):
+                    raise
+                delay = self._cooldown().escalate()
+                for track in req_album.get("missing_tracks", []):
+                    track.pop("_match_trace", None)
+                if waits >= self._MAX_BLOCK_ATTEMPTS:
+                    raise
+                waits += 1
+                self.logger.warning(
+                    f'YouTube block searching {req_album["artist"]} - {req_album["album_name"]}, '
+                    f"pausing searches for {delay}s ({waits}/{self._MAX_BLOCK_ATTEMPTS}): {error}"
+                )
+
+    def _search_attempt(self, req_album):
+        """One pass over the album's stages, holding a search slot only while actually searching."""
+        self.fd.wait_if_pressure()
+        if not self._cooldown().wait(self.stop_event):
+            return
+        if not self._acquire_search_slot():
+            return
+        ytmusic = None
+        try:
+            ytmusic = YTMusic()
+            self._apply_saved_overrides(req_album)
+            call_with_backoff(
+                lambda: self._search_links(req_album, ytmusic),
+                (BackoffPolicy("Network error", tuple(self._SEARCH_RETRY_DELAYS), _general.is_network_error),),
+                self.stop_event,
+                on_retry=self._log_network_retry(req_album),
+            )
+            self._cooldown().clear()
+        finally:
+            self._close_ytmusic_client(ytmusic)
+            self._ytmusic_semaphore.release()
+
+    def _acquire_search_slot(self):
+        """Take one of the parallel YouTube Music slots; False if a stop is requested first."""
+        while not self.stop_event.is_set():
+            if self._ytmusic_semaphore.acquire(timeout=0.5):
+                return True
+        return False
+
+    def _log_network_retry(self, req_album):
         def on_retry(policy, attempt, delay, error):
             self.logger.warning(
                 f'{policy.name} searching {req_album["artist"]} - {req_album["album_name"]}, '
@@ -185,13 +226,7 @@ class LinkSearcher:
             )
             for track in req_album.get("missing_tracks", []):
                 track.pop("_match_trace", None)
-
-        call_with_backoff(
-            lambda: self._search_links(req_album, ytmusic),
-            self._search_backoff_policies(),
-            self.stop_event,
-            on_retry=on_retry,
-        )
+        return on_retry
 
     def _search_links(self, req_album, ytmusic):
         artist = req_album["artist"]
@@ -200,8 +235,10 @@ class LinkSearcher:
         cleaned_artist = _general.string_cleaner(artist).lower()
         cleaned_album = _general.string_cleaner(album_name).lower()
 
-        if req_album["track_count"] == req_album["missing_count"]:
+        if req_album["track_count"] == req_album["missing_count"] and not req_album.get("_album_search_done"):
             self._get_album_links(req_album, artist, album_name, cleaned_artist, cleaned_album, query_text, ytmusic)
+            # A retry resumes with the per-track stages instead of repeating this search.
+            req_album["_album_search_done"] = True
 
         number_of_links = self._count_found_links(req_album)
         if number_of_links == len(req_album["missing_tracks"]):

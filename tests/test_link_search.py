@@ -787,6 +787,7 @@ def test_find_links_records_error_when_youtube_block_outlasts_the_schedule(monke
     searcher = build_searcher()
     searcher._SEARCH_RETRY_DELAYS = (0,)
     searcher._YOUTUBE_BLOCK_RETRY_DELAYS = (0, 0)
+    searcher._MAX_BLOCK_ATTEMPTS = 2
     searcher.store = Store(tmp_path / "lidatube.db")
     session_id = searcher.store.start_session(requested_count=1)
     calls = []
@@ -850,3 +851,102 @@ def test_search_reports_status_changes_through_the_callback():
     assert album["status"] == "All Tracks Found"
     assert album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
     searcher.on_status_change.assert_called_with()
+
+
+# --- YouTube blocks: one shared cooldown, slot released while waiting, bounded per album ---
+
+def _blocked_ytmusic(calls, recover_after=None):
+    import json as _json
+
+    class BlockedYTMusic:
+        def search(self, query, filter, limit):
+            calls.append(query)
+            if recover_after is not None and len(calls) > recover_after:
+                return [{"resultType": "song", "title": "Wouldn't That Be Fine", "videoId": "vid-1",
+                         "artists": [{"name": "Nanci Griffith"}], "duration_seconds": 200}]
+            raise _json.JSONDecodeError("Expecting value", "", 0)
+
+    return BlockedYTMusic
+
+
+def _block_searcher(delays=(0, 0, 0), max_attempts=2):
+    """A searcher whose block handling never sleeps for real."""
+    from _backoff import SharedCooldown
+    searcher = build_searcher()
+    searcher.config.duration_tolerance_seconds = 15
+    searcher._YOUTUBE_BLOCK_RETRY_DELAYS = delays
+    searcher._MAX_BLOCK_ATTEMPTS = max_attempts
+    searcher._block_cooldown = SharedCooldown(delays)
+    return searcher
+
+
+def test_the_search_slot_is_free_while_a_blocked_album_waits(monkeypatch):
+    """A block is shared, so sleeping must not occupy one of the two YouTube Music slots."""
+    searcher = _block_searcher()
+    slot_free = []
+
+    def spy_wait(stop_event):
+        acquired = searcher._ytmusic_semaphore.acquire(blocking=False)
+        slot_free.append(acquired)
+        if acquired:
+            searcher._ytmusic_semaphore.release()
+        return True
+
+    monkeypatch.setattr(searcher._block_cooldown, "wait", spy_wait)
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_ytmusic([]))
+    monkeypatch.setattr(searcher, "_yt_search", lambda query_text: [])
+
+    searcher.find_links(_network_retry_album())
+
+    assert len(slot_free) >= 2 and all(slot_free)
+
+
+def test_a_youtube_block_escalates_the_shared_cooldown_for_every_searcher(monkeypatch):
+    searcher = _block_searcher(delays=(30,), max_attempts=0)
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_ytmusic([]))
+
+    searcher.find_links(_network_retry_album())
+
+    assert searcher._block_cooldown.remaining() > 0
+
+
+def test_a_blocked_album_gives_up_after_the_capped_number_of_waits(monkeypatch, tmp_path):
+    searcher = _block_searcher()
+    searcher.store = Store(tmp_path / "blocked.db")
+    session_id = searcher.store.start_session(requested_count=1)
+    calls = []
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_ytmusic(calls))
+    monkeypatch.setattr(searcher, "_yt_search", lambda query_text: [])
+
+    searcher.find_links(_network_retry_album(), session_id)
+
+    assert len(calls) == 3  # the first attempt plus two cooldown waits
+    assert [track["outcome"] for track in searcher.store.get_session_tracks(session_id)] == ["error"]
+    searcher.store.close()
+
+
+def test_a_clean_pass_clears_the_shared_cooldown(monkeypatch):
+    searcher = _block_searcher(delays=(30,))
+    monkeypatch.setattr(searcher._block_cooldown, "wait", lambda stop_event: True)
+    searcher._block_cooldown.escalate()
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_ytmusic([], recover_after=0))
+
+    searcher.find_links(_network_retry_album())
+
+    assert searcher._block_cooldown.remaining() == 0
+
+
+def test_a_retry_resumes_instead_of_searching_the_whole_album_again(monkeypatch):
+    searcher = _block_searcher()
+    album_searches = []
+    monkeypatch.setattr(searcher, "_get_album_links", lambda *args, **kwargs: album_searches.append(1))
+    calls = []
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_ytmusic(calls, recover_after=1))
+    monkeypatch.setattr(searcher, "_yt_search", lambda query_text: [])
+
+    album = _network_retry_album()
+    album["track_count"] = album["missing_count"] = len(album["missing_tracks"])
+    searcher.find_links(album)
+
+    assert len(album_searches) == 1
+    assert album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
