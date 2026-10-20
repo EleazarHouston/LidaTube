@@ -5,7 +5,7 @@ flask==3.1.2
 flask_socketio==5.6.0
 httpx<0.28
 youtube-search-python==1.6.6
-ytmusicapi==1.11.5
+ytmusicapi==1.12.3
 yt_dlp[default]==2026.10.26
 unidecode==1.4.0
 thefuzz==0.22.1
