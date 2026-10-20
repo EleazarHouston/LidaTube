@@ -463,6 +463,39 @@ def _soundtrack_recording_credit(requested_album, requested_secondary_types, req
     return _same_base_title(requested, _normalized_text(candidate_title or ""))
 
 
+def _strip_source_phrase(candidate_title, requested_album):
+    """Drop a trailing "from <the requested album>" clause that YouTube uploads tack on."""
+    text = _normalized_text(candidate_title or "")
+    album_base = _album_base(requested_album)
+    if not album_base:
+        return text
+    match = re.search(r"\bfrom\b(.*)$", text)
+    if match and album_base in _album_base(match.group(1)):
+        return text[:match.start()].strip()
+    return text
+
+
+def _soundtrack_cue_credit_for_upload(requested_album, requested_secondary_types, requested_title,
+                                      candidate_title, channel, expected_duration_ms, candidate_seconds):
+    """True when a YouTube upload is plainly the requested soundtrack cue.
+
+    A soundtrack's composer ("Richard Rodgers") appears in neither the upload's title nor its
+    channel, so the artist gate drops the real cue: prod rejected both 139s uploads of
+    "My Favorite Things (Part 1)" that way. The cue title plus a near-exact length identifies
+    the recording instead, and the production words keep another cast's version out.
+    """
+    if not _near_exact_duration(expected_duration_ms, candidate_seconds):
+        return False
+    if not _is_soundtrack_request(requested_album, requested_secondary_types, None):
+        return False
+    requested = _normalized_text(requested_title or "")
+    if not _SOUNDTRACK_CUE_RE.search(requested):
+        return False
+    if _adds_other_production_words(requested_album, f"{candidate_title or ''} {channel or ''}"):
+        return False
+    return _same_base_title(requested, _strip_source_phrase(candidate_title, requested_album))
+
+
 def _soundtrack_album_credit(requested_album, requested_secondary_types, candidate_album):
     """True when the candidate sits on the same soundtrack album as the request."""
     requested_base = _album_base(requested_album)
@@ -743,7 +776,11 @@ def _song_matcher_yt_pass(minimum_match_ratio, artist, query_text, search_result
         title = item.get("title", "")
         raw_duration = item.get("duration", 0)
         candidate_seconds = _parse_duration_string(raw_duration) if isinstance(raw_duration, str) else int(raw_duration or 0)
-        if not _artist_in_result(cleaned_artist, item):
+        cue_credit = _soundtrack_cue_credit_for_upload(
+            album_name, album_secondary_types, requested_title, _without_artist_prefix(title, artist),
+            _channel_name(item), expected_duration_ms, candidate_seconds,
+        )
+        if not cue_credit and not _artist_in_result(cleaned_artist, item):
             _append_trace(trace, "yt", item, candidate_seconds, None, "artist_gate")
             continue
         candidate_live = _is_live_title(_without_artist_prefix(title, artist))
@@ -766,7 +803,9 @@ def _song_matcher_yt_pass(minimum_match_ratio, artist, query_text, search_result
         ):
             _append_trace(trace, "yt", item, candidate_seconds, None, "duration_gate")
             continue
-        score = _yt_title_score(query_text, cleaned_query_text, cleaned_query_text_minus_keywords, title)
+        # A credited cue has already proven itself (same cue title, near-exact length), and the
+        # composer's name in the query would only drag a title-only score down.
+        score = 100.0 if cue_credit else _yt_title_score(query_text, cleaned_query_text, cleaned_query_text_minus_keywords, title)
         _append_trace(trace, "yt", item, candidate_seconds, score, "accepted" if score >= threshold else "below_threshold")
         penalty = _recording_rank_penalty(requested_title, _without_artist_prefix(title, artist), requested_live, candidate_live)
         gate_cleared.append((item, title, candidate_seconds, penalty))

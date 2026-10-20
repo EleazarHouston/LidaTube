@@ -1656,3 +1656,60 @@ def test_near_exact_duration_allows_two_seconds_or_one_percent(expected_seconds,
 def test_near_exact_duration_needs_both_lengths():
     assert _matcher._near_exact_duration(0, 100) is False
     assert _matcher._near_exact_duration(100000, 0) is False
+
+
+# --- YouTube fallback: the composer is in neither the title nor the channel (prod: Pt. 1) ---
+
+def _yt_item(title, link, duration, channel=None):
+    item = {"title": title, "link": link, "duration": duration}
+    if channel is not None:
+        item["channel"] = {"name": channel}
+    return item
+
+
+def _rodgers_yt(song_title, results, seconds, **kwargs):
+    kwargs.setdefault("album_name", "The Sound of Music")
+    kwargs.setdefault("album_secondary_types", ["Soundtrack"])
+    return _matcher.song_matcher_yt(
+        85, "Richard Rodgers", f"Richard Rodgers - {song_title}", results,
+        expected_duration_ms=int(seconds * 1000), duration_tolerance_seconds=15, **kwargs)
+
+
+def test_youtube_fallback_accepts_a_soundtrack_cue_uploaded_without_the_composer():
+    """Prod: both 139s uploads of 'My Favorite Things (Part 1)' died on the artist gate."""
+    results = [_yt_item('"My Favorite Things (Part 1)" from The Sound of Music Super Deluxe Edition',
+                        "https://deluxe", "2:19", channel="Rodgers & Hammerstein")]
+    assert _rodgers_yt("My Favorite Things, Pt. 1", results, 138)["link"] == "https://deluxe"
+
+
+def test_youtube_fallback_accepts_a_bare_cue_upload_on_an_unrelated_channel():
+    results = [_yt_item("My Favorite Things (Part 1)", "https://topic", "2:19", channel="Julie Andrews - Topic")]
+    assert _rodgers_yt("My Favorite Things, Pt. 1", results, 138)["link"] == "https://topic"
+
+
+def test_youtube_fallback_still_rejects_an_unrelated_upload_of_the_right_length():
+    results = [_yt_item("Hough plays Rodgers - My Favourite Things (arr. by Hough)", "https://piano", "2:19",
+                        channel="madlovba03")]
+    assert _rodgers_yt("My Favorite Things, Pt. 1", results, 138) is None
+
+
+def test_youtube_fallback_needs_a_near_exact_length_for_cue_credit():
+    results = [_yt_item("My Favorite Things (Part 1)", "https://other-cut", "2:30", channel="Julie Andrews - Topic")]
+    assert _rodgers_yt("My Favorite Things, Pt. 1", results, 138) is None
+
+
+def test_youtube_fallback_does_not_credit_a_generic_title_without_a_cue():
+    """Without a cue marker the artist gate still applies, so covers stay out."""
+    results = [_yt_item("My Favorite Things", "https://cover", "2:27", channel="Mirusia")]
+    assert _rodgers_yt("My Favorite Things", results, 147) is None
+
+
+def test_youtube_fallback_cue_credit_only_for_soundtrack_requests():
+    results = [_yt_item("My Favorite Things (Part 1)", "https://cue", "2:19", channel="Julie Andrews - Topic")]
+    assert _rodgers_yt("My Favorite Things, Pt. 1", results, 138, album_secondary_types=[], album_name="Some Compilation") is None
+
+
+def test_youtube_fallback_keeps_rejecting_a_different_production_of_the_cue():
+    results = [_yt_item("My Favorite Things (Part 1)", "https://broadway", "2:19",
+                        channel="Original Broadway Cast - Topic")]
+    assert _rodgers_yt("My Favorite Things, Pt. 1", results, 138) is None
