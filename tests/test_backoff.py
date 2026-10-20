@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from _backoff import BackoffPolicy, call_with_backoff
+from _backoff import BackoffPolicy, SharedCooldown, call_with_backoff
 
 
 class RecordingStop:
@@ -110,3 +110,77 @@ def test_works_with_a_real_threading_event():
     fast = BackoffPolicy("fast", (0,), lambda error: isinstance(error, Flaky))
     assert call_with_backoff(operation, (fast,), stop) == "ok"
     assert len(calls) == 2
+
+
+# --- SharedCooldown: one pause every worker observes, instead of each burning its own schedule ---
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def _cooldown(delays=(60, 300, 900)):
+    clock = FakeClock()
+    return SharedCooldown(delays, clock=clock), clock
+
+
+def test_a_fresh_cooldown_is_not_active():
+    cooldown, _ = _cooldown()
+    assert cooldown.remaining() == 0
+    assert cooldown.wait(RecordingStop()) is True
+
+
+def test_escalate_walks_the_schedule_and_holds_at_the_last_step():
+    cooldown, clock = _cooldown()
+    assert [cooldown.escalate() for _ in range(5)] == [60, 300, 900, 900, 900]
+
+
+def test_escalate_sets_a_deadline_other_workers_can_see():
+    cooldown, clock = _cooldown()
+    cooldown.escalate()
+    assert cooldown.remaining() == 60
+    clock.advance(25)
+    assert cooldown.remaining() == 35
+    clock.advance(100)
+    assert cooldown.remaining() == 0
+
+
+def test_escalate_never_shortens_a_longer_running_cooldown():
+    cooldown, clock = _cooldown(delays=(300, 60))
+    cooldown.escalate()
+    cooldown.escalate()
+    assert cooldown.remaining() == 300
+
+
+def test_clear_ends_the_cooldown_and_resets_the_schedule():
+    cooldown, _ = _cooldown()
+    cooldown.escalate()
+    cooldown.clear()
+    assert cooldown.remaining() == 0
+    assert cooldown.escalate() == 60
+
+
+def test_wait_blocks_until_the_deadline_passes():
+    cooldown, clock = _cooldown(delays=(10,))
+    cooldown.escalate()
+    stop = RecordingStop()
+
+    def tick(seconds):
+        clock.advance(seconds)
+        return False
+
+    stop.wait = tick
+    assert cooldown.wait(stop) is True
+    assert cooldown.remaining() == 0
+
+
+def test_wait_gives_up_when_the_stop_event_fires():
+    cooldown, _ = _cooldown()
+    cooldown.escalate()
+    assert cooldown.wait(RecordingStop(stop_after=1)) is False
