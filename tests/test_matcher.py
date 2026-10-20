@@ -1425,12 +1425,14 @@ def test_song_matcher_accepts_soundtrack_performer_credit_when_album_matches():
     assert _rodgers("My Favorite Things (reprise)", results, 74)["videoId"] == "reprise"
 
 
-def test_song_matcher_prefers_soundtrack_album_cut_over_uncorroborated_exact_title():
+def test_song_matcher_prefers_the_cue_cut_whose_length_matches_over_a_same_named_album_cut():
+    """The cue's own length is stronger evidence than a differently-titled cut on the album:
+    "Pt. 1" is 138s in Lidarr, so the 139s "(Part 1)" cue beats the album's 141s "My Favorite Things"."""
     results = [
         _cast_song("My Favorite Things (Part 1)", "alternate-single", 139, "My Favorite Things (Alternate Version)", artists=("Julie Andrews", "Irwin Kostal")),
         _cast_song("My Favorite Things", "soundtrack", 141, "The Sound Of Music (Original Soundtrack Recording)"),
     ]
-    assert _rodgers("My Favorite Things, Pt. 1", results, 138)["videoId"] == "soundtrack"
+    assert _rodgers("My Favorite Things, Pt. 1", results, 138)["videoId"] == "alternate-single"
 
 
 def test_song_matcher_soundtrack_type_can_come_from_album_names_alone():
@@ -1583,3 +1585,74 @@ def test_song_matcher_yt_extended_window_skips_live_and_classical_requests():
     classical = [{"title": "Robert Schumann - Widmung", "link": "https://other", "duration": "4:02", "channel": {"name": "Robert Schumann"}}]
     assert _matcher.song_matcher_yt(85, "Robert Schumann", "Robert Schumann - Widmung", classical, expected_duration_ms=270000,
                                     duration_tolerance_seconds=15, extended_duration_tolerance_seconds=30, album_genres="Classical") is None
+
+
+# --- soundtrack cue credit: same recording proven by a near-exact length (prod: Salzburg Montage) ---
+
+def _som(song_title, results, seconds, **kwargs):
+    kwargs.setdefault("album_name", "The Sound of Music")
+    kwargs.setdefault("album_secondary_types", ["Soundtrack"])
+    return _matcher.song_matcher(
+        85, "Richard Rodgers", "richard rodgers", song_title, _matcher._normalized_text(song_title), results,
+        expected_duration_ms=int(seconds * 1000), duration_tolerance_seconds=15, **kwargs)
+
+
+def _perf_song(title, video_id, seconds, album, artists=("Julie Andrews", "Irwin Kostal")):
+    return {"resultType": "song", "title": title, "videoId": video_id,
+            "artists": [{"name": name} for name in artists], "duration_seconds": seconds,
+            "album": {"name": album}}
+
+
+def test_song_matcher_accepts_a_soundtrack_cue_on_another_album_when_the_length_is_near_exact():
+    """Prod: the real cue sits on 'My Favorite Things (Alternate Version)', so the album bridge cannot fire."""
+    results = [_perf_song("My Favorite Things (Part 2) / Salzburg Montage", "cue", 178, "My Favorite Things (Alternate Version)")]
+    assert _som("My Favorite Things (Part 2) / Salzburg Montage", results, 177.84)["videoId"] == "cue"
+
+
+def test_song_matcher_rejects_a_cue_title_on_another_album_when_the_length_only_roughly_agrees():
+    results = [_perf_song("My Favorite Things (Part 2) / Salzburg Montage", "cue", 190, "My Favorite Things (Alternate Version)")]
+    assert _som("My Favorite Things (Part 2) / Salzburg Montage", results, 177.84) is None
+
+
+def test_song_matcher_does_not_credit_a_generic_title_on_an_unrelated_album():
+    """Without a cue marker in the request, a same-named cover gets no soundtrack credit."""
+    results = [_perf_song("My Favorite Things", "cover", 146, "Songs I Love", artists=("Mirusia",))]
+    assert _som("My Favorite Things", results, 147) is None
+
+
+def test_soundtrack_album_credit_now_needs_a_near_exact_length_so_covers_are_not_credited():
+    """A cover album titled 'The Sound of Music' shares the album name but not the recording."""
+    results = [_perf_song("My Favorite Things", "cover", 158, "The Sound of Music", artists=("Petula Clark",))]
+    assert _som("My Favorite Things", results, 147) is None
+
+
+def test_song_matcher_still_credits_the_soundtrack_album_cut():
+    results = [_perf_song("My Favorite Things (Reprise)", "soundtrack", 75,
+                          "The Sound Of Music (Original Soundtrack Recording / Super Deluxe Edition)")]
+    assert _som("My Favorite Things (reprise)", results, 74)["videoId"] == "soundtrack"
+
+
+@pytest.mark.parametrize("title, matches", [
+    ("My Favorite Things, Pt. 1", True),
+    ("My Favorite Things (Part 2) / Salzburg Montage", True),
+    ("Something Good (Reprise)", True),
+    ("Act 2. Confrontation", True),
+    ("Main Title", True),
+    ("My Favorite Things", False),
+    ("Edelweiss", False),
+])
+def test_soundtrack_cue_titles_are_recognised(title, matches):
+    assert bool(_matcher._SOUNDTRACK_CUE_RE.search(_matcher._normalized_text(title))) is matches
+
+
+@pytest.mark.parametrize("expected_seconds, candidate_seconds, near", [
+    (177.84, 178, True), (74, 75, True), (138, 139, True),
+    (138, 141, False), (147, 158, False), (600, 605, True), (600, 612, False),
+])
+def test_near_exact_duration_allows_two_seconds_or_one_percent(expected_seconds, candidate_seconds, near):
+    assert _matcher._near_exact_duration(int(expected_seconds * 1000), candidate_seconds) is near
+
+
+def test_near_exact_duration_needs_both_lengths():
+    assert _matcher._near_exact_duration(0, 100) is False
+    assert _matcher._near_exact_duration(100000, 0) is False

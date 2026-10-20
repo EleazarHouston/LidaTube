@@ -402,7 +402,69 @@ def _album_base(name):
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Soundtrack cue titles ("Pt. 1", "Reprise", "Salzburg Montage", "Act 2.") name a moment in
+# the film or show rather than a standalone song, so a cover never carries the same title.
+_SOUNDTRACK_CUE_RE = re.compile(
+    r"\b(?:pt|part)\.?\s*\d|\bmontage\b|\breprise\b|\bact\s+(?:[ivx]+|\d)\b|\bscene\s+\d"
+    r"|\bfinale\b|\bovertures?\b|\bentr\s*acte\b|\bprologue\b|\bepilogue\b|\bmain title\b|\bend (?:credits|titles?)\b"
+)
+# Two recordings of the same cue differ by rounding, not by performance length.
+_SAME_RECORDING_MAX_SECONDS = 2.0
+_SAME_RECORDING_MAX_FRACTION = 0.01
+
+
+def _near_exact_duration(expected_ms, candidate_seconds):
+    """True when both lengths are known and agree to within 2 seconds (1% for long tracks)."""
+    if not expected_ms or not candidate_seconds:
+        return False
+    expected_seconds = expected_ms / 1000.0
+    allowed = max(_SAME_RECORDING_MAX_SECONDS, expected_seconds * _SAME_RECORDING_MAX_FRACTION)
+    return abs(candidate_seconds - expected_seconds) <= allowed
+
+
+def _adds_other_production_words(requested_album, candidate_album):
+    """True when the candidate album names a production the request does not (Broadway, TV, revival)."""
+    requested_words = set(_WORD_RE.findall(_normalized_text(requested_album or "")))
+    candidate_words = set(_WORD_RE.findall(_normalized_text(candidate_album or "")))
+    return bool((candidate_words & _STAGE_PRODUCTION_WORDS) - requested_words)
+
+
+def _is_soundtrack_request(requested_album, requested_secondary_types, candidate_album):
+    return bool(
+        any(str(kind).lower() == "soundtrack" for kind in (requested_secondary_types or []))
+        or _SOUNDTRACK_ALBUM_RE.search(_normalized_text(requested_album or ""))
+        or _SOUNDTRACK_ALBUM_RE.search(_normalized_text(candidate_album or ""))
+    )
+
+
+def _soundtrack_recording_credit(requested_album, requested_secondary_types, requested_title,
+                                 candidate_album, candidate_title, expected_duration_ms, candidate_seconds):
+    """Stand in for the artist credit when the candidate is plainly the same soundtrack recording.
+
+    Lidarr credits a soundtrack to its composer ("Richard Rodgers") while YouTube Music credits
+    the performers ("Julie Andrews"), so the artist never matches. What shows it is the same
+    recording is a near-exact length plus either the same soundtrack album or the same cue title:
+    prod's "My Favorite Things (Part 2) / Salzburg Montage" sits on an alternate-version album,
+    so the album alone cannot vouch for it. Requiring the length keeps cover albums that merely
+    share the soundtrack's title (Petula Clark's "The Sound of Music") uncredited.
+    """
+    if not _near_exact_duration(expected_duration_ms, candidate_seconds):
+        return False
+    if _soundtrack_album_credit(requested_album, requested_secondary_types, candidate_album):
+        return True
+    if not _is_soundtrack_request(requested_album, requested_secondary_types, candidate_album):
+        return False
+    requested = _normalized_text(requested_title or "")
+    if not _SOUNDTRACK_CUE_RE.search(requested):
+        return False
+    if _adds_other_production_words(requested_album, candidate_album):
+        # Another production's cast recording reuses the cue title and its length.
+        return False
+    return _same_base_title(requested, _normalized_text(candidate_title or ""))
+
+
 def _soundtrack_album_credit(requested_album, requested_secondary_types, candidate_album):
+    """True when the candidate sits on the same soundtrack album as the request."""
     requested_base = _album_base(requested_album)
     if not requested_base or requested_base != _album_base(candidate_album):
         return False
@@ -415,8 +477,7 @@ def _soundtrack_album_credit(requested_album, requested_secondary_types, candida
     )
     if not is_soundtrack:
         return False
-    added_production_words = (set(_WORD_RE.findall(candidate_text)) & _STAGE_PRODUCTION_WORDS) - set(_WORD_RE.findall(requested_text))
-    return not added_production_words
+    return not _adds_other_production_words(requested_album, candidate_album)
 
 
 # When nothing matches within the normal duration tolerance, a second pass allows up to the
@@ -575,7 +636,10 @@ def _song_matcher_pass(minimum_match_ratio, artist, cleaned_artist, song_title, 
         artist_names = [x["name"] for x in item["artists"]]
         artists_string = "".join(artist_names)
         artist_named = _artist_credited(cleaned_artist, artist_names) or _artist_credited(_normalized_text(artist), artist_names)
-        artist_credited = artist_named or _soundtrack_album_credit(album_name, album_secondary_types, _candidate_album_name(item))
+        artist_credited = artist_named or _soundtrack_recording_credit(
+            album_name, album_secondary_types, song_title, _candidate_album_name(item), item["title"],
+            expected_duration_ms, candidate_seconds,
+        )
         raw_artist_match_ratio = fuzz.ratio(artist, artists_string)
         cleaned_artists_string = _normalized_text(artists_string)
         cleaned_artist_match_ratio = fuzz.ratio(cleaned_artist, cleaned_artists_string)
