@@ -314,7 +314,14 @@ class DownloadQueue:
         queue_status = "error"
         try:
             self.download_album(req_album)
-            if self.stop_event.is_set():
+            if req_album.pop("_search_blocked", False):
+                # A YouTube block is not this album's fault: leave it queued instead of
+                # consuming it, so the session picks it up once searching works again.
+                self.logger.warning(
+                    f'Keeping {req_album["artist"]} - {req_album["album_name"]} queued: search was blocked'
+                )
+                queue_status = "pending"
+            elif self.stop_event.is_set():
                 queue_status = "pending"
             elif req_album.get("status") in ("Download Error", "Refresh data unavailable"):
                 queue_status = "error"

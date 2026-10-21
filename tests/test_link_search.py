@@ -950,3 +950,45 @@ def test_a_retry_resumes_instead_of_searching_the_whole_album_again(monkeypatch)
 
     assert len(album_searches) == 1
     assert album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
+
+
+def test_find_links_flags_the_album_when_a_block_outlasts_the_cap(monkeypatch, tmp_path):
+    """A blocked album was never really searched, so the queue must be able to keep it."""
+    searcher = _block_searcher(delays=(0,), max_attempts=1)
+    searcher.store = Store(tmp_path / "blocked-flag.db")
+    session_id = searcher.store.start_session(requested_count=1)
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_ytmusic([]))
+    monkeypatch.setattr(searcher, "_yt_search", lambda query_text: [])
+    album = _network_retry_album()
+
+    searcher.find_links(album, session_id)
+
+    assert album["_search_blocked"] is True
+    assert [track["outcome"] for track in searcher.store.get_session_tracks(session_id)] == ["error"]
+    searcher.store.close()
+
+
+def test_find_links_does_not_flag_the_album_for_other_failures(monkeypatch):
+    searcher = _block_searcher()
+
+    class BrokenYTMusic:
+        def search(self, query, filter, limit):
+            raise ValueError("unexpected response shape")
+
+    monkeypatch.setattr(link_search, "YTMusic", BrokenYTMusic)
+    album = _network_retry_album()
+
+    searcher.find_links(album)
+
+    assert "_search_blocked" not in album
+
+
+def test_find_links_clears_a_stale_block_flag_on_a_clean_pass(monkeypatch):
+    searcher = _block_searcher()
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_ytmusic([], recover_after=0))
+    album = _network_retry_album()
+    album["_search_blocked"] = True
+
+    searcher.find_links(album)
+
+    assert "_search_blocked" not in album

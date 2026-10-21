@@ -699,3 +699,37 @@ def test_begin_streaming_leaves_streaming_off_when_the_queue_thread_cannot_start
 
     assert queue.streaming_mode is False
     assert queue.in_progress is False
+
+
+def _blocked_album():
+    return {
+        "artist": "Fryderyk Chopin", "album_name": "Nocturnes", "artist_path": "/music/Chopin",
+        "album_folder": "Nocturnes (1990)", "track_count": 1, "missing_count": 1, "status": "",
+        "missing_tracks": [{"artist": "Fryderyk Chopin", "track_title": "Nocturne", "track_number": 1,
+                            "track_id": 1, "duration_ms": 200000, "link": "", "title_of_link": ""}],
+    }
+
+
+def test_a_blocked_search_keeps_the_album_queued_for_a_later_attempt(monkeypatch):
+    """YouTube blocked the search, so the album was never really tried: it must not count as done."""
+    queue = build_queue()
+
+    def blocked_download(req_album):
+        req_album["_search_blocked"] = True
+        req_album["status"] = "Album Incomplete"
+
+    monkeypatch.setattr(queue, "download_album", blocked_download)
+
+    queue._process_item(42, _blocked_album())
+
+    queue.store.mark_queue_item.assert_called_once_with(42, "pending")
+
+
+def test_an_album_that_simply_found_nothing_is_still_done(monkeypatch):
+    queue = build_queue()
+    monkeypatch.setattr(queue, "download_album",
+                        lambda req_album: req_album.update({"status": "Album Incomplete"}))
+
+    queue._process_item(43, _blocked_album())
+
+    queue.store.mark_queue_item.assert_called_once_with(43, "done")

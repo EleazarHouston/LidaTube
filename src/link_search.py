@@ -142,12 +142,16 @@ class LinkSearcher:
     def find_links(self, req_album, session_id=None):
         """Find a YouTube link for each missing track and record every outcome under session_id."""
         search_error = None
+        req_album.pop("_search_blocked", None)
         try:
             self.logger.warning(f'Searching for: {req_album["artist"]} - {req_album["album_name"]}')
             self._search_links_with_backoff(req_album)
         except Exception as e:
             search_error = e
             self.logger.error(f"Error in Link Finder: {e}")
+            if _general.is_youtube_block_error(e):
+                # Nothing was really searched, so let the queue keep this album for later.
+                req_album["_search_blocked"] = True
             if _general.is_resource_exhaustion_error(e):
                 self.fd.signal_exhaustion_in_background()
         finally:
