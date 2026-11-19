@@ -132,6 +132,7 @@ For each album, LidaTube searches in stages and stops once every missing track h
 
 Every candidate has to pass these checks:
 
+* **Not rejected for this track.** A video on the track's rejected list (see [Reviewing results](#reviewing-results)) is never picked, at any stage or as a top-result fallback.
 * **Length** within `duration_tolerance_seconds` of Lidarr's track length. A missing length on either side is not a rejection.
 * **Live gate.** A live recording is never accepted for a studio track. When the request is live (the title or album name says so, or Lidarr marks the album as Live), live recordings are preferred.
 * **Version gate.** Karaoke, instrumentals, covers, tributes, a cappella, sped-up, slowed, nightcore and 8D uploads are rejected, as are remixes and named versions (e.g. "Solo Version") that the requested title doesn't have. A track that *is* an instrumental or a remix still matches its own version.
@@ -148,6 +149,15 @@ Every search outcome is stored in `config/lidatube.db`: the link chosen, which s
 
 * **History** lists download sessions. Open one to see each track's outcome and suspicion score, and click a `no_match` track to see the candidates YouTube returned and why each was rejected.
 * **Override** lists tracks worth a second look, sorted by suspicion score, and lets you force a YouTube URL for a track. The override is used the next time the album is searched.
+* **Rejected videos** lists videos that must never be picked for a track again, typically an upload whose title is right but whose audio is another song. Reject one by Lidarr track id and video URL, or un-reject it to let searches consider it again. A forced override still wins over a rejection.
+
+To reject many videos at once, pass a JSONL file of `{"track_id": <Lidarr track id>, "video_id": <id or URL>, "reason": "..."}` lines to the running app:
+
+```
+python3 src/reject_videos.py rejects.jsonl --source audit
+```
+
+It posts to `/api/rejected_videos/import`. Re-running a file is safe: videos already rejected keep their first reason, and bad lines are reported by line number.
 
 Suspicion scores are for triage. A high score does not prove that a file is wrong.
 
@@ -218,11 +228,12 @@ This serves the UI on port 5000 and creates `config/` and `downloads/` in the wo
 | `scheduler.py` | `SyncScheduler`: starts scheduled syncs. |
 | `downloader.py` | yt-dlp download with rate-limit back-off. |
 | `lidarr_client.py` | Lidarr API calls, including album import and library rescan. |
-| `store.py` | SQLite persistence: sessions, the queue, track results, candidate evaluations and overrides. |
+| `store.py` | SQLite persistence: sessions, the queue, track results, candidate evaluations, overrides and rejected videos. |
 | `config.py` | Settings from environment variables, the settings file and defaults. |
 | `fd_governor.py` | Keeps worker pools within the open-file limit and backs off when it is nearly used up. |
 | `_backoff.py`, `_general.py` | Shared retry policy; naming, tagging and error-classification helpers. |
 | `audit_library.py`, `library_suspicion.py` | The offline library audit tools. |
+| `reject_videos.py` | Bulk-rejects videos per track through the running app's API. |
 
 ---
 

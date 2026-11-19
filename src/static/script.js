@@ -510,6 +510,43 @@ async function show_session_tracks(row, sessionId) { const details = row.nextEle
 async function load_history() { const page = await fetch_json('/api/sessions?limit=100&offset=0'); history_table.replaceChildren(...page.items.map((s) => { const r=document.createElement('tr'); r.innerHTML=`<td>${new Date(s.started_at).toLocaleString()}</td><td>${s.status}</td><td>${s.requested_count}</td><td>${s.matched_count}</td><td>${s.failed_count}</td>`; r.style.cursor='pointer'; r.addEventListener('click', () => show_session_tracks(r, s.id).catch((e) => show_toast('History', e.message))); return r; })); }
 async function load_overrides() { const page = await fetch_json('/api/attention?limit=100&offset=0'); override_table.replaceChildren(...page.items.map((track) => { const r=document.createElement('tr'); const form=document.createElement('form'); form.className='d-flex gap-1'; form.innerHTML='<input class="form-control form-control-sm" required placeholder="https://youtube.com/..."><button class="btn btn-sm btn-primary">Save</button>'; form.addEventListener('submit', async (e) => { e.preventDefault(); await fetch_json('/api/override', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({track_id:track.track_id, forced_url:form.querySelector('input').value})}); show_toast('Override','Saved'); }); r.innerHTML=`<td>${escape_html(track.artist)} - ${escape_html(track.track_title)} <small class="text-muted">(${escape_html(track.outcome)})</small></td><td>${track.suspicion}</td>`; const c=document.createElement('td'); c.appendChild(form); r.appendChild(c); return r; })); }
 document.getElementById('history-panel').addEventListener('show.bs.collapse', () => load_history().catch((e) => show_toast('History', e.message)));
+const rejected_table = document.querySelector('#rejected-table tbody');
+async function load_rejected_videos() {
+    const page = await fetch_json('/api/rejected_videos?limit=200&offset=0');
+    rejected_table.replaceChildren(...page.items.map((item) => {
+        const row = document.createElement('tr');
+        const url = `https://www.youtube.com/watch?v=${encodeURIComponent(item.video_id)}`;
+        row.innerHTML = `<td>${escape_html(item.track_id)}</td><td><a href="${url}" target="_blank" rel="noopener noreferrer">${escape_html(item.video_id)}</a></td><td>${escape_html(item.reason || '')}</td><td>${escape_html(item.source || '')}</td><td>${escape_html((item.created_at || '').slice(0, 10))}</td>`;
+        const cell = document.createElement('td');
+        const button = document.createElement('button');
+        button.className = 'btn btn-sm btn-outline-secondary';
+        button.textContent = 'Un-reject';
+        button.addEventListener('click', async () => {
+            await fetch_json(`/api/rejected_videos/${encodeURIComponent(item.track_id)}/${encodeURIComponent(item.video_id)}`, {method: 'DELETE'});
+            show_toast('Rejected videos', 'Un-rejected');
+            await load_rejected_videos();
+        });
+        cell.appendChild(button);
+        row.appendChild(cell);
+        return row;
+    }));
+}
+document.getElementById('rejected-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try {
+        await fetch_json('/api/rejected_videos', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+            track_id: Number(document.getElementById('rejected-track-id').value),
+            video_id: document.getElementById('rejected-video').value,
+            reason: document.getElementById('rejected-reason').value || null,
+        })});
+        event.target.reset();
+        show_toast('Rejected videos', 'Rejected');
+        await load_rejected_videos();
+    } catch (e) {
+        show_toast('Rejected videos', e.message);
+    }
+});
+document.getElementById('rejected-panel').addEventListener('show.bs.collapse', () => load_rejected_videos().catch((e) => show_toast('Rejected videos', e.message)));
 document.getElementById('override-panel').addEventListener('show.bs.collapse', () => load_overrides().catch((e) => show_toast('Override', e.message)));
 
 socket.on('new_toast_msg', function (data) {

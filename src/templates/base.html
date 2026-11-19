@@ -173,6 +173,10 @@
         <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#override-panel">Override</button></h2>
         <div id="override-panel" class="accordion-collapse collapse" data-bs-parent="#persistence-accordion"><div class="accordion-body p-2"><p class="small text-muted">Tracks needing attention, sorted by heuristic suspicion score. Scores are for review and do not prove a file is incorrect.</p><table class="table table-striped" id="override-table"><thead><tr><th>Track</th><th>Suspicion</th><th>Force YouTube URL</th></tr></thead><tbody></tbody></table><div id="override-sentinel"></div></div></div>
       </div>
+      <div class="accordion-item">
+        <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#rejected-panel">Rejected videos</button></h2>
+        <div id="rejected-panel" class="accordion-collapse collapse" data-bs-parent="#persistence-accordion"><div class="accordion-body p-2"><p class="small text-muted">Videos LidaTube will never pick for that track, because the upload was found to carry the wrong audio. Un-reject a video to let searches consider it again.</p><form id="rejected-form" class="d-flex flex-wrap gap-1 mb-2"><input id="rejected-track-id" class="form-control form-control-sm" style="max-width: 9rem" type="number" min="1" required placeholder="Lidarr track id"><input id="rejected-video" class="form-control form-control-sm" style="max-width: 22rem" required placeholder="https://youtube.com/watch?v=..."><input id="rejected-reason" class="form-control form-control-sm" style="max-width: 16rem" placeholder="Reason"><button class="btn btn-sm btn-danger">Reject</button></form><table class="table table-striped" id="rejected-table"><thead><tr><th>Track id</th><th>Video</th><th>Reason</th><th>Source</th><th>Added</th><th></th></tr></thead><tbody></tbody></table></div></div>
+      </div>
     </div>
   </div>
 
