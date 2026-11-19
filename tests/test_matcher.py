@@ -1713,3 +1713,25 @@ def test_youtube_fallback_keeps_rejecting_a_different_production_of_the_cue():
     results = [_yt_item("My Favorite Things (Part 1)", "https://broadway", "2:19",
                         channel="Original Broadway Cast - Topic")]
     assert _rodgers_yt("My Favorite Things, Pt. 1", results, 138) is None
+
+
+def test_candidate_video_id_reads_ytmusic_yts_and_ytdlp_shapes():
+    assert _matcher.candidate_video_id({"videoId": "abcdefghijk"}) == "abcdefghijk"
+    assert _matcher.candidate_video_id({"id": "abcdefghijk", "link": "https://www.youtube.com/watch?v=abcdefghijk"}) == "abcdefghijk"
+    assert _matcher.candidate_video_id({"webpage_url": "https://www.youtube.com/watch?v=abcdefghijk"}) == "abcdefghijk"
+    assert _matcher.candidate_video_id({"link": "https://youtu.be/abcdefghijk"}) == "abcdefghijk"
+    assert _matcher.candidate_video_id({"title": "no id"}) is None
+
+
+def test_drop_rejected_videos_removes_rejected_candidates_and_traces_each_skip():
+    trace = []
+    results = [
+        {"title": "Wrong Song", "videoId": "aaaaaaaaaaa", "duration_seconds": 180},
+        {"title": "Right Song", "videoId": "bbbbbbbbbbb", "duration_seconds": 180},
+    ]
+    kept = _matcher.drop_rejected_videos(results, {"aaaaaaaaaaa"}, trace, "ytmusic")
+    assert kept == [results[1]]
+    assert [(entry["candidate_title"], entry["rejected_by"]) for entry in trace] == [("Wrong Song", "rejected_video")]
+    assert trace[0]["candidate_duration_s"] == 180
+    assert _matcher.drop_rejected_videos(results, set(), trace, "ytmusic") == results
+    assert _matcher.drop_rejected_videos(None, {"aaaaaaaaaaa"}, trace, "ytmusic") is None

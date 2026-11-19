@@ -576,6 +576,39 @@ def _same_base_title(left, right):
     return bool(left_base) and left_base == _base_title(right)
 
 
+def candidate_video_id(item):
+    """The YouTube video id of a search result in any of the YouTube Music, YTS or yt-dlp shapes."""
+    for field in ("videoId", "id", "webpage_url", "link", "url"):
+        video_id = _general.youtube_video_id(item.get(field))
+        if video_id:
+            return video_id
+    return None
+
+
+def _candidate_seconds(item):
+    if item.get("duration_seconds") or item.get("durationSeconds"):
+        return item.get("duration_seconds") or item.get("durationSeconds")
+    raw_duration = item.get("duration") or 0
+    return _parse_duration_string(raw_duration) if isinstance(raw_duration, str) else int(raw_duration or 0)
+
+
+def drop_rejected_videos(search_results, rejected_video_ids, trace, source):
+    """Remove results whose video was rejected for this track, tracing each skip as rejected_video.
+
+    Run before matching and before any top-result fallback: a rejected upload is known to carry
+    the wrong audio, so no score, however perfect its title, may bring it back.
+    """
+    if not search_results or not rejected_video_ids:
+        return search_results
+    kept = []
+    for item in search_results:
+        if candidate_video_id(item) in rejected_video_ids:
+            _append_trace(trace, source, item, _candidate_seconds(item), None, "rejected_video")
+        else:
+            kept.append(item)
+    return kept
+
+
 def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, cleaned_album, search_results,
                   item_wanted_type="Album", trace=None, album_secondary_types=None):
     if not search_results:

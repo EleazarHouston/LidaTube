@@ -93,6 +93,11 @@ class LinkSearcher:
             )
             if outcome == "no_match":
                 self.store.record_evaluations(result_id, track.get("_match_trace", []))
+            elif outcome == "matched":
+                # A matched track keeps no trace, except proof that a rejected upload was passed over.
+                skips = [entry for entry in track.get("_match_trace", []) if entry.get("rejected_by") == "rejected_video"]
+                if skips:
+                    self.store.record_evaluations(result_id, skips)
             track["_track_result_id"] = result_id
             track.pop("_match_trace", None)
 
@@ -103,6 +108,13 @@ class LinkSearcher:
             override = self.store.get_override(track.get("track_id"))
             if override:
                 self._set_track_link(track, override["forced_url"], "Manual override", "yt")
+
+    def _drop_rejected(self, track, search_results, source):
+        """search_results without the videos rejected for this track, each skip traced on the track."""
+        rejected = self.store.rejected_video_ids(track.get("track_id"))
+        if not rejected:
+            return search_results
+        return _matcher.drop_rejected_videos(search_results, rejected, track.setdefault("_match_trace", []), source)
 
     @staticmethod
     def _search_genres(req_album):
@@ -122,6 +134,8 @@ class LinkSearcher:
                 if fuzz.ratio(song_title, missing_track_title) > 90:
                     candidate_seconds = track.get("durationSeconds") or 0
                     if not _matcher._duration_ok(missing_track["duration_ms"], candidate_seconds, self.config.duration_tolerance_seconds):
+                        continue
+                    if not self._drop_rejected(missing_track, [track], "ytmusic"):
                         continue
                     self._set_track_link_from_video_id(missing_track, track["videoId"], track["title"])
                     break
@@ -311,7 +325,7 @@ class LinkSearcher:
                     song_title = missing_track["track_title"]
                     cleaned_song_title = _general.string_cleaner(song_title).lower()
                     query_text = f'{missing_track["artist"]} - {song_title}'
-                    search_results = ytmusic.search(query=query_text, filter="songs", limit=5)
+                    search_results = self._drop_rejected(missing_track, ytmusic.search(query=query_text, filter="songs", limit=5), "ytmusic")
                     trace = missing_track.setdefault("_match_trace", [])
                     song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
                                                        expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace,
@@ -342,7 +356,7 @@ class LinkSearcher:
                     song_title = missing_track["track_title"]
                     cleaned_song_title = _general.string_cleaner(song_title).lower()
                     query_text = f'{missing_track["artist"]} - {song_title}'
-                    search_results = ytmusic.search(query=query_text, filter="songs", limit=20)
+                    search_results = self._drop_rejected(missing_track, ytmusic.search(query=query_text, filter="songs", limit=20), "ytmusic")
                     trace = missing_track.setdefault("_match_trace", [])
                     song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
                                                        expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace,
@@ -356,7 +370,7 @@ class LinkSearcher:
                         self.logger.warning(f'Secondary fallback to top result: "{song_title}" -> "{search_results[0]["title"]}"')
                         self._set_track_link_from_video_id(missing_track, search_results[0]["videoId"], search_results[0]["title"])
                     else:
-                        yt_results = self._yt_search(query_text)
+                        yt_results = self._drop_rejected(missing_track, self._yt_search(query_text), "yt")
                         song_match = _matcher.song_matcher_yt(self.config.minimum_match_ratio, artist, query_text, yt_results,
                                                               expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace,
                                                               album_name=req_album.get("album_name"), album_secondary_types=req_album.get("album_secondary_types"),

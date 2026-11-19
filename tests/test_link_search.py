@@ -20,6 +20,7 @@ def build_searcher():
     config.thread_limit = 1
     store = Mock()
     store.get_override.return_value = None
+    store.rejected_video_ids.return_value = set()
     fd = FdGovernor(Mock())
     fd.fd_limit = None
     return LinkSearcher(config, store, fd, threading.Event(), Mock(), on_status_change=Mock())
@@ -992,3 +993,122 @@ def test_find_links_clears_a_stale_block_flag_on_a_clean_pass(monkeypatch):
     searcher.find_links(album)
 
     assert "_search_blocked" not in album
+
+
+def _rejecting_searcher(rejected):
+    searcher = build_searcher()
+    searcher.store.rejected_video_ids.side_effect = lambda track_id: set(rejected.get(track_id, ()))
+    searcher.config.duration_tolerance_seconds = 15
+    searcher.config.minimum_match_ratio = 85
+    return searcher
+
+
+def _one_track_album(track_id=5, title="Soakin' Wet", duration_ms=180000):
+    return {
+        "artist": "Tammy Wynette",
+        "album_name": "Album",
+        "missing_tracks": [{
+            "artist": "Tammy Wynette", "track_title": title, "track_id": track_id,
+            "link": "", "title_of_link": "", "duration_ms": duration_ms,
+        }],
+    }
+
+
+def _ytmusic_song(title, video_id, seconds=180, artist="Tammy Wynette"):
+    return {"resultType": "song", "title": title, "videoId": video_id, "duration_seconds": seconds,
+            "artists": [{"name": artist}], "album": {"name": "Album"}}
+
+
+def test_song_search_never_picks_a_rejected_video_even_when_it_is_the_best_match():
+    searcher = _rejecting_searcher({5: {"wrongwrong1"}})
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return [_ytmusic_song("Soakin' Wet", "wrongwrong1"), _ytmusic_song("Soakin' Wet", "rightright1", seconds=181)]
+
+    album = _one_track_album()
+    searcher._get_song_links(album, "Tammy Wynette", "tammy wynette", FakeYTMusic())
+
+    track = album["missing_tracks"][0]
+    assert track["link"] == "https://www.youtube.com/watch?v=rightright1"
+    assert [entry["rejected_by"] for entry in track["_match_trace"]][0] == "rejected_video"
+
+
+def test_rejection_applies_only_to_its_own_track():
+    searcher = _rejecting_searcher({99: {"wrongwrong1"}})
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return [_ytmusic_song("Soakin' Wet", "wrongwrong1")]
+
+    album = _one_track_album(track_id=5)
+    searcher._get_song_links(album, "Tammy Wynette", "tammy wynette", FakeYTMusic())
+
+    assert album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=wrongwrong1"
+
+
+def test_fallback_to_top_result_skips_a_rejected_top_result():
+    searcher = _rejecting_searcher({5: {"wrongwrong1"}})
+    searcher.config.fallback_to_top_result = True
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return [_ytmusic_song("Something Else", "wrongwrong1"), _ytmusic_song("Other Thing", "nexttop0001")]
+
+    album = _one_track_album()
+    searcher._get_song_links(album, "Tammy Wynette", "tammy wynette", FakeYTMusic())
+
+    assert album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=nexttop0001"
+
+
+def test_secondary_youtube_search_never_picks_a_rejected_upload(monkeypatch):
+    # The Tammy Wynette case: an upload titled with the right song carries a different song's audio.
+    searcher = _rejecting_searcher({5: {"mislabeled1"}})
+    monkeypatch.setattr(searcher, "_yt_search", lambda query_text: [{
+        "title": "Tammy Wynette - Soakin' Wet", "link": "https://www.youtube.com/watch?v=mislabeled1",
+        "id": "mislabeled1", "duration": "3:00", "channel": {"name": "Tammy Wynette"},
+    }])
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return []
+
+    album = _one_track_album()
+    searcher._get_song_links_secondary(album, "Tammy Wynette", "tammy wynette", FakeYTMusic())
+
+    track = album["missing_tracks"][0]
+    assert track["link"] == ""
+    assert [(entry["source"], entry["rejected_by"]) for entry in track["_match_trace"]] == [("yt", "rejected_video")]
+
+
+def test_album_track_links_skip_a_rejected_video_for_that_track():
+    searcher = _rejecting_searcher({5: {"wrongwrong1"}})
+    album = _one_track_album()
+    album_details = {"tracks": [{"title": "Soakin' Wet", "videoId": "wrongwrong1", "durationSeconds": 180}]}
+
+    assert searcher._apply_album_track_links(album, album_details) is False
+
+    track = album["missing_tracks"][0]
+    assert track["link"] == ""
+    assert track["_match_trace"][0]["rejected_by"] == "rejected_video"
+
+
+def test_record_link_results_keeps_rejected_video_skips_of_a_matched_track(tmp_path):
+    from store import Store
+
+    searcher = build_searcher()
+    searcher.store = Store(tmp_path / "lidatube.db")
+    session_id = searcher.store.start_session(requested_count=1)
+    skip = {"source": "yt", "candidate_title": "Tammy Wynette - Soakin' Wet", "candidate_url": "https://www.youtube.com/watch?v=mislabeled1",
+            "candidate_duration_s": 180, "score": None, "rejected_by": "rejected_video"}
+    other = dict(skip, candidate_title="Some Other Song", rejected_by="below_threshold", score=40)
+    album = {"artist": "Tammy Wynette", "album_name": "Album", "missing_tracks": [{
+        "artist": "Tammy Wynette", "track_title": "Soakin' Wet", "track_number": 1, "track_id": 5, "duration_ms": 180000,
+        "link": "https://www.youtube.com/watch?v=rightright1", "title_of_link": "Soakin' Wet", "_matched_via": "ytmusic",
+        "_match_trace": [skip, other],
+    }]}
+
+    searcher._record_link_results(album, session_id)
+
+    result_id = album["missing_tracks"][0]["_track_result_id"]
+    assert [e["rejected_by"] for e in searcher.store.get_evaluations(result_id)] == ["rejected_video"]
