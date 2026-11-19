@@ -182,3 +182,13 @@ def test_audio_verification_settings_default_on_without_a_key_and_read_env(tmp_p
     monkeypatch.setenv("verification_attempts_per_track", "2")
     config = AppConfig()
     assert (config.acoustid_api_key, config.audio_verification, config.verification_attempts_per_track) == ("env-key", False, 2)
+
+
+def test_vpn_rotation_settings_default_off(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert (AppConfig.DEFAULTS["gluetun_control_url"], AppConfig.DEFAULTS["gluetun_api_key"]) == ("", "")
+    assert AppConfig.DEFAULTS["vpn_rotation_min_minutes"] == 15
+    monkeypatch.setenv("gluetun_control_url", "http://127.0.0.1:8000")
+    monkeypatch.setenv("vpn_rotation_min_minutes", "5")
+    config = AppConfig()
+    assert (config.gluetun_control_url, config.vpn_rotation_min_minutes) == ("http://127.0.0.1:8000", 5.0)

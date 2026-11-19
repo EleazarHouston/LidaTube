@@ -104,6 +104,9 @@ Certain values can be set via environment variables:
 * __audio_verification__: Check each download with AcoustID before Lidarr imports it, when a key is set. Defaults to `True`.
 * __verification_attempts_per_track__: Downloads tried per track when AcoustID rejects them. Defaults to `3`.
 * __verification_retry_minutes__: How often a file held while AcoustID or MusicBrainz was unreachable is checked again. Defaults to `30`.
+* __gluetun_control_url__: Gluetun's control server as LidaTube sees it, normally `http://127.0.0.1:8000` when LidaTube shares Gluetun's network. Setting it turns on [VPN rotation](#vpn-rotation-on-youtube-blocks). Defaults to `` (off).
+* __gluetun_api_key__: The API key of the Gluetun control-server role LidaTube uses. Defaults to ``.
+* __vpn_rotation_min_minutes__: Minimum minutes between rotations; blocks in between pause searching as before. Defaults to `15`.
 * __ULIMIT_NOFILE__: Startup target for open file descriptors (set in `init.sh` via `ulimit -n`). Thread limits are lowered automatically if the limit is too small for them. Defaults to `8192`.
 
 Settings are saved to `config/settings_config.json`. On startup, environment variables take priority over that file, which takes priority over the defaults. The Lidarr address and API key, sleep interval, sync schedule and minimum match ratio can also be changed in the web UI. A UI change to a setting that is also set by an environment variable lasts only until the next restart.
@@ -162,6 +165,20 @@ A YouTube upload can carry the right title and the wrong song, so with an Acoust
 The rules were tuned on real AcoustID lookups of 17 known-wrong library files and 415 correct or formatting-only cases. They reject 16 of the 17 wrong songs and none of the 389 correct control files. Two classical pieces known by other names in MusicBrainz (Pachelbel's "Kanon" and Khachaturian's "Gayne Ballet") are wrongly rejected, so a forced override is the way to keep such a file.
 
 AcoustID is asked at most 3 times a second and MusicBrainz at most once a second, as each service requests. A MusicBrainz lookup is only needed when ids and titles disagree.
+
+## VPN rotation on YouTube blocks
+
+YouTube Music throttles a VPN exit that searches heavily, answering with a block page instead of results. By default every searcher then pauses on one shared cooldown (60 s, growing to 30 minutes). When LidaTube runs inside [Gluetun](https://github.com/qdm12/gluetun)'s network and `gluetun_control_url` is set, a block instead makes Gluetun reconnect to another server, and searching resumes on the new exit as soon as its public IP changes. Rotations are at least `vpn_rotation_min_minutes` apart, so a block that follows LidaTube everywhere falls back to the pause rather than cycling through servers. Downloads in flight retry through the brief reconnect.
+
+Gluetun's control server must give LidaTube a role for the three routes it uses, in Gluetun's auth config file (`HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH`, by default `/gluetun/auth/config.toml`):
+
+```toml
+[[roles]]
+name = "lidatube"
+routes = ["GET /v1/vpn/status", "PUT /v1/vpn/status", "GET /v1/publicip/ip"]
+auth = "apikey"
+apikey = "a long random key, also set as gluetun_api_key"
+```
 
 ## Reviewing results
 
@@ -254,6 +271,7 @@ This serves the UI on port 5000 and creates `config/` and `downloads/` in the wo
 | `_backoff.py`, `_general.py` | Shared retry policy; naming, tagging and error-classification helpers. |
 | `audit_library.py`, `library_suspicion.py` | The offline library audit tools. |
 | `reject_videos.py` | Bulk-rejects videos per track through the running app's API. |
+| `vpn_rotator.py` | Moves to a new VPN exit through Gluetun's control server when YouTube blocks searches. |
 | `audio_verify.py`, `verification_gate.py` | Audio verification: fingerprinting, AcoustID and MusicBrainz lookups, the verdict, and holding or rejecting downloads. |
 
 ---

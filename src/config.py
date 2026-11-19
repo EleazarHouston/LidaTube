@@ -42,6 +42,12 @@ class AppConfig:
         "verification_attempts_per_track": 3,
         # How often a file held while AcoustID or MusicBrainz was unreachable is checked again.
         "verification_retry_minutes": 30,
+        # Gluetun's control server, which LidaTube reaches inside Gluetun's network, e.g.
+        # http://127.0.0.1:8000. When set, a YouTube block moves to a new VPN exit (see vpn_rotator).
+        "gluetun_control_url": "",
+        "gluetun_api_key": "",
+        # Rotations are at least this far apart; blocks in between pause searching as before.
+        "vpn_rotation_min_minutes": 15,
     }
 
     _ENV_CONVERTERS = {
@@ -66,6 +72,9 @@ class AppConfig:
         "audio_verification": lambda v: v.lower() == "true",
         "verification_attempts_per_track": int,
         "verification_retry_minutes": float,
+        "gluetun_control_url": str,
+        "gluetun_api_key": str,
+        "vpn_rotation_min_minutes": float,
     }
 
     def __init__(self, logger=None):

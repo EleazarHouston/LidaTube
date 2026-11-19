@@ -19,6 +19,7 @@ from link_search import LinkSearcher
 from scheduler import SyncScheduler
 from store import Store
 from verification_gate import VerificationGate
+from vpn_rotator import VpnRotator
 
 
 class DataHandler:
@@ -46,7 +47,8 @@ class DataHandler:
         download_stop_event = threading.Event()
         self.lidarr_client = LidarrClient(self.config, self.logger)
         self.downloader = Downloader(self.config, download_stop_event, self.logger)
-        self.searcher = LinkSearcher(self.config, self.store, self.fd, download_stop_event, self.logger)
+        self.rotator = VpnRotator(self.config, self.logger)
+        self.searcher = LinkSearcher(self.config, self.store, self.fd, download_stop_event, self.logger, rotator=self.rotator)
         self.scanner = LidarrScanner(
             self.config, self.lidarr_client, self.fd, self.emit, self.logger,
             download_stop_event=download_stop_event,
@@ -69,6 +71,7 @@ class DataHandler:
         )
 
         self.gate.log_status()
+        self.rotator.log_status()
         self.gate.start()
         self.queue.auto_resume()
         self.scheduler = SyncScheduler(self.config, self.scanner, self.queue, self.logger)

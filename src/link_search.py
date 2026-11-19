@@ -30,7 +30,7 @@ class LinkSearcher:
     # without a cap a blocked album occupied a search slot for the whole schedule.
     _MAX_BLOCK_ATTEMPTS = 3
 
-    def __init__(self, config, store, fd_governor, stop_event, logger=None, on_status_change=None):
+    def __init__(self, config, store, fd_governor, stop_event, logger=None, on_status_change=None, rotator=None):
         self.config = config
         self.store = store
         self.fd = fd_governor
@@ -41,6 +41,8 @@ class LinkSearcher:
         self._ytmusic_semaphore = threading.Semaphore(self.parallel)
         # A YouTube block hits every search alike, so all searches share one pause.
         self._block_cooldown = SharedCooldown(self._YOUTUBE_BLOCK_RETRY_DELAYS)
+        # Moves to a fresh VPN exit on a block (see vpn_rotator); None or disabled only pauses.
+        self.rotator = rotator
 
     def _set_track_link(self, track, link, title, matched_via=None):
         track["link"] = link
@@ -196,12 +198,21 @@ class LinkSearcher:
             except Exception as error:
                 if not _general.is_youtube_block_error(error):
                     raise
-                delay = self._cooldown().escalate()
                 for track in req_album.get("missing_tracks", []):
                     track.pop("_match_trace", None)
                 if waits >= self._MAX_BLOCK_ATTEMPTS:
+                    self._cooldown().escalate()
                     raise
                 waits += 1
+                if self.rotator is not None and self.rotator.enabled and self.rotator.rotate():
+                    # A fresh exit is usually unblocked, so search again at once instead of pausing.
+                    self._cooldown().clear()
+                    self.logger.warning(
+                        f'YouTube block searching {req_album["artist"]} - {req_album["album_name"]}, '
+                        f"retrying on a new VPN exit ({waits}/{self._MAX_BLOCK_ATTEMPTS}): {error}"
+                    )
+                    continue
+                delay = self._cooldown().escalate()
                 self.logger.warning(
                     f'YouTube block searching {req_album["artist"]} - {req_album["album_name"]}, '
                     f"pausing searches for {delay}s ({waits}/{self._MAX_BLOCK_ATTEMPTS}): {error}"

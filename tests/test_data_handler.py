@@ -179,3 +179,8 @@ def test_saving_settings_logs_whether_audio_verification_is_now_on(handler, monk
     handler.update_settings({"lidarr_address": "http://lidarr", "lidarr_api_key": "", "acoustid_api_key": "new-key",
                              "sleep_interval": "0", "minimum_match_ratio": "90", "sync_schedule": ""})
     handler.gate.log_status.assert_called_once_with()
+
+
+def test_searcher_rotates_the_vpn_through_the_shared_rotator(handler):
+    assert handler.searcher.rotator is handler.rotator
+    assert handler.rotator.config is handler.config

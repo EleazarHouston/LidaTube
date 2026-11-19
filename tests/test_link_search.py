@@ -1112,3 +1112,69 @@ def test_record_link_results_keeps_rejected_video_skips_of_a_matched_track(tmp_p
 
     result_id = album["missing_tracks"][0]["_track_result_id"]
     assert [e["rejected_by"] for e in searcher.store.get_evaluations(result_id)] == ["rejected_video"]
+
+
+def _blocked_then_open(calls, blocked_calls):
+    import json
+
+    class YTMusicStub:
+        def search(self, query, filter, limit):
+            calls.append(query)
+            if len(calls) <= blocked_calls:
+                raise json.JSONDecodeError("Expecting value", "", 0)
+            return [{"resultType": "song", "title": "Wouldn't That Be Fine", "videoId": "vid-1",
+                     "artists": [{"name": "Nanci Griffith"}], "duration_seconds": 200}]
+
+    return YTMusicStub
+
+
+def test_a_youtube_block_rotates_the_vpn_exit_instead_of_pausing(monkeypatch):
+    searcher = build_searcher()
+    searcher._SEARCH_RETRY_DELAYS = (0,)
+    searcher._YOUTUBE_BLOCK_RETRY_DELAYS = (1800,)
+    searcher.config.duration_tolerance_seconds = 15
+    searcher.rotator = Mock(enabled=True)
+    searcher.rotator.rotate.return_value = True
+    calls = []
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_then_open(calls, 1))
+    monkeypatch.setattr(searcher, "_yt_search", lambda query_text: [])
+    album = _network_retry_album()
+
+    searcher.find_links(album)
+
+    searcher.rotator.rotate.assert_called_once_with()
+    assert searcher._cooldown().remaining() == 0
+    assert album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
+
+
+def test_a_block_pauses_as_before_when_no_rotation_is_due(monkeypatch):
+    searcher = build_searcher()
+    searcher._SEARCH_RETRY_DELAYS = (0,)
+    searcher._YOUTUBE_BLOCK_RETRY_DELAYS = (0, 0, 0)
+    searcher.config.duration_tolerance_seconds = 15
+    searcher.rotator = Mock(enabled=True)
+    searcher.rotator.rotate.return_value = False
+    escalations = []
+    original = searcher._cooldown().escalate
+    monkeypatch.setattr(searcher._cooldown(), "escalate", lambda: escalations.append(1) or original())
+    calls = []
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_then_open(calls, 1))
+    monkeypatch.setattr(searcher, "_yt_search", lambda query_text: [])
+
+    searcher.find_links(_network_retry_album())
+
+    assert searcher.rotator.rotate.call_count == 1
+    assert escalations == [1]
+
+
+def test_a_disabled_rotator_is_never_asked(monkeypatch):
+    searcher = build_searcher()
+    searcher._SEARCH_RETRY_DELAYS = (0,)
+    searcher._YOUTUBE_BLOCK_RETRY_DELAYS = (0, 0, 0)
+    searcher.config.duration_tolerance_seconds = 15
+    searcher.rotator = Mock(enabled=False)
+    calls = []
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_then_open(calls, 1))
+    monkeypatch.setattr(searcher, "_yt_search", lambda query_text: [])
+    searcher.find_links(_network_retry_album())
+    searcher.rotator.rotate.assert_not_called()
