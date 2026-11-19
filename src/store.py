@@ -102,6 +102,7 @@ _MIGRATIONS = (
         video_id TEXT NOT NULL,
         reason TEXT,
         source TEXT,
+        detail TEXT,
         created_at TEXT NOT NULL,
         PRIMARY KEY (track_id, video_id)
     );
@@ -544,7 +545,7 @@ class Store:
             (limit, offset),
         )
 
-    def reject_video(self, track_id, video_id, reason=None, source=None):
+    def reject_video(self, track_id, video_id, reason=None, source=None, detail=None):
         """Never offer video_id for track_id again. False when it was already rejected.
 
         The first rejection's reason stands, so re-running an import cannot rewrite history.
@@ -552,11 +553,11 @@ class Store:
         with _DB_LOCK:
             cursor = self._connection.execute(
                 """
-                INSERT INTO rejected_videos (track_id, video_id, reason, source, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO rejected_videos (track_id, video_id, reason, source, detail, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(track_id, video_id) DO NOTHING
                 """,
-                (track_id, video_id, reason, source, self._now()),
+                (track_id, video_id, reason, source, detail, self._now()),
             )
             self._connection.commit()
             return cursor.rowcount > 0
