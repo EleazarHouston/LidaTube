@@ -5,6 +5,8 @@ import threading
 
 from flask import jsonify, render_template, request
 
+import _general
+
 
 def _page_args():
     try:
@@ -123,6 +125,42 @@ def register_routes(app, socketio, data_handler):
     def api_delete_override(track_id):
         data_handler.store.delete_override(track_id)
         return jsonify({"message": "Override deleted"})
+
+    @app.route("/api/rejected_videos")
+    def api_rejected_videos():
+        page = _page_args()
+        if page is None:
+            return jsonify({"error": "limit must be 1-200 and offset must be non-negative"}), 400
+        limit, offset = page
+        store = data_handler.store
+        return jsonify({"items": store.list_rejected_videos(limit, offset), "total": store.count_rejected_videos()})
+
+    @app.route("/api/rejected_videos", methods=["POST"])
+    def api_reject_video():
+        data = request.get_json(silent=True) or {}
+        track_id = data.get("track_id")
+        video_id = _general.youtube_video_id(data.get("video_id"))
+        if not isinstance(track_id, int) or isinstance(track_id, bool) or video_id is None:
+            return jsonify({"error": "track_id and a YouTube video_id or URL are required"}), 400
+        inserted = data_handler.store.reject_video(track_id, video_id, data.get("reason"), data.get("source") or "web")
+        if inserted:
+            return jsonify({"message": "Video rejected", "video_id": video_id}), 201
+        return jsonify({"message": "Video was already rejected", "video_id": video_id}), 200
+
+    @app.route("/api/rejected_videos/import", methods=["POST"])
+    def api_import_rejected_videos():
+        """Bulk-reject from a JSONL body of {track_id, video_id, reason} lines."""
+        body = request.get_data(as_text=True)
+        if not body.strip():
+            return jsonify({"error": "Request body must be JSONL lines of {track_id, video_id, reason}"}), 400
+        source = request.args.get("source") or "import"
+        return jsonify(data_handler.store.import_rejected_videos(body.splitlines(), source=source))
+
+    @app.route("/api/rejected_videos/<int:track_id>/<video_id>", methods=["DELETE"])
+    def api_unreject_video(track_id, video_id):
+        if not data_handler.store.unreject_video(track_id, video_id):
+            return jsonify({"error": "No such rejected video"}), 404
+        return jsonify({"message": "Video un-rejected"})
 
     @app.route("/cookies_status")
     def cookies_status():

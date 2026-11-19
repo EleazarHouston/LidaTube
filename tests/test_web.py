@@ -71,6 +71,29 @@ class TestPersistenceApiRoutes:
         assert client.delete("/api/override/17").status_code == 200
         assert client.get("/api/overrides?limit=10&offset=0").get_json()["items"] == []
 
+    def test_rejected_video_endpoints_validate_round_trip_and_unreject(self, app_client):
+        client, _ = app_client
+        assert client.post("/api/rejected_videos", json={"track_id": 7}).status_code == 400
+        assert client.post("/api/rejected_videos", json={"track_id": 7, "video_id": "too short"}).status_code == 400
+        response = client.post("/api/rejected_videos", json={"track_id": 7, "video_id": "https://youtu.be/abcdefghijk", "reason": "wrong song"})
+        assert response.status_code == 201
+        assert client.post("/api/rejected_videos", json={"track_id": 7, "video_id": "abcdefghijk"}).status_code == 200
+        page = client.get("/api/rejected_videos?limit=10&offset=0").get_json()
+        assert page["total"] == 1
+        assert (page["items"][0]["track_id"], page["items"][0]["video_id"], page["items"][0]["source"]) == (7, "abcdefghijk", "web")
+        assert client.delete("/api/rejected_videos/7/abcdefghijk").status_code == 200
+        assert client.delete("/api/rejected_videos/7/abcdefghijk").status_code == 404
+        assert client.get("/api/rejected_videos").get_json()["items"] == []
+
+    def test_rejected_video_import_accepts_jsonl_and_reports_bad_lines(self, app_client):
+        client, module = app_client
+        body = '{"track_id": 7, "video_id": "abcdefghijk", "reason": "acoustid_mismatch"}\nnot json\n'
+        response = client.post("/api/rejected_videos/import?source=bulk", data=body, content_type="application/x-ndjson")
+        assert response.status_code == 200
+        assert response.get_json() == {"inserted": 1, "duplicate": 0, "invalid": 1, "errors": [2]}
+        assert module.data_handler.store.list_rejected_videos()[0]["source"] == "bulk"
+        assert client.post("/api/rejected_videos/import", data="").status_code == 400
+
     def test_lidarr_api_pages_and_filters_attention_items(self, app_client):
         client, module = app_client
         module.data_handler.scanner.items = [
