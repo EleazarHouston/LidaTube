@@ -18,6 +18,7 @@ The thresholds were set against real lookups of hand-labelled library files: 16 
 songs rejected, and none of 389 correct control files.
 """
 
+import json
 import re
 import subprocess
 import threading
@@ -48,6 +49,139 @@ class Verdict:
     @property
     def accepted(self):
         return self.status != "rejected"
+
+
+# --- Services -----------------------------------------------------------------------------
+
+FPCALC_TIMEOUT_SECONDS = 60
+ACOUSTID_LOOKUP_URL = "https://api.acoustid.org/v2/lookup"
+MUSICBRAINZ_RECORDING_URL = "https://musicbrainz.org/ws/2/recording/{}"
+
+
+class RateLimiter:
+    """Space calls at least min_interval seconds apart, across every thread that shares it."""
+
+    def __init__(self, min_interval):
+        self.min_interval = min_interval
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self):
+        with self._lock:
+            now = time.monotonic()
+            if now < self._next:
+                time.sleep(self._next - now)
+                now = self._next
+            self._next = now + self.min_interval
+
+
+def fingerprint(path, fpcalc="fpcalc", length=120):
+    """(duration in whole seconds, compressed fingerprint) of an audio file, via Chromaprint's fpcalc."""
+    try:
+        done = subprocess.run([fpcalc, "-json", "-length", str(length), path], capture_output=True, text=True,
+                              timeout=FPCALC_TIMEOUT_SECONDS)
+    except FileNotFoundError:
+        raise VerificationUnavailable("fpcalc is not installed (Chromaprint's libchromaprint-tools)") from None
+    except subprocess.TimeoutExpired:
+        raise VerificationUnavailable(f"fpcalc timed out after {FPCALC_TIMEOUT_SECONDS}s") from None
+    if done.returncode != 0:
+        raise VerificationUnavailable(f"fpcalc failed: {(done.stderr or '').strip()[:200]}")
+    try:
+        result = json.loads(done.stdout)
+        return int(result["duration"]), result["fingerprint"]
+    except (ValueError, KeyError, TypeError):
+        raise VerificationUnavailable("fpcalc returned no fingerprint") from None
+
+
+class AcoustIdClient:
+    """AcoustID lookups, at most 3 a second as AcoustID asks. The key never appears in errors."""
+
+    def __init__(self, api_key, timeout=15, min_interval=1 / 3):
+        self._api_key = api_key
+        self.timeout = timeout
+        self._limiter = RateLimiter(min_interval)
+
+    def lookup(self, duration, fingerprint_text):
+        self._limiter.wait()
+        try:
+            response = requests.post(ACOUSTID_LOOKUP_URL, timeout=self.timeout, data={
+                "client": self._api_key, "meta": "recordings sources", "duration": int(duration),
+                "fingerprint": fingerprint_text, "format": "json",
+            })
+            body = response.json()
+        except (requests.RequestException, ValueError) as error:
+            # Request errors can quote the request, so report only the kind of failure.
+            raise VerificationUnavailable(f"AcoustID unreachable ({type(error).__name__})") from None
+        if response.status_code != 200 or body.get("status") != "ok":
+            message = str((body.get("error") or {}).get("message") or f"HTTP {response.status_code}")
+            raise VerificationUnavailable(f"AcoustID error: {message.replace(self._api_key, '***')[:200]}")
+        return body
+
+
+class MusicBrainzClient:
+    """Recording lookups for current ids and works, at most 1 a second as MusicBrainz asks."""
+
+    def __init__(self, user_agent, timeout=15, min_interval=1.1, retry_delays=(2, 5)):
+        self.user_agent = user_agent
+        self.timeout = timeout
+        self.retry_delays = tuple(retry_delays)
+        self._limiter = RateLimiter(min_interval)
+        self._cache = {}
+        self._cache_lock = threading.Lock()
+
+    def recording_info(self, recording_id):
+        """(current id, set of work ids); an id MusicBrainz no longer knows has no works."""
+        with self._cache_lock:
+            if recording_id in self._cache:
+                return self._cache[recording_id]
+        for delay in self.retry_delays + (None,):
+            self._limiter.wait()
+            try:
+                response = requests.get(MUSICBRAINZ_RECORDING_URL.format(recording_id), timeout=self.timeout,
+                                        params={"inc": "work-rels", "fmt": "json"},
+                                        headers={"User-Agent": self.user_agent, "Accept": "application/json"})
+            except requests.RequestException as error:
+                raise VerificationUnavailable(f"MusicBrainz unreachable ({type(error).__name__})") from None
+            if response.status_code in (429, 503) and delay is not None:
+                time.sleep(delay)
+                continue
+            break
+        if response.status_code == 404:
+            info = (recording_id, set())
+        elif response.status_code != 200:
+            raise VerificationUnavailable(f"MusicBrainz error: HTTP {response.status_code}")
+        else:
+            try:
+                body = response.json()
+            except ValueError:
+                raise VerificationUnavailable("MusicBrainz returned invalid JSON") from None
+            works = {relation["work"]["id"] for relation in body.get("relations") or [] if relation.get("work")}
+            info = (body.get("id") or recording_id, works)
+        with self._cache_lock:
+            if len(self._cache) > 50000:
+                self._cache.clear()
+            self._cache[recording_id] = info
+        return info
+
+
+class Verifier:
+    """Fingerprint a file, look it up, and judge it against the track Lidarr expects."""
+
+    def __init__(self, acoustid, musicbrainz, fpcalc="fpcalc"):
+        self.acoustid = acoustid
+        self.musicbrainz = musicbrainz
+        self.fpcalc = fpcalc
+
+    def _recording_info(self, recording_id):
+        if self.musicbrainz is None:
+            raise VerificationUnavailable("MusicBrainz lookups are not configured")
+        return self.musicbrainz.recording_info(recording_id)
+
+    def verify(self, path, track):
+        duration, fingerprint_text = fingerprint(path, fpcalc=self.fpcalc)
+        response = self.acoustid.lookup(duration, fingerprint_text)
+        return decide(track.get("track_title", ""), track.get("recording_id"), response, self._recording_info,
+                      expected_artist=track.get("artist", ""))
 
 
 # --- Titles -------------------------------------------------------------------------------

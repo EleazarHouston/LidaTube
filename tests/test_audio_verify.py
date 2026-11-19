@@ -176,3 +176,147 @@ def test_same_title_keeps_different_songs_apart(expected, got):
 
 def test_module_documents_its_thresholds():
     assert (audio_verify.EVIDENCE_SCORE, audio_verify.STRONG_SOURCES) == (0.8, 3)
+
+
+# --- Service clients ----------------------------------------------------------------------
+
+class FakeHttp:
+    def __init__(self, status_code=200, payload=None, error=None):
+        self.status_code, self._payload, self.error = status_code, payload, error
+        self.calls = []
+
+    def __call__(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        if self.error:
+            raise self.error
+        return self
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+def test_fingerprint_runs_fpcalc_and_reads_its_json(monkeypatch):
+    calls = []
+
+    class Done:
+        returncode, stdout, stderr = 0, '{"duration": 181.4, "fingerprint": "AQADtJGS"}', ""
+
+    monkeypatch.setattr(audio_verify.subprocess, "run", lambda args, **kwargs: calls.append((args, kwargs)) or Done())
+    assert audio_verify.fingerprint("/tmp/song.mp3") == (181, "AQADtJGS")
+    assert calls[0][0] == ["fpcalc", "-json", "-length", "120", "/tmp/song.mp3"]
+    assert calls[0][1]["timeout"] > 0
+
+
+def test_fingerprint_failures_are_unavailable_not_verdicts(monkeypatch):
+    def missing(args, **kwargs):
+        raise FileNotFoundError("fpcalc")
+
+    monkeypatch.setattr(audio_verify.subprocess, "run", missing)
+    with pytest.raises(VerificationUnavailable, match="fpcalc is not installed"):
+        audio_verify.fingerprint("/tmp/song.mp3")
+
+    class Failed:
+        returncode, stdout, stderr = 2, "", "ERROR: Could not decode"
+
+    monkeypatch.setattr(audio_verify.subprocess, "run", lambda args, **kwargs: Failed())
+    with pytest.raises(VerificationUnavailable, match="Could not decode"):
+        audio_verify.fingerprint("/tmp/song.mp3")
+
+
+def test_acoustid_lookup_posts_fingerprint_and_never_leaks_the_key(monkeypatch):
+    ok = FakeHttp(payload={"status": "ok", "results": []})
+    monkeypatch.setattr(audio_verify.requests, "post", ok)
+    client = audio_verify.AcoustIdClient("SECRETKEY", min_interval=0)
+    assert client.lookup(181, "AQADtJGS") == {"status": "ok", "results": []}
+    url, kwargs = ok.calls[0]
+    assert url == "https://api.acoustid.org/v2/lookup"
+    assert kwargs["data"] == {"client": "SECRETKEY", "meta": "recordings sources", "duration": 181,
+                              "fingerprint": "AQADtJGS", "format": "json"}
+
+    for fake in (FakeHttp(error=audio_verify.requests.ConnectionError("https://api.acoustid.org/?client=SECRETKEY")),
+                 FakeHttp(status_code=503, payload={}),
+                 FakeHttp(payload={"status": "error", "error": {"message": "invalid API key SECRETKEY"}}),
+                 FakeHttp(payload=ValueError("not json"))):
+        monkeypatch.setattr(audio_verify.requests, "post", fake)
+        with pytest.raises(VerificationUnavailable) as raised:
+            client.lookup(181, "AQADtJGS")
+        assert "SECRETKEY" not in str(raised.value)
+
+
+def test_rate_limiter_spaces_calls(monkeypatch):
+    now = [100.0]
+    sleeps = []
+    monkeypatch.setattr(audio_verify.time, "monotonic", lambda: now[0])
+
+    def fake_sleep(seconds):
+        sleeps.append(round(seconds, 3))
+        now[0] += seconds
+
+    monkeypatch.setattr(audio_verify.time, "sleep", fake_sleep)
+    limiter = audio_verify.RateLimiter(1 / 3)
+    for _ in range(3):
+        limiter.wait()
+    assert sleeps == [0.333, 0.333]
+
+
+def test_musicbrainz_recording_info_reads_works_follows_merges_and_caches(monkeypatch):
+    fake = FakeHttp(payload={"id": "new-id", "relations": [
+        {"type": "performance", "work": {"id": "w1", "title": "Canon"}}, {"type": "other"}]})
+    monkeypatch.setattr(audio_verify.requests, "get", fake)
+    client = audio_verify.MusicBrainzClient("LidaTube/test ( https://example.test )", min_interval=0)
+    assert client.recording_info("old-id") == ("new-id", {"w1"})
+    assert client.recording_info("old-id") == ("new-id", {"w1"})
+    assert len(fake.calls) == 1
+    url, kwargs = fake.calls[0]
+    assert url == "https://musicbrainz.org/ws/2/recording/old-id"
+    assert kwargs["params"] == {"inc": "work-rels", "fmt": "json"}
+    assert kwargs["headers"]["User-Agent"] == "LidaTube/test ( https://example.test )"
+
+
+def test_musicbrainz_unknown_recording_has_no_works_and_outages_are_unavailable(monkeypatch):
+    monkeypatch.setattr(audio_verify.requests, "get", FakeHttp(status_code=404, payload={}))
+    client = audio_verify.MusicBrainzClient("ua", min_interval=0, retry_delays=())
+    assert client.recording_info("gone") == ("gone", set())
+    monkeypatch.setattr(audio_verify.requests, "get", FakeHttp(status_code=503, payload={}))
+    with pytest.raises(VerificationUnavailable):
+        client.recording_info("busy")
+
+
+def test_musicbrainz_retries_rate_limit_responses(monkeypatch):
+    responses = [FakeHttp(status_code=503, payload={}), FakeHttp(payload={"id": "r", "relations": []})]
+    monkeypatch.setattr(audio_verify.requests, "get", lambda url, **kwargs: responses.pop(0))
+    monkeypatch.setattr(audio_verify.time, "sleep", lambda seconds: None)
+    client = audio_verify.MusicBrainzClient("ua", min_interval=0, retry_delays=(0.01,))
+    assert client.recording_info("r") == ("r", set())
+
+
+def test_verifier_fingerprints_looks_up_and_decides(monkeypatch):
+    monkeypatch.setattr(audio_verify, "fingerprint", lambda path, **kwargs: (180, "FP"))
+    acoustid = Mock_lookup({"status": "ok", "results": [{"score": 0.97, "recordings": [
+        {"id": "other", "title": "(Or) Is It Love", "sources": 1}]}]})
+    musicbrainz = type("NoWorks", (), {"recording_info": staticmethod(lambda recording_id: (recording_id, set()))})()
+    verifier = audio_verify.Verifier(acoustid, musicbrainz=musicbrainz)
+    track = {"track_title": "Soakin’ Wet", "recording_id": "exp", "artist": "Tammy Wynette"}
+    verdict = verifier.verify("/tmp/song.mp3", track)
+    assert verdict.status == "rejected"
+    assert acoustid.calls == [(180, "FP")]
+
+
+def test_verifier_without_musicbrainz_cannot_judge_works_and_holds_the_file(monkeypatch):
+    monkeypatch.setattr(audio_verify, "fingerprint", lambda path, **kwargs: (180, "FP"))
+    acoustid = Mock_lookup({"status": "ok", "results": [{"score": 0.97, "recordings": [
+        {"id": "other", "title": "Kanon", "sources": 139}]}]})
+    verifier = audio_verify.Verifier(acoustid, musicbrainz=None)
+    with pytest.raises(VerificationUnavailable):
+        verifier.verify("/tmp/song.mp3", {"track_title": "Canon in D", "recording_id": "exp", "artist": "Pachelbel"})
+
+
+class Mock_lookup:
+    def __init__(self, response):
+        self.response, self.calls = response, []
+
+    def lookup(self, duration, fingerprint):
+        self.calls.append((duration, fingerprint))
+        return self.response
