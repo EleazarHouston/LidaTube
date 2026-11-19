@@ -756,7 +756,8 @@ def test_verified_download_is_imported(monkeypatch):
     path, track, checked_album = queue.gate.check.call_args[0]
     assert path == "/downloads/Artist/Album (2024)/Artist - Album - 01 - Track 1.mp3"
     assert track is album["missing_tracks"][0] and checked_album is album
-    queue.lidarr_client.import_album.assert_called_once_with(album)
+    # Only files verified in this run cross into Lidarr, never leftovers in the same folder.
+    queue.lidarr_client.import_album.assert_called_once_with(album, only_files=["Artist - Album - 01 - Track 1.mp3"])
     assert album["status"] == "Download Complete"
 
 
@@ -826,3 +827,40 @@ def test_download_is_not_checked_when_verification_is_off(monkeypatch):
     queue.download_album(album)
     queue.gate.check.assert_not_called()
     queue.lidarr_client.import_album.assert_called_once()
+
+
+def test_existing_file_is_verified_too_and_imported_with_the_new_one(monkeypatch):
+    queue = _gated_queue(monkeypatch, ["accepted", "accepted"])
+    existing = "/downloads/Artist/Album (2024)/Artist - Album - 01 - Track 1.mp3"
+    monkeypatch.setattr(download_queue.os.path, "exists", lambda path: path == existing)
+    album = _make_req_album([_make_track(1), _make_track(2)])
+    queue.download_album(album)
+    assert [c[0][0] for c in queue.gate.check.call_args_list] == [existing, "/downloads/Artist/Album (2024)/Artist - Album - 02 - Track 2.mp3"]
+    assert queue.downloader.download.call_count == 1
+    queue.lidarr_client.import_album.assert_called_once_with(
+        album, only_files=["Artist - Album - 01 - Track 1.mp3", "Artist - Album - 02 - Track 2.mp3"])
+
+
+def test_existing_file_that_fails_verification_is_replaced(monkeypatch):
+    queue = _gated_queue(monkeypatch, ["rejected", "accepted"])
+    existing = "/downloads/Artist/Album (2024)/Artist - Album - 01 - Track 1.mp3"
+    monkeypatch.setattr(download_queue.os.path, "exists", lambda path: path == existing)
+    album = _make_req_album([_make_track(1)])
+
+    def search_again(sub_album, session_id=None):
+        if sub_album is album:
+            return
+        track = sub_album["missing_tracks"][0]
+        track["link"], track["title_of_link"] = "https://example.com/1-better", "Track 1 (better)"
+
+    queue.searcher.find_links.side_effect = search_again
+    queue.download_album(album)
+    assert queue.downloader.download.call_args[0][0] == "https://example.com/1-better"
+    queue.lidarr_client.import_album.assert_called_once_with(album, only_files=["Artist - Album - 01 - Track 1 (better).mp3"])
+
+
+def test_held_file_is_left_out_of_the_album_import(monkeypatch):
+    queue = _gated_queue(monkeypatch, ["held", "accepted"])
+    album = _make_req_album([_make_track(1), _make_track(2)])
+    queue.download_album(album)
+    queue.lidarr_client.import_album.assert_called_once_with(album, only_files=["Artist - Album - 02 - Track 2.mp3"])

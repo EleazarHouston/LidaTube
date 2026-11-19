@@ -129,12 +129,13 @@ class LidarrClient:
         data = {"name": "ManualImport", "importMode": import_mode, "files": files}
         return self.session.post(endpoint, json=data, headers=headers, timeout=self.config.lidarr_api_timeout), len(files)
 
-    def import_album(self, req_album):
+    def import_album(self, req_album, only_files=None):
         """Import a downloaded album into the library via Lidarr's manual import.
 
         Scans the album's folder (staging when lidarr_download_path is set, else the
         in-place library folder), then posts a ManualImport 'move' command using
-        Lidarr's own parsed candidates.
+        Lidarr's own parsed candidates. With only_files (file names), only those files
+        are imported, so files left in the folder by earlier runs never ride along.
         """
         if self.config.lidarr_download_path:
             artist_str = os.path.basename(req_album["artist_path"].rstrip("/"))
@@ -148,7 +149,14 @@ class LidarrClient:
             if scan.status_code != 200:
                 self.logger.error(f"Import scan failed ({scan.status_code}) for {folder}")
                 return
-            response, count = self.import_candidates(scan.json(), import_mode="move")
+            candidates = scan.json()
+            if only_files is not None:
+                wanted = set(only_files)
+                candidates = [c for c in candidates if os.path.basename(c.get("path") or "") in wanted]
+                if not candidates:
+                    self.logger.warning(f"None of the {len(wanted)} verified file(s) is importable in {folder}")
+                    return
+            response, count = self.import_candidates(candidates, import_mode="move")
             if count == 0:
                 self.logger.warning(f"No importable files found in {folder}")
             elif response.status_code in (200, 201):

@@ -142,7 +142,7 @@ class VerificationGate:
                 counts["accepted"] += 1
                 self.logger.warning(f'Verified held file "{track.get("track_title")}" ({verdict.status}); importing')
                 if self.config.attempt_lidarr_import:
-                    self.lidarr_client.import_album(pending["album"])
+                    self.lidarr_client.import_album(pending["album"], only_files=[os.path.basename(pending["final_path"])])
             else:
                 self._reject(held, track, verdict)
                 self.store.remove_pending_verification(pending["id"])

@@ -285,3 +285,21 @@ def test_get_recording_id_is_none_when_lidarr_cannot_say(client, response):
         assert client.get_recording_id(7) is None
     with patch.object(client.session, "get", side_effect=ConnectionError("down")):
         assert client.get_recording_id(7) is None
+
+
+def test_import_album_imports_only_the_named_files_when_asked(client):
+    client.config.lidarr_download_path = "/staging"
+    scanned = [{"path": "/staging/Artist/Album (2024)/Artist - Album - 01 - Verified.mp3"},
+               {"path": "/staging/Artist/Album (2024)/Artist - Album - 02 - Unverified leftover.mp3"}]
+    with patch.object(client, "scan_import_candidates", return_value=FakeResponse(200, scanned)), \
+            patch.object(client, "import_candidates", return_value=(FakeResponse(201, {}), 1)) as import_mock:
+        client.import_album(dict(_ALBUM), only_files=["Artist - Album - 01 - Verified.mp3"])
+    import_mock.assert_called_once_with([scanned[0]], import_mode="move")
+
+
+def test_import_album_with_no_named_file_in_the_folder_imports_nothing(client):
+    scanned = [{"path": "/music/Artist/Album (2024)/leftover.mp3"}]
+    with patch.object(client, "scan_import_candidates", return_value=FakeResponse(200, scanned)), \
+            patch.object(client, "import_candidates") as import_mock:
+        client.import_album(dict(_ALBUM), only_files=["missing.mp3"])
+    import_mock.assert_not_called()

@@ -407,6 +407,7 @@ class DownloadQueue:
             album_name = req_album["album_name"]
             folder_with_year = req_album["album_folder"]
             grabbed_count = existing_count = error_count = held_count = 0
+            verified_files = []
             song_links = [x for x in req_album["missing_tracks"] if x["link"] != ""]
             total_req = len(song_links)
             self.logger.warning(f"Valid link count of {total_req} for: {artist_str} - {album_name}")
@@ -415,7 +416,9 @@ class DownloadQueue:
                 if self.stop_event.is_set():
                     break
 
-                outcome = self._download_song(song, req_album, artist_str, album_name, folder_with_year)
+                outcome, verified_file = self._download_song(song, req_album, artist_str, album_name, folder_with_year)
+                if verified_file:
+                    verified_files.append(verified_file)
                 if outcome == "grabbed":
                     grabbed_count += 1
                 elif outcome == "existing":
@@ -434,7 +437,10 @@ class DownloadQueue:
                 self.emit_update()
 
             if self.config.attempt_lidarr_import and grabbed_count > 0 and not self.stop_event.is_set():
-                self.lidarr_client.import_album(req_album)
+                if self.gate is not None and self.gate.enabled:
+                    self.lidarr_client.import_album(req_album, only_files=verified_files)
+                else:
+                    self.lidarr_client.import_album(req_album)
 
             if self.stop_event.is_set():
                 req_album["status"] = "Download Stopped"
@@ -464,38 +470,43 @@ class DownloadQueue:
             self.emit_update()
 
     def _download_song(self, song, req_album, artist_str, album_name, folder_with_year):
-        """Download one track: "grabbed", "existing", "held" for verification, "rejected" or "error".
+        """Download one track. Returns (outcome, verified file name or None).
 
-        With verification on, a file AcoustID rejects is replaced by searching that track again
-        (its rejected video now excluded), up to verification_attempts_per_track downloads.
+        outcome is "grabbed", "existing", "held" for verification, "rejected" or "error". With
+        verification on, a file already at the track's path is checked like a fresh download,
+        and a file AcoustID rejects is replaced by searching that track again (its rejected
+        video now excluded), up to verification_attempts_per_track tries.
         """
         verifying = self.gate is not None and self.gate.enabled
         attempts = max(1, int(self.config.verification_attempts_per_track)) if verifying else 1
         for attempt in range(1, attempts + 1):
             title = song["title_of_link"]
-            self.logger.warning(f"Starting Download of: {title}")
             title_str = _general.convert_to_lidarr_format(title)
             track_number = str(song["absolute_track_number"]).zfill(2)
             file_name = os.path.join(artist_str, folder_with_year, f"{artist_str} - {album_name} - {track_number} - {title_str}")
             full_file_path_with_ext = os.path.join(self.config.download_folder, f"{file_name}.{self.config.preferred_codec}")
 
-            if os.path.exists(full_file_path_with_ext):
+            existed = os.path.exists(full_file_path_with_ext)
+            if existed:
                 self.logger.warning(f"File Already Exists: {artist_str} - {title_str}")
-                return "existing"
-            if not self.downloader.download(song["link"], file_name):
-                return "error"
-            _general.add_metadata(self.logger, song, req_album, full_file_path_with_ext)
-            if not verifying:
-                return "grabbed"
+                if not verifying:
+                    return "existing", None
+            else:
+                self.logger.warning(f"Starting Download of: {title}")
+                if not self.downloader.download(song["link"], file_name):
+                    return "error", None
+                _general.add_metadata(self.logger, song, req_album, full_file_path_with_ext)
+                if not verifying:
+                    return "grabbed", None
 
             verdict = self.gate.check(full_file_path_with_ext, song, req_album)
             if verdict == "accepted":
-                return "grabbed"
+                return ("existing" if existed else "grabbed"), os.path.basename(full_file_path_with_ext)
             if verdict == "held":
-                return "held"
+                return "held", None
             if attempt == attempts or self.stop_event.is_set() or not self._search_track_again(song, req_album):
-                return "rejected"
-        return "rejected"
+                return "rejected", None
+        return "rejected", None
 
     def _search_track_again(self, song, req_album):
         """Search one track again after its download was rejected; True when a new link was found."""

@@ -129,7 +129,7 @@ def test_held_file_is_released_and_imported_once_verified(tmp_path):
     assert os.path.exists(path)
     assert store.count_pending_verifications() == 0
     assert verification_of(store, track)["verification"] == "verified"
-    gate.lidarr_client.import_album.assert_called_once_with(ALBUM)
+    gate.lidarr_client.import_album.assert_called_once_with(ALBUM, only_files=[os.path.basename(path)])
 
 
 def test_held_file_is_deleted_when_verification_later_rejects_it(tmp_path):
