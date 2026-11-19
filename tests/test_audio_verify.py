@@ -205,7 +205,7 @@ def test_fingerprint_runs_fpcalc_and_reads_its_json(monkeypatch):
 
     monkeypatch.setattr(audio_verify.subprocess, "run", lambda args, **kwargs: calls.append((args, kwargs)) or Done())
     assert audio_verify.fingerprint("/tmp/song.mp3") == (181, "AQADtJGS")
-    assert calls[0][0] == ["fpcalc", "-json", "-length", "120", "/tmp/song.mp3"]
+    assert calls[0][0] == ["fpcalc", "-json", "-ignore-errors", "-length", "120", "/tmp/song.mp3"]
     assert calls[0][1]["timeout"] > 0
 
 
@@ -381,3 +381,41 @@ def test_verifier_tells_the_verdict_whether_the_album_is_live(monkeypatch):
     assert verifier.verify("/tmp/x.mp3", track, {"album_name": "Live at Leeds"}).status == "verified"
     assert verifier.verify("/tmp/x.mp3", track, {"album_name": "Album", "album_secondary_types": ["Live"]}).status == "verified"
     assert verifier.verify("/tmp/x.mp3", track, {"album_name": "Studio Album"}).status == "rejected"
+
+
+def test_fingerprint_of_a_track_shorter_than_the_sample_length_is_used_despite_fpcalc_exit_code(monkeypatch):
+    # fpcalc 1.5.1 exits 3 ("Error decoding audio frame (End of file)") on any file shorter than
+    # -length, while printing a valid fingerprint; about 9% of library tracks are under 2 minutes.
+    class ShortTrack:
+        returncode, stdout, stderr = 3, '{"duration": 57.2, "fingerprint": "AQADtShort"}', "ERROR: Error decoding audio frame (End of file)"
+
+    monkeypatch.setattr(audio_verify.subprocess, "run", lambda args, **kwargs: ShortTrack())
+    assert audio_verify.fingerprint("/tmp/short.mp3") == (57, "AQADtShort")
+
+
+@pytest.mark.parametrize("stdout", ["", '{"duration": 57.2}', '{"fingerprint": "AQAD"}', '{"duration": 0, "fingerprint": "AQAD"}'])
+def test_fingerprint_without_both_fingerprint_and_duration_is_unavailable(monkeypatch, stdout):
+    class Broken:
+        returncode, stderr = 3, "ERROR: Error decoding audio frame"
+
+    Broken.stdout = stdout
+    monkeypatch.setattr(audio_verify.subprocess, "run", lambda args, **kwargs: Broken())
+    with pytest.raises(VerificationUnavailable):
+        audio_verify.fingerprint("/tmp/broken.mp3")
+
+
+@pytest.mark.parametrize("seconds, expected_ms, status", [
+    (57, 57000, "verified"),     # a short track is judged normally
+    (100, 180000, "truncated"),  # far shorter than Lidarr's length: a broken download
+    (170, 180000, "verified"),   # within normal tolerance
+    (40, 0, "verified"),         # Lidarr has no length to compare
+])
+def test_verifier_treats_a_file_far_shorter_than_expected_as_truncated(monkeypatch, seconds, expected_ms, status):
+    monkeypatch.setattr(audio_verify, "fingerprint", lambda path, **kwargs: (seconds, "FP"))
+    acoustid = Mock_lookup({"status": "ok", "results": [{"score": 0.97, "recordings": [{"id": "exp", "title": "Song", "sources": 9}]}]})
+    verifier = audio_verify.Verifier(acoustid, musicbrainz=None)
+    verdict = verifier.verify("/tmp/x.mp3", {"track_title": "Song", "recording_id": "exp", "artist": "A", "duration_ms": expected_ms})
+    assert verdict.status == status
+    if status == "truncated":
+        assert not verdict.accepted
+        assert acoustid.calls == []

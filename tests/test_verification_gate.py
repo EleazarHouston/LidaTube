@@ -202,3 +202,13 @@ def test_track_queued_before_recording_ids_were_kept_asks_lidarr_for_it(tmp_path
     gate.check(downloaded_file(tmp_path), track, ALBUM)
     assert seen == ["rec-from-lidarr"]
     gate.lidarr_client.get_recording_id.assert_called_once_with(7)
+
+
+def test_truncated_download_is_deleted_without_rejecting_its_video(tmp_path):
+    gate, store = build_gate(tmp_path, FakeVerifier(Verdict("truncated", "file is 100s, Lidarr expects 180s")))
+    track = matched_track(store)
+    path = downloaded_file(tmp_path)
+    assert gate.check(path, track, ALBUM) == "rejected"
+    assert not os.path.exists(path)
+    assert store.rejected_video_ids(7) == set()
+    assert verification_of(store, track)["verification"] == "truncated"

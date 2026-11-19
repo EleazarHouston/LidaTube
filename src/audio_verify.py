@@ -38,6 +38,9 @@ from unidecode import unidecode
 import _matcher
 
 EVIDENCE_SCORE = 0.8
+# A file this much shorter than Lidarr's length is a broken download, not a candidate to judge.
+TRUNCATED_FRACTION = 0.75
+TRUNCATED_MIN_SECONDS = 20
 STRONG_SOURCES = 3
 # Each distinct candidate recording costs one MusicBrainz request (1/s) when titles disagree.
 MAX_WORK_LOOKUPS = 5
@@ -55,7 +58,7 @@ class Verdict:
 
     @property
     def accepted(self):
-        return self.status != "rejected"
+        return self.status not in ("rejected", "truncated")
 
 
 # --- Services -----------------------------------------------------------------------------
@@ -83,21 +86,27 @@ class RateLimiter:
 
 
 def fingerprint(path, fpcalc="fpcalc", length=120):
-    """(duration in whole seconds, compressed fingerprint) of an audio file, via Chromaprint's fpcalc."""
+    """(duration in whole seconds, compressed fingerprint) of an audio file, via Chromaprint's fpcalc.
+
+    fpcalc 1.5.1 exits non-zero ("Error decoding audio frame (End of file)") on any file shorter
+    than the sample length while still printing a valid fingerprint, so its exit status is not
+    trusted: the result counts when it carries both a fingerprint and a duration.
+    """
     try:
-        done = subprocess.run([fpcalc, "-json", "-length", str(length), path], capture_output=True, text=True,
-                              timeout=FPCALC_TIMEOUT_SECONDS)
+        done = subprocess.run([fpcalc, "-json", "-ignore-errors", "-length", str(length), path], capture_output=True,
+                              text=True, timeout=FPCALC_TIMEOUT_SECONDS)
     except FileNotFoundError:
         raise VerificationUnavailable("fpcalc is not installed (Chromaprint's libchromaprint-tools)") from None
     except subprocess.TimeoutExpired:
         raise VerificationUnavailable(f"fpcalc timed out after {FPCALC_TIMEOUT_SECONDS}s") from None
-    if done.returncode != 0:
-        raise VerificationUnavailable(f"fpcalc failed: {(done.stderr or '').strip()[:200]}")
     try:
-        result = json.loads(done.stdout)
-        return int(result["duration"]), result["fingerprint"]
+        result = json.loads(done.stdout or "")
+        duration, fingerprint_text = int(result["duration"]), result["fingerprint"]
     except (ValueError, KeyError, TypeError):
-        raise VerificationUnavailable("fpcalc returned no fingerprint") from None
+        duration, fingerprint_text = 0, None
+    if duration <= 0 or not fingerprint_text:
+        raise VerificationUnavailable(f"fpcalc returned no fingerprint: {(done.stderr or '').strip()[:200]}")
+    return duration, fingerprint_text
 
 
 class AcoustIdClient:
@@ -187,6 +196,10 @@ class Verifier:
     def verify(self, path, track, album=None):
         album = album or {}
         duration, fingerprint_text = fingerprint(path, fpcalc=self.fpcalc)
+        expected_seconds = (track.get("duration_ms") or 0) / 1000.0
+        if expected_seconds and duration < expected_seconds * TRUNCATED_FRACTION \
+                and expected_seconds - duration > TRUNCATED_MIN_SECONDS:
+            return Verdict("truncated", f"file is {duration}s, Lidarr expects {expected_seconds:.0f}s")
         response = self.acoustid.lookup(duration, fingerprint_text)
         expected_live = _matcher._request_is_live(track.get("track_title", ""), album.get("album_name"),
                                                   album.get("album_secondary_types"))

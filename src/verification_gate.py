@@ -18,7 +18,7 @@ from audio_verify import AcoustIdClient, MusicBrainzClient, VerificationUnavaila
 USER_AGENT = "LidaTube/{} ( https://github.com/EleazarHouston/LidaTube )"
 HELD_FOLDER = "pending_verification"
 # A kept file whose audio was not confirmed surfaces on the Override list for review.
-SUSPICION = {"verified": None, "no_match": 75, "variant": 60, "weak": 50, "flagged": 50, "pending": 50, "rejected": 90}
+SUSPICION = {"verified": None, "no_match": 75, "variant": 60, "weak": 50, "flagged": 50, "pending": 50, "rejected": 90, "truncated": None}
 RETRY_POLL_SECONDS = 60
 
 
@@ -85,6 +85,11 @@ class VerificationGate:
 
     def _reject(self, path, track, verdict):
         _remove(path)
+        if verdict.status == "truncated":
+            # The download broke, not the video: leave the video free to be downloaded again.
+            self._record(track, "truncated")
+            self.logger.warning(f'Discarded truncated download of "{track.get("track_title")}": {verdict.reason}')
+            return
         video_id = _general.youtube_video_id(track.get("link"))
         heard = "; ".join(verdict.top_titles) or "nothing identifiable"
         if video_id and track.get("track_id") is not None:
