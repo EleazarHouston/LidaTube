@@ -4,6 +4,31 @@ import requests
 import unidecode
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TPE2, TYER, TRCK, TCON
 from mutagen.flac import FLAC
+from urllib.parse import parse_qs, urlparse
+
+
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+
+
+def youtube_video_id(value):
+    """The 11-character video id in a bare id or a YouTube URL; None for anything else."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if _VIDEO_ID_RE.match(value):
+        return value
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if not any(host == name or host.endswith("." + name) for name in _YOUTUBE_HOSTS):
+        return None
+    if host == "youtu.be" or host.endswith(".youtu.be"):
+        candidate = parsed.path.lstrip("/").split("/")[0]
+    elif parsed.path.startswith(("/shorts/", "/embed/", "/live/")):
+        candidate = parsed.path.split("/")[2]
+    else:
+        candidate = (parse_qs(parsed.query).get("v") or [""])[0]
+    return candidate if _VIDEO_ID_RE.match(candidate) else None
 
 
 def convert_to_lidarr_format(input_string):

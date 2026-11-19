@@ -1,3 +1,4 @@
+import pytest
 from unittest.mock import Mock
 
 import _general
@@ -318,3 +319,19 @@ def test_is_youtube_block_error_ignores_other_errors():
     assert not _general.is_youtube_block_error(None)
     assert not _general.is_youtube_block_error(ValueError("unexpected response shape"))
     assert not _general.is_youtube_block_error(Exception("HTTP Error 403: Forbidden while downloading a video"))
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("abcdefghijk", "abcdefghijk"),
+    ("https://www.youtube.com/watch?v=abcdefghijk", "abcdefghijk"),
+    ("https://music.youtube.com/watch?v=a-b_cdefghi&list=x", "a-b_cdefghi"),
+    ("https://youtu.be/abcdefghijk?t=1", "abcdefghijk"),
+    ("https://www.youtube.com/shorts/abcdefghijk", "abcdefghijk"),
+    ("  abcdefghijk ", "abcdefghijk"),
+    ("bad", None),
+    ("https://example.com/watch?v=abcdefghijk", None),
+    ("", None),
+    (None, None),
+])
+def test_youtube_video_id_accepts_bare_ids_and_youtube_urls_only(value, expected):
+    assert _general.youtube_video_id(value) == expected

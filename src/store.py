@@ -11,6 +11,8 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 
+import _general
+
 
 _DB_LOCK = threading.RLock()
 
@@ -89,6 +91,16 @@ _MIGRATIONS = (
     """
     CREATE INDEX IF NOT EXISTS idx_track_results_session_id
         ON track_results(session_id);
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS rejected_videos (
+        track_id INTEGER NOT NULL,
+        video_id TEXT NOT NULL,
+        reason TEXT,
+        source TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (track_id, video_id)
+    );
     """,
 )
 
@@ -500,6 +512,72 @@ class Store:
             "SELECT * FROM overrides ORDER BY created_at DESC, track_id DESC LIMIT ? OFFSET ?",
             (limit, offset),
         )
+
+    def reject_video(self, track_id, video_id, reason=None, source=None):
+        """Never offer video_id for track_id again. False when it was already rejected.
+
+        The first rejection's reason stands, so re-running an import cannot rewrite history.
+        """
+        with _DB_LOCK:
+            cursor = self._connection.execute(
+                """
+                INSERT INTO rejected_videos (track_id, video_id, reason, source, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(track_id, video_id) DO NOTHING
+                """,
+                (track_id, video_id, reason, source, self._now()),
+            )
+            self._connection.commit()
+            return cursor.rowcount > 0
+
+    def import_rejected_videos(self, lines, source=None):
+        """Reject videos from JSONL lines of {track_id, video_id, reason}.
+
+        video_id may be a bare id or a YouTube URL. Blank lines are skipped; bad lines are
+        counted and their 1-based line numbers returned, so one typo does not stop a batch.
+        """
+        result = {"inserted": 0, "duplicate": 0, "invalid": 0, "errors": []}
+        for number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                entry = None
+            track_id = entry.get("track_id") if isinstance(entry, dict) else None
+            video_id = _general.youtube_video_id(entry.get("video_id")) if isinstance(entry, dict) else None
+            if not isinstance(track_id, int) or isinstance(track_id, bool) or video_id is None:
+                result["invalid"] += 1
+                result["errors"].append(number)
+                continue
+            if self.reject_video(track_id, video_id, entry.get("reason"), source):
+                result["inserted"] += 1
+            else:
+                result["duplicate"] += 1
+        return result
+
+    def rejected_video_ids(self, track_id):
+        if track_id is None:
+            return set()
+        rows = self._fetchall("SELECT video_id FROM rejected_videos WHERE track_id = ?", (track_id,))
+        return {row["video_id"] for row in rows}
+
+    def list_rejected_videos(self, limit=100, offset=0):
+        return self._fetchall(
+            "SELECT * FROM rejected_videos ORDER BY created_at DESC, track_id DESC, video_id LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+
+    def count_rejected_videos(self):
+        return self._fetchone("SELECT COUNT(*) AS count FROM rejected_videos")["count"]
+
+    def unreject_video(self, track_id, video_id):
+        with _DB_LOCK:
+            cursor = self._connection.execute(
+                "DELETE FROM rejected_videos WHERE track_id = ? AND video_id = ?", (track_id, video_id)
+            )
+            self._connection.commit()
+            return cursor.rowcount > 0
 
     def count_sessions(self):
         return self._fetchone("SELECT COUNT(*) AS count FROM sessions")["count"]

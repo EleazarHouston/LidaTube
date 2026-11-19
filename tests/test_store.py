@@ -381,3 +381,61 @@ def test_clear_queue_defaults_to_the_bulk_chunk_size(tmp_path):
     assert store.queue_counts(session_id)["total"] == 0
     assert chunks == []  # one commit for a small queue, no needless yielding
     store.close()
+
+
+def test_rejected_videos_are_kept_per_track_and_can_be_unrejected(tmp_path):
+    store = Store(tmp_path / "lidatube.db")
+    assert store.reject_video(7, "abcdefghijk", "acoustid_mismatch", "bulk") is True
+    assert store.reject_video(7, "abcdefghijk", "different reason", "bulk") is False
+    store.reject_video(8, "zzzzzzzzzzz", "wrong song", "manual")
+
+    assert store.rejected_video_ids(7) == {"abcdefghijk"}
+    assert store.rejected_video_ids(9) == set()
+    row = store.list_rejected_videos(limit=10, offset=0)
+    assert {(r["track_id"], r["video_id"]) for r in row} == {(7, "abcdefghijk"), (8, "zzzzzzzzzzz")}
+    # The first reason stands: an import re-run must not rewrite why a video was rejected.
+    assert next(r for r in row if r["track_id"] == 7)["reason"] == "acoustid_mismatch"
+    assert store.count_rejected_videos() == 2
+
+    assert store.unreject_video(7, "abcdefghijk") is True
+    assert store.unreject_video(7, "abcdefghijk") is False
+    assert store.rejected_video_ids(7) == set()
+
+
+def test_import_rejected_videos_reads_jsonl_idempotently_and_reports_bad_lines(tmp_path):
+    store = Store(tmp_path / "lidatube.db")
+    lines = [
+        '{"track_id": 7, "video_id": "abcdefghijk", "reason": "acoustid_mismatch"}',
+        '',
+        '{"track_id": 7, "video_id": "https://www.youtube.com/watch?v=abcdefghijk&t=3", "reason": "dup as url"}',
+        '{"track_id": 8, "video_id": "https://youtu.be/zzzzzzzzzzz"}',
+        'not json',
+        '{"track_id": "9", "video_id": "abcdefghijk"}',
+        '{"track_id": 10, "video_id": "bad"}',
+    ]
+    result = store.import_rejected_videos(lines, source="bulk")
+    assert result == {"inserted": 2, "duplicate": 1, "invalid": 3, "errors": [5, 6, 7]}
+    assert store.rejected_video_ids(8) == {"zzzzzzzzzzz"}
+    assert store.import_rejected_videos(lines[:1], source="bulk")["duplicate"] == 1
+
+
+def test_rejected_videos_migration_keeps_existing_v2_data(tmp_path):
+    import sqlite3
+    import store as store_module
+
+    path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(path)
+    for script in store_module._MIGRATIONS[:2]:
+        for statement in script.split(";"):
+            if statement.strip():
+                connection.execute(statement)
+    connection.execute("INSERT INTO overrides (track_id, forced_url, created_at) VALUES (5, 'https://youtube.test/x', 'now')")
+    connection.execute("PRAGMA user_version = 2")
+    connection.commit()
+    connection.close()
+
+    store = Store(path)
+    assert store.get_override(5)["forced_url"] == "https://youtube.test/x"
+    assert store.reject_video(5, "abcdefghijk", "wrong song", "manual") is True
+    assert store._connection.execute("PRAGMA user_version").fetchone()[0] == len(store_module._MIGRATIONS)
+    store.close()
