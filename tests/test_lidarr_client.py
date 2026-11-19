@@ -270,3 +270,18 @@ def test_get_root_folders_uses_api_key_header(client):
 
     headers = mock_get.call_args[1]["headers"]
     assert headers["X-Api-Key"] == "test-api-key"
+
+
+def test_get_recording_id_reads_the_tracks_musicbrainz_recording(client):
+    track = {"id": 7, "foreignRecordingId": "0bd8fe74-0000-0000-0000-000000000001"}
+    with patch.object(client.session, "get", return_value=FakeResponse(200, track)) as mock_get:
+        assert client.get_recording_id(7) == "0bd8fe74-0000-0000-0000-000000000001"
+    assert mock_get.call_args[0][0].endswith("/api/v1/track/7")
+
+
+@pytest.mark.parametrize("response", [FakeResponse(404, {}), FakeResponse(200, {"id": 7})])
+def test_get_recording_id_is_none_when_lidarr_cannot_say(client, response):
+    with patch.object(client.session, "get", return_value=response):
+        assert client.get_recording_id(7) is None
+    with patch.object(client.session, "get", side_effect=ConnectionError("down")):
+        assert client.get_recording_id(7) is None

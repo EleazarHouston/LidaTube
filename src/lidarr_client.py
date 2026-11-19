@@ -48,6 +48,23 @@ class LidarrClient:
         params = {"apikey": self.config.lidarr_api_key, "albumId": album_id}
         return self.session.get(endpoint, params=params, timeout=self.config.lidarr_api_timeout)
 
+    def get_recording_id(self, track_id):
+        """The MusicBrainz recording id Lidarr holds for a track, or None when Lidarr cannot say."""
+        endpoint = f"{self.config.lidarr_address}/api/v1/track/{track_id}"
+        response = None
+        try:
+            response = self.session.get(endpoint, params={"apikey": self.config.lidarr_api_key},
+                                        timeout=self.config.lidarr_api_timeout)
+            if response.status_code != 200:
+                return None
+            return response.json().get("foreignRecordingId")
+        except Exception as e:
+            self.logger.warning(f"Could not read the recording id of track {track_id} from Lidarr: {type(e).__name__}")
+            return None
+        finally:
+            if response is not None:
+                response.close()
+
     def get_root_folders(self):
         endpoint = f"{self.config.lidarr_address}/api/v1/rootfolder"
         headers = {"X-Api-Key": self.config.lidarr_api_key}

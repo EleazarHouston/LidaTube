@@ -189,3 +189,16 @@ def test_start_runs_the_retry_loop_in_a_daemon_thread(tmp_path, monkeypatch):
     monkeypatch.setattr(verification_gate.threading.Thread, "start", lambda self: started.append((self.daemon, self._target)))
     gate.start()
     assert started == [(True, gate.run)]
+
+
+def test_track_queued_before_recording_ids_were_kept_asks_lidarr_for_it(tmp_path):
+    verifier = FakeVerifier(Verdict("verified", "expected recording"))
+    seen = []
+    verifier.verify = lambda path, track: seen.append(track.get("recording_id")) or Verdict("verified", "ok")
+    gate, store = build_gate(tmp_path, verifier)
+    gate.lidarr_client.get_recording_id.return_value = "rec-from-lidarr"
+    track = matched_track(store)
+    del track["recording_id"]
+    gate.check(downloaded_file(tmp_path), track, ALBUM)
+    assert seen == ["rec-from-lidarr"]
+    gate.lidarr_client.get_recording_id.assert_called_once_with(7)

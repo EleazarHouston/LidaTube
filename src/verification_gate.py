@@ -62,6 +62,10 @@ class VerificationGate:
 
     def check(self, path, track, album):
         """Judge a downloaded file: "accepted" (left in place), "rejected" (deleted) or "held"."""
+        if not track.get("recording_id") and track.get("track_id") is not None:
+            # Albums queued before tracks carried their recording id; the id and its works
+            # are what keep renamed soundtrack and classical recordings from being rejected.
+            track["recording_id"] = self.lidarr_client.get_recording_id(track["track_id"])
         verdict, error = self._judge(path, track)
         if verdict is None:
             self._hold(path, track, album, error)
