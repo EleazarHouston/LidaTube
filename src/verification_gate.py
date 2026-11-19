@@ -18,7 +18,7 @@ from audio_verify import AcoustIdClient, MusicBrainzClient, VerificationUnavaila
 USER_AGENT = "LidaTube/{} ( https://github.com/EleazarHouston/LidaTube )"
 HELD_FOLDER = "pending_verification"
 # A kept file whose audio was not confirmed surfaces on the Override list for review.
-SUSPICION = {"verified": None, "no_match": 75, "variant": 60, "weak": 50, "flagged": 50, "pending": 50, "rejected": 90, "truncated": None}
+SUSPICION = {"verified": None, "title_only": 20, "no_match": 75, "variant": 60, "weak": 50, "flagged": 50, "pending": 50, "rejected": 90, "truncated": None}
 RETRY_POLL_SECONDS = 60
 
 

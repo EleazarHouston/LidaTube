@@ -119,8 +119,12 @@ def test_musicbrainz_outage_is_raised_only_when_work_evidence_is_needed():
 
     with pytest.raises(VerificationUnavailable):
         decide("Song", "exp", response, down)
-    same = {"status": "ok", "results": [{"score": 0.95, "recordings": [{"id": "cand", "title": "Song", "sources": 30}]}]}
-    assert decide("Song", "exp", same, down).status == "verified"
+    same_artist = {"status": "ok", "results": [{"score": 0.95, "recordings": [
+        {"id": "cand", "title": "Song", "sources": 30, "artists": [{"id": "a1", "name": "Artist"}]}]}]}
+    assert decide("Song", "exp", same_artist, down, expected_artist="Artist").status == "verified"
+    title_alone = {"status": "ok", "results": [{"score": 0.95, "recordings": [{"id": "cand", "title": "Song", "sources": 30}]}]}
+    with pytest.raises(VerificationUnavailable):
+        decide("Song", "exp", title_alone, down)
 
 
 def test_weak_unrelated_evidence_is_kept_when_titles_share_words():
@@ -326,7 +330,8 @@ class Mock_lookup:
 
 def _heard(*titles, sources=20):
     return {"status": "ok", "results": [{"score": 0.95, "recordings": [
-        {"id": f"cand{index}", "title": title, "sources": sources} for index, title in enumerate(titles)]}]}
+        {"id": f"cand{index}", "title": title, "sources": sources, "artists": [{"id": "a1", "name": "Artist"}]}
+        for index, title in enumerate(titles)]}]}
 
 
 def _no_works(recording_id):
@@ -336,37 +341,37 @@ def _no_works(recording_id):
 @pytest.mark.parametrize("heard", ["Song (Instrumental)", "Song (Karaoke Version)", "Song (Remix)", "Song - Radio Edit",
                                    "Song (Clean)", "Song (Acoustic)", "Song [Demo]", "Song (A Cappella)", "Song (Dance Mix)"])
 def test_a_variant_of_the_requested_song_is_kept_but_flagged(heard):
-    verdict = decide("Song", "exp", _heard(heard), _no_works)
+    verdict = decide("Song", "exp", _heard(heard), _no_works, expected_artist="Artist")
     assert verdict.status == "variant"
     assert verdict.accepted
 
 
 @pytest.mark.parametrize("heard", ["Song (Live)", "Song (Live at Carnegie Hall)", "Song - Live"])
 def test_a_live_recording_heard_for_a_studio_request_is_rejected(heard):
-    verdict = decide("Song", "exp", _heard(heard), _no_works)
+    verdict = decide("Song", "exp", _heard(heard), _no_works, expected_artist="Artist")
     assert verdict.status == "rejected"
     assert "live" in verdict.reason
 
 
 def test_a_live_recording_is_right_for_a_live_request():
-    assert decide("Song", "exp", _heard("Song (Live)"), _no_works, expected_live=True).status == "verified"
-    assert decide("Song (Live)", "exp", _heard("Song (Live at Wembley)"), _no_works).status == "verified"
+    assert decide("Song", "exp", _heard("Song (Live)"), _no_works, expected_artist="Artist", expected_live=True).status == "verified"
+    assert decide("Song (Live)", "exp", _heard("Song (Live at Wembley)"), _no_works, expected_artist="Artist").status == "verified"
 
 
 def test_no_flag_when_any_matching_recording_is_the_plain_song():
     # AcoustID often groups a remix's entry with the original's; one plain title is enough.
-    assert decide("Song", "exp", _heard("Song (Remix)", "Song"), _no_works).status == "verified"
-    assert decide("Song", "exp", _heard("Song (Live)", "Song"), _no_works).status == "verified"
+    assert decide("Song", "exp", _heard("Song (Remix)", "Song"), _no_works, expected_artist="Artist").status == "verified"
+    assert decide("Song", "exp", _heard("Song (Live)", "Song"), _no_works, expected_artist="Artist").status == "verified"
 
 
 def test_no_flag_when_the_request_names_the_same_variant():
-    assert decide("Song (Remix)", "exp", _heard("Song (Remix)"), _no_works).status == "verified"
-    assert decide("Song (Instrumental)", "exp", _heard("Song - Instrumental"), _no_works).status == "verified"
+    assert decide("Song (Remix)", "exp", _heard("Song (Remix)"), _no_works, expected_artist="Artist").status == "verified"
+    assert decide("Song (Instrumental)", "exp", _heard("Song - Instrumental"), _no_works, expected_artist="Artist").status == "verified"
 
 
 @pytest.mark.parametrize("title", ["Clean", "Live Forever", "Remix to Ignition", "Live and Let Die"])
 def test_variant_words_that_are_part_of_the_song_title_are_not_variants(title):
-    assert decide(title, "exp", _heard(title), _no_works).status == "verified"
+    assert decide(title, "exp", _heard(title), _no_works, expected_artist="Artist").status == "verified"
 
 
 def test_the_expected_recording_itself_is_never_a_variant():
@@ -377,7 +382,7 @@ def test_the_expected_recording_itself_is_never_a_variant():
 def test_verifier_tells_the_verdict_whether_the_album_is_live(monkeypatch):
     monkeypatch.setattr(audio_verify, "fingerprint", lambda path, **kwargs: (180, "FP"))
     verifier = audio_verify.Verifier(Mock_lookup(_heard("Song (Live)")), musicbrainz=None)
-    track = {"track_title": "Song", "recording_id": "exp", "artist": "A"}
+    track = {"track_title": "Song", "recording_id": "exp", "artist": "Artist"}
     assert verifier.verify("/tmp/x.mp3", track, {"album_name": "Live at Leeds"}).status == "verified"
     assert verifier.verify("/tmp/x.mp3", track, {"album_name": "Album", "album_secondary_types": ["Live"]}).status == "verified"
     assert verifier.verify("/tmp/x.mp3", track, {"album_name": "Studio Album"}).status == "rejected"
@@ -419,3 +424,55 @@ def test_verifier_treats_a_file_far_shorter_than_expected_as_truncated(monkeypat
     if status == "truncated":
         assert not verdict.accepted
         assert acoustid.calls == []
+
+
+# --- Evidence ladder ----------------------------------------------------------------------
+
+def _recording(title, artists=(), rec_id="cand", sources=20):
+    return {"id": rec_id, "title": title, "sources": sources, "artists": [{"id": f"a{i}", "name": n} for i, n in enumerate(artists)]}
+
+
+def _one(*recordings, score=0.95):
+    return {"status": "ok", "results": [{"score": score, "recordings": list(recordings)}]}
+
+
+def test_same_title_by_the_requested_artist_is_verified_without_musicbrainz():
+    def unavailable(recording_id):
+        raise AssertionError("MusicBrainz should not be asked")
+
+    assert decide("Song", "exp", _one(_recording("Song", ["The Artist"])), unavailable, expected_artist="Artist").status == "verified"
+
+
+def test_same_title_without_artist_or_work_is_kept_but_not_called_verified():
+    # Soundtracks are credited to performers on AcoustID and to the composer in Lidarr, so
+    # a matching title alone cannot be refused, but neither does it prove the recording.
+    verdict = decide("Theme From \"Jaws\"", "exp", _one(_recording("Jaws Theme", ["Boston Pops"])), _no_works,
+                     expected_artist="John Williams")
+    assert verdict.status == "title_only"
+    assert verdict.accepted
+
+
+def test_shared_work_is_verified_even_when_titles_differ_and_artists_do_not_match():
+    info = {"exp": ("exp", {"w1"}), "cand": ("cand", {"w1"})}
+    assert decide("Canon in D", "exp", _one(_recording("Kanon", ["Orchestra"])), info.__getitem__,
+                  expected_artist="Pachelbel").status == "verified"
+
+
+def test_a_longer_title_containing_a_shorter_one_is_only_weak_evidence():
+    # "Love Me" is a different song from "Love Me Tender", by the same artist.
+    verdict = decide("Love Me Tender", "exp", _one(_recording("Love Me", ["Elvis Presley"])), _no_works,
+                     expected_artist="Elvis Presley")
+    assert verdict.status == "weak"
+    assert verdict.status != "verified"
+
+
+def test_artist_credits_are_read_in_acoustids_object_shape_and_plain_strings():
+    assert audio_verify._artist_credited("M83", [{"id": "x", "name": "M83"}])
+    assert audio_verify._artist_credited("M83", ["M83"])
+    assert audio_verify._artist_credited("The Bangles", [{"name": "Bangles"}])
+    assert not audio_verify._artist_credited("M83", [{"id": "x"}, None, {"name": "Someone Else"}])
+
+
+def test_cross_script_title_with_acoustids_artist_objects_is_flagged_not_crashed():
+    response = _one(_recording("Москва", ["Чайф"]))
+    assert decide("Moskva", "exp", response, _no_works, expected_artist="Chaif").status == "flagged"

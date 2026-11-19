@@ -4,15 +4,19 @@ Title matching cannot catch an upload titled as one song but carrying another, s
 yt-dlp finishes, the file is fingerprinted with fpcalc (Chromaprint) and looked up on
 AcoustID. The verdict compares what AcoustID heard with what Lidarr asked for:
 
-* Accept when a recording AcoustID heard with a score of at least EVIDENCE_SCORE is the
-  expected recording (merged MusicBrainz ids included), shares a MusicBrainz work with it,
-  or has the same title once formatting is ignored. An artist match is never enough on its
-  own: a wrong song by the right artist is the commonest failure.
+* Verify when a recording AcoustID heard with a score of at least EVIDENCE_SCORE is the
+  expected recording (merged MusicBrainz ids included), has the same title (formatting set
+  aside) with the requested artist credited, or shares a MusicBrainz work with it. An artist
+  match is never enough on its own: a wrong song by the right artist is the commonest failure.
+* Keep, without calling it verified, a file whose only evidence is the same title
+  ("title_only": soundtracks credit performers on AcoustID and the composer in Lidarr) or a
+  similar one ("weak": "Love Me" for "Love Me Tender").
 * Reject when none of those recordings matches and the evidence is strong (one heard by at
   least STRONG_SOURCES sources), or when every one of them has a title sharing no word with
   the request (the mislabelled-upload case, often heard by a single source).
 * Otherwise keep the file: "no_match" when AcoustID has no confident result, "weak" when
-  thin evidence names a related title, "flagged" when titles match only across scripts.
+  thin evidence names a related title, "flagged" when titles match only across scripts (and
+  the artist matches).
 
 A recording that is the requested song may still be the wrong take. When every such recording
 is live and a studio recording was requested, the file is rejected, since a live take must never
@@ -289,9 +293,22 @@ def _non_latin(text):
     return any(char.isalpha() and "LATIN" not in unicodedata.name(char, "") for char in text or "")
 
 
+def _artist_names(artists):
+    """Artist names from AcoustID's [{"id", "name"}] entries, or from plain strings."""
+    for artist in artists or []:
+        name = artist.get("name") if isinstance(artist, dict) else artist
+        if isinstance(name, str) and name.strip():
+            yield name
+
+
+def _artist_key(name):
+    folded = _fold(name)
+    return folded[4:] if folded.startswith("the ") else folded
+
+
 def _artist_credited(expected_artist, artists):
-    expected = _fold(expected_artist)
-    return bool(expected) and any(fuzz.ratio(expected, _fold(name)) >= 85 for name in artists or [])
+    expected = _artist_key(expected_artist)
+    return bool(expected) and any(fuzz.ratio(expected, _artist_key(name)) >= 85 for name in _artist_names(artists))
 
 
 # --- Verdict ------------------------------------------------------------------------------
@@ -357,18 +374,20 @@ def decide(expected_title, expected_recording_id, response, recording_info, expe
         if expected_recording_id and recording["id"] == expected_recording_id:
             return Verdict("verified", "expected recording", top_titles)
 
-    titled, flagged = [], []
+    # Strongest evidence first. A matching title alone cannot prove the recording, since another
+    # recording may share it: it counts as verified only with the artist credited or a shared work.
+    same, other_script, similar = [], [], []
     for recording in recordings:
-        if same_title(expected_title, recording["title"]):
-            if _non_latin(expected_title) != _non_latin(recording["title"]):
-                if _artist_credited(expected_artist, recording.get("artists")):
-                    flagged.append(recording)
-                continue
-            titled.append(recording)
-    if titled:
-        return _variant_verdict(expected_title, expected_live, titled, top_titles, "verified", "same title")
-    if flagged:
-        return _variant_verdict(expected_title, expected_live, flagged, top_titles, "flagged",
+        if _title_forms(expected_title) & _title_forms(recording["title"]):
+            (other_script if _non_latin(expected_title) != _non_latin(recording["title"]) else same).append(recording)
+        elif same_title(expected_title, recording["title"]) and _non_latin(expected_title) == _non_latin(recording["title"]):
+            similar.append(recording)
+    credited = [r for r in same if _artist_credited(expected_artist, r.get("artists"))]
+    if credited:
+        return _variant_verdict(expected_title, expected_live, credited, top_titles, "verified", "same title and artist")
+    credited = [r for r in other_script if _artist_credited(expected_artist, r.get("artists"))]
+    if credited:
+        return _variant_verdict(expected_title, expected_live, credited, top_titles, "flagged",
                                 "same title in another script, same artist")
 
     if expected_recording_id:
@@ -383,6 +402,13 @@ def decide(expected_title, expected_recording_id, response, recording_info, expe
                     same_work.append(recording)
         if same_work:
             return _variant_verdict(expected_title, expected_live, same_work, top_titles, "verified", "same work")
+
+    if same:
+        return _variant_verdict(expected_title, expected_live, same, top_titles, "title_only",
+                                "same title, but no artist credit or shared work confirms the recording")
+    if similar:
+        return _variant_verdict(expected_title, expected_live, similar, top_titles, "weak",
+                                "only a similar title matches")
 
     if any((recording.get("sources") or 0) >= STRONG_SOURCES for recording in recordings):
         return Verdict("rejected", "AcoustID heard a different recording", top_titles)
