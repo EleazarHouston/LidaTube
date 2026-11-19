@@ -34,6 +34,14 @@ class AppConfig:
         # Lidarr API instead of being written into the library in place. Empty = legacy
         # behavior (download_folder IS the library; import registers files in place).
         "lidarr_download_path": "",
+        # Audio verification fingerprints each download and asks AcoustID what it really is
+        # before Lidarr sees it (see audio_verify). It runs only when an AcoustID key is set.
+        "acoustid_api_key": "",
+        "audio_verification": True,
+        # Downloads tried per track before giving up, each after AcoustID rejected the last one.
+        "verification_attempts_per_track": 3,
+        # How often a file held while AcoustID or MusicBrainz was unreachable is checked again.
+        "verification_retry_minutes": 30,
     }
 
     _ENV_CONVERTERS = {
@@ -54,6 +62,10 @@ class AppConfig:
         "batch_size": int,
         "auto_resume": lambda v: v.lower() == "true",
         "lidarr_download_path": str,
+        "acoustid_api_key": str,
+        "audio_verification": lambda v: v.lower() == "true",
+        "verification_attempts_per_track": int,
+        "verification_retry_minutes": float,
     }
 
     def __init__(self, logger=None):

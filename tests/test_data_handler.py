@@ -89,6 +89,8 @@ def test_load_settings_sends_current_config_to_one_client_without_the_api_key(ha
             "lidarr_address": "http://lidarr.local",
             "lidarr_api_key": "",
             "lidarr_api_key_set": key_set,
+            "acoustid_api_key": "",
+            "acoustid_api_key_set": False,
             "sleep_interval": 1.5,
             "sync_schedule": [1, 14],
             "minimum_match_ratio": 92,
@@ -142,3 +144,24 @@ def test_update_settings_logs_error_on_bad_payload(handler, monkeypatch):
 
     handler.logger.error.assert_called_once()
     assert handler.emit.call_args.args[1]["title"] == "Settings Error"
+
+
+def test_load_settings_never_sends_the_acoustid_key(handler):
+    handler.config.acoustid_api_key = "secret-acoustid"
+    handler.load_settings(to="sid-1")
+    sent = handler.emit.call_args[0][1]
+    assert sent["acoustid_api_key"] == ""
+    assert sent["acoustid_api_key_set"] is True
+    assert "secret-acoustid" not in repr(handler.emit.call_args)
+
+
+@pytest.mark.parametrize("submitted, kept", [("", "old"), (None, "old"), ("  ", "old"), (" new ", "new")])
+def test_update_settings_keeps_the_saved_acoustid_key_when_left_blank(handler, monkeypatch, submitted, kept):
+    monkeypatch.setattr(handler.config, "save", Mock())
+    handler.config.acoustid_api_key = "old"
+    payload = {"lidarr_address": "http://lidarr", "lidarr_api_key": "", "sleep_interval": "0",
+               "minimum_match_ratio": "90", "sync_schedule": ""}
+    if submitted is not None:
+        payload["acoustid_api_key"] = submitted
+    handler.update_settings(payload)
+    assert handler.config.acoustid_api_key == kept

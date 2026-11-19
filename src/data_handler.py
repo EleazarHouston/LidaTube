@@ -84,11 +84,13 @@ class DataHandler:
     # --- Settings ---
 
     def load_settings(self, to=None):
-        """Send settings to one client (to=its sid). The Lidarr API key is never sent, only whether one is set."""
+        """Send settings to one client (to=its sid). API keys are never sent, only whether one is set."""
         data = {
             "lidarr_address": self.config.lidarr_address,
             "lidarr_api_key": "",
             "lidarr_api_key_set": bool(self.config.lidarr_api_key),
+            "acoustid_api_key": "",
+            "acoustid_api_key_set": bool(self.config.acoustid_api_key),
             "sleep_interval": self.config.sleep_interval,
             "sync_schedule": self.config.sync_schedule,
             "minimum_match_ratio": self.config.minimum_match_ratio,
@@ -102,6 +104,9 @@ class DataHandler:
             api_key = (data["lidarr_api_key"] or "").strip()
             if api_key:
                 self.config.lidarr_api_key = api_key
+            acoustid_key = (data.get("acoustid_api_key") or "").strip()
+            if acoustid_key:
+                self.config.acoustid_api_key = acoustid_key
             self.config.sleep_interval = float(data["sleep_interval"])
             self.config.minimum_match_ratio = float(data["minimum_match_ratio"])
             self.config.sync_schedule = AppConfig.parse_sync_schedule(data["sync_schedule"])

@@ -439,3 +439,33 @@ def test_rejected_videos_migration_keeps_existing_v2_data(tmp_path):
     assert store.reject_video(5, "abcdefghijk", "wrong song", "manual") is True
     assert store._connection.execute("PRAGMA user_version").fetchone()[0] == len(store_module._MIGRATIONS)
     store.close()
+
+
+def test_track_result_verification_can_be_recorded_and_raises_suspicion(tmp_path):
+    store = Store(tmp_path / "lidatube.db")
+    session_id = store.start_session(requested_count=1)
+    result_id = store.record_track_result(session_id=session_id, artist="A", album="B", track_title="T", track_number=1,
+                                          track_id=7, duration_ms=1000, outcome="matched", link="https://youtu.be/abcdefghijk",
+                                          title_of_link="T", matched_via="yt", suspicion=10)
+    store.set_verification(result_id, "no_match", minimum_suspicion=75)
+    row = store._fetchone("SELECT verification, suspicion FROM track_results WHERE id = ?", (result_id,))
+    assert row == {"verification": "no_match", "suspicion": 75}
+    store.set_verification(result_id, "verified", minimum_suspicion=5)
+    assert store._fetchone("SELECT verification, suspicion FROM track_results WHERE id = ?", (result_id,)) == {
+        "verification": "verified", "suspicion": 75}
+
+
+def test_pending_verifications_queue_retries_and_removal(tmp_path):
+    store = Store(tmp_path / "lidatube.db")
+    pending_id = store.add_pending_verification(
+        track_result_id=3, track_id=7, video_id="abcdefghijk", held_path="/held/x.mp3", final_path="/album/x.mp3",
+        track={"track_title": "T"}, album={"album_name": "B"}, error="AcoustID unreachable", next_attempt_at="2026-01-01T00:00:00+00:00")
+    assert store.count_pending_verifications() == 1
+    assert store.due_pending_verifications("2025-12-31T00:00:00+00:00") == []
+    due = store.due_pending_verifications("2026-01-01T00:00:01+00:00")
+    assert [(d["id"], d["track"], d["album"], d["attempts"]) for d in due] == [(pending_id, {"track_title": "T"}, {"album_name": "B"}, 0)]
+    store.retry_pending_verification(pending_id, "still down", "2026-01-02T00:00:00+00:00")
+    assert store.due_pending_verifications("2026-01-01T12:00:00+00:00") == []
+    assert store.due_pending_verifications("2026-01-02T00:00:00+00:00")[0]["attempts"] == 1
+    store.remove_pending_verification(pending_id)
+    assert store.count_pending_verifications() == 0

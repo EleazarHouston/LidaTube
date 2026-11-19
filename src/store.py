@@ -11,7 +11,11 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 
+import re
+
 import _general
+
+_ADD_COLUMN = re.compile(r"^\s*ALTER\s+TABLE\s+(?P<table>\w+)\s+ADD\s+COLUMN\s+(?P<column>\w+)", re.I)
 
 
 _DB_LOCK = threading.RLock()
@@ -102,6 +106,25 @@ _MIGRATIONS = (
         PRIMARY KEY (track_id, video_id)
     );
     """,
+    """
+    ALTER TABLE track_results ADD COLUMN verification TEXT;
+    CREATE TABLE IF NOT EXISTS pending_verifications (
+        id INTEGER PRIMARY KEY,
+        track_result_id INTEGER,
+        track_id INTEGER,
+        video_id TEXT,
+        held_path TEXT NOT NULL,
+        final_path TEXT NOT NULL,
+        track_json TEXT NOT NULL,
+        album_json TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        next_attempt_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_verifications_next_attempt
+        ON pending_verifications(next_attempt_at);
+    """,
 )
 
 
@@ -162,9 +185,17 @@ class Store:
                 # Execute separately: executescript implicitly commits an open transaction.
                 # Migration scripts must contain simple statements, without trigger bodies.
                 for statement in _MIGRATIONS[index].split(";"):
-                    if statement.strip():
+                    if statement.strip() and not self._column_already_added(statement):
                         self._connection.execute(statement)
                 self._connection.execute(f"PRAGMA user_version = {index + 1}")
+
+    def _column_already_added(self, statement):
+        """True for an ADD COLUMN whose column exists: re-adopting an unversioned database re-runs it."""
+        match = _ADD_COLUMN.match(statement)
+        if not match:
+            return False
+        columns = self._connection.execute(f"PRAGMA table_info({match.group('table')})").fetchall()
+        return any(column[1] == match.group("column") for column in columns)
 
     def close(self):
         with _DB_LOCK:
@@ -578,6 +609,58 @@ class Store:
             )
             self._connection.commit()
             return cursor.rowcount > 0
+
+    def set_verification(self, track_result_id, verification, minimum_suspicion=None):
+        """Record what audio verification concluded, raising suspicion to at least minimum_suspicion."""
+        with _DB_LOCK:
+            self._connection.execute(
+                "UPDATE track_results SET verification = ?, suspicion = MAX(suspicion, COALESCE(?, suspicion)), "
+                "updated_at = ? WHERE id = ?",
+                (verification, minimum_suspicion, self._now(), track_result_id),
+            )
+            self._connection.commit()
+
+    def add_pending_verification(self, track_result_id, track_id, video_id, held_path, final_path, track, album,
+                                 error, next_attempt_at):
+        """Hold a downloaded file out of Lidarr until its audio can be verified."""
+        with _DB_LOCK:
+            cursor = self._connection.execute(
+                """
+                INSERT INTO pending_verifications (track_result_id, track_id, video_id, held_path, final_path,
+                    track_json, album_json, last_error, created_at, next_attempt_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (track_result_id, track_id, video_id, held_path, final_path, json.dumps(track), json.dumps(album),
+                 error, self._now(), next_attempt_at),
+            )
+            self._connection.commit()
+            return cursor.lastrowid
+
+    def due_pending_verifications(self, now, limit=50):
+        rows = self._fetchall(
+            "SELECT * FROM pending_verifications WHERE next_attempt_at <= ? ORDER BY next_attempt_at, id LIMIT ?",
+            (now, limit),
+        )
+        for row in rows:
+            row["track"] = json.loads(row.pop("track_json"))
+            row["album"] = json.loads(row.pop("album_json"))
+        return rows
+
+    def retry_pending_verification(self, pending_id, error, next_attempt_at):
+        with _DB_LOCK:
+            self._connection.execute(
+                "UPDATE pending_verifications SET attempts = attempts + 1, last_error = ?, next_attempt_at = ? WHERE id = ?",
+                (error, next_attempt_at, pending_id),
+            )
+            self._connection.commit()
+
+    def remove_pending_verification(self, pending_id):
+        with _DB_LOCK:
+            self._connection.execute("DELETE FROM pending_verifications WHERE id = ?", (pending_id,))
+            self._connection.commit()
+
+    def count_pending_verifications(self):
+        return self._fetchone("SELECT COUNT(*) AS count FROM pending_verifications")["count"]
 
     def count_sessions(self):
         return self._fetchone("SELECT COUNT(*) AS count FROM sessions")["count"]

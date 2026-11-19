@@ -169,3 +169,16 @@ def test_extended_duration_tolerance_defaults_to_thirty_seconds_and_reads_env(tm
     monkeypatch.chdir(tmp_path)
     assert AppConfig.DEFAULTS["extended_duration_tolerance_seconds"] == 30
     assert AppConfig._ENV_CONVERTERS["extended_duration_tolerance_seconds"]("45") == 45
+
+
+def test_audio_verification_settings_default_on_without_a_key_and_read_env(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert AppConfig.DEFAULTS["acoustid_api_key"] == ""
+    assert AppConfig.DEFAULTS["audio_verification"] is True
+    assert AppConfig.DEFAULTS["verification_attempts_per_track"] == 3
+    assert AppConfig.DEFAULTS["verification_retry_minutes"] == 30
+    monkeypatch.setenv("acoustid_api_key", "env-key")
+    monkeypatch.setenv("audio_verification", "false")
+    monkeypatch.setenv("verification_attempts_per_track", "2")
+    config = AppConfig()
+    assert (config.acoustid_api_key, config.audio_verification, config.verification_attempts_per_track) == ("env-key", False, 2)
