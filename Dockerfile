@@ -4,8 +4,8 @@ FROM python:3.12-alpine
 ARG RELEASE_VERSION
 ENV RELEASE_VERSION=${RELEASE_VERSION}
 
-# Install ffmpeg and su-exec
-RUN apk update && apk add --no-cache ffmpeg su-exec deno
+# Install ffmpeg, su-exec, deno and Chromaprint (fpcalc, for audio verification)
+RUN apk update && apk add --no-cache ffmpeg su-exec deno chromaprint
 
 # Create directories and set permissions
 COPY . /lidatube

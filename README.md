@@ -100,6 +100,10 @@ Certain values can be set via environment variables:
 * __fallback_to_top_result__: Use the top search result when nothing passes the matcher. This bypasses every accuracy check below. Defaults to `False`.
 * __secondary_search__: How the last-resort YouTube search runs, `YTS` (youtube-search-python, falling back to a yt-dlp search if it fails) or `YTDLP`. Defaults to `YTS`.
 * __preferred_codec__: Audio codec to extract. Tags are written for `mp3` and `flac`. Defaults to `mp3`.
+* __acoustid_api_key__: An [AcoustID](https://acoustid.org/new-application) application key. Setting it turns on audio verification (see [Audio verification](#audio-verification)). It can also be entered in the settings, which never show it again. Defaults to ``.
+* __audio_verification__: Check each download with AcoustID before Lidarr imports it, when a key is set. Defaults to `True`.
+* __verification_attempts_per_track__: Downloads tried per track when AcoustID rejects them. Defaults to `3`.
+* __verification_retry_minutes__: How often a file held while AcoustID or MusicBrainz was unreachable is checked again. Defaults to `30`.
 * __ULIMIT_NOFILE__: Startup target for open file descriptors (set in `init.sh` via `ulimit -n`). Thread limits are lowered automatically if the limit is too small for them. Defaults to `8192`.
 
 Settings are saved to `config/settings_config.json`. On startup, environment variables take priority over that file, which takes priority over the defaults. The Lidarr address and API key, sleep interval, sync schedule and minimum match ratio can also be changed in the web UI. A UI change to a setting that is also set by an environment variable lasts only until the next restart.
@@ -142,6 +146,19 @@ If nothing passes, a second pass allows a length difference of up to `extended_d
 
 Temporary failures are retried rather than recorded as misses. Network errors are retried after 5, 10, 20 and 40 seconds. When YouTube soft-blocks searches, LidaTube backs off for 1, 5, 15 and then 30 minutes, pausing searches meanwhile. If the failure outlasts the schedule, the tracks are recorded as `error` rather than `no_match`. Downloads back off on rate limits (1, 3 and 10 minutes) and pause for a minute after five unavailable videos in a row.
 
+
+## Audio verification
+
+A YouTube upload can carry the right title and the wrong song, so with an AcoustID key set, every download is checked before Lidarr sees it. LidaTube fingerprints the file with Chromaprint's `fpcalc` (installed in the Docker image) and asks [AcoustID](https://acoustid.org) which recordings it matches:
+
+* **Kept** when one of those recordings is the one Lidarr expects (by MusicBrainz id, including merged ids), shares a MusicBrainz work with it, or has the same title once formatting is set aside (`Theme From "Jaws"` and `Jaws Theme` are the same title). Matching the artist is never enough on its own.
+* **Rejected** when none matches and AcoustID's evidence is strong, or when every title it heard shares no word with the request. The file is deleted, the video is added to the track's [rejected videos](#reviewing-results), and the track is searched again, up to `verification_attempts_per_track` downloads.
+* **Kept but marked suspicious** when AcoustID cannot identify the file, or names a related title on thin evidence. These tracks rise to the top of the Override list.
+* **Held** when AcoustID or MusicBrainz cannot be reached. The file moves to `config/pending_verification/`, out of Lidarr's reach, and is checked again every `verification_retry_minutes` until it can be kept (and imported) or rejected. Unverified files are never imported.
+
+The rules were tuned on real AcoustID lookups of 17 known-wrong library files and 415 correct or formatting-only cases. They reject 16 of the 17 wrong songs and none of the 389 correct control files. Two classical pieces known by other names in MusicBrainz (Pachelbel's "Kanon" and Khachaturian's "Gayne Ballet") are wrongly rejected, so a forced override is the way to keep such a file.
+
+AcoustID is asked at most 3 times a second and MusicBrainz at most once a second, as each service requests. A MusicBrainz lookup is only needed when ids and titles disagree.
 
 ## Reviewing results
 
@@ -228,12 +245,13 @@ This serves the UI on port 5000 and creates `config/` and `downloads/` in the wo
 | `scheduler.py` | `SyncScheduler`: starts scheduled syncs. |
 | `downloader.py` | yt-dlp download with rate-limit back-off. |
 | `lidarr_client.py` | Lidarr API calls, including album import and library rescan. |
-| `store.py` | SQLite persistence: sessions, the queue, track results, candidate evaluations, overrides and rejected videos. |
+| `store.py` | SQLite persistence: sessions, the queue, track results and their verification, candidate evaluations, overrides, rejected videos and held downloads. |
 | `config.py` | Settings from environment variables, the settings file and defaults. |
 | `fd_governor.py` | Keeps worker pools within the open-file limit and backs off when it is nearly used up. |
 | `_backoff.py`, `_general.py` | Shared retry policy; naming, tagging and error-classification helpers. |
 | `audit_library.py`, `library_suspicion.py` | The offline library audit tools. |
 | `reject_videos.py` | Bulk-rejects videos per track through the running app's API. |
+| `audio_verify.py`, `verification_gate.py` | Audio verification: fingerprinting, AcoustID and MusicBrainz lookups, the verdict, and holding or rejecting downloads. |
 
 ---
 
