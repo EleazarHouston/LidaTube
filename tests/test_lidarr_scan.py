@@ -81,7 +81,8 @@ def test_fetch_wanted_albums_populates_missing_tracks(monkeypatch):
 
     tracks_by_album = {
         100: [
-            {"title": "Song A", "trackNumber": 1, "absoluteTrackNumber": 1, "id": 10001, "hasFile": False},
+            {"title": "Song A", "trackNumber": 1, "absoluteTrackNumber": 1, "id": 10001, "hasFile": False,
+             "foreignRecordingId": "0bd8fe74-aaaa-bbbb-cccc-000000000001"},
             {"title": "Song B", "trackNumber": 2, "absoluteTrackNumber": 2, "id": 10002, "hasFile": True},
         ],
         200: [
@@ -115,6 +116,9 @@ def test_fetch_wanted_albums_populates_missing_tracks(monkeypatch):
     assert alpha_album["track_count"] == 2
     assert alpha_album["missing_count"] == 1
     assert alpha_album["missing_tracks"][0]["track_title"] == "Song A"
+    # Audio verification compares what AcoustID heard against Lidarr's MusicBrainz recording.
+    assert alpha_album["missing_tracks"][0]["recording_id"] == "0bd8fe74-aaaa-bbbb-cccc-000000000001"
+    assert zulu_album["missing_tracks"][0]["recording_id"] is None
     assert alpha_album["album_secondary_types"] == ["Live"]
     assert alpha_album["artist_genres"] == "Classical, Romantic"
 

@@ -25,6 +25,7 @@ const save_message = document.getElementById('save-message');
 const save_changes_button = document.getElementById('save-changes-btn');
 const lidarr_address = document.getElementById('lidarr-address');
 const lidarr_api_key = document.getElementById('lidarr-api-key');
+const acoustid_api_key = document.getElementById('acoustid-api-key');
 const sleep_interval = document.getElementById('sleep-interval');
 const sync_schedule = document.getElementById('sync-schedule');
 const minimum_match_ratio = document.getElementById('minimum-match-ratio');
@@ -331,6 +332,10 @@ config_modal.addEventListener('show.bs.modal', function () {
         lidarr_api_key.placeholder = settings.lidarr_api_key_set
             ? 'Saved (leave blank to keep the current key)'
             : 'Enter Lidarr API Key';
+        acoustid_api_key.value = '';
+        acoustid_api_key.placeholder = settings.acoustid_api_key_set
+            ? 'Saved (leave blank to keep the current key)'
+            : 'Enter AcoustID API Key to verify downloads';
         sleep_interval.value = settings.sleep_interval;
         sync_schedule.value = settings.sync_schedule.join(', ');
         minimum_match_ratio.value = settings.minimum_match_ratio;
@@ -354,6 +359,7 @@ save_changes_button.addEventListener('click', () => {
     socket.emit('update_settings', {
         lidarr_address: lidarr_address.value,
         lidarr_api_key: lidarr_api_key.value,
+        acoustid_api_key: acoustid_api_key.value,
         sleep_interval: sleep_interval.value,
         sync_schedule: sync_schedule.value,
         minimum_match_ratio: minimum_match_ratio.value,

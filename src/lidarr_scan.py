@@ -517,6 +517,7 @@ class LidarrScanner:
                                     "absolute_track_number": track["absoluteTrackNumber"],
                                     "track_id": track["id"],
                                     "duration_ms": track.get("duration", 0),
+                                    "recording_id": track.get("foreignRecordingId"),
                                     "link": "",
                                     "title_of_link": "",
                                 }
