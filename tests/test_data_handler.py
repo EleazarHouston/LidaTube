@@ -171,3 +171,11 @@ def test_queue_downloads_pass_through_the_verification_gate(handler):
     assert handler.queue.gate is handler.gate
     assert handler.gate.store is handler.store
     assert handler.gate.lidarr_client is handler.lidarr_client
+
+
+def test_saving_settings_logs_whether_audio_verification_is_now_on(handler, monkeypatch):
+    monkeypatch.setattr(handler.config, "save", Mock())
+    monkeypatch.setattr(handler.gate, "log_status", Mock())
+    handler.update_settings({"lidarr_address": "http://lidarr", "lidarr_api_key": "", "acoustid_api_key": "new-key",
+                             "sleep_interval": "0", "minimum_match_ratio": "90", "sync_schedule": ""})
+    handler.gate.log_status.assert_called_once_with()

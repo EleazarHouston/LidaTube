@@ -115,6 +115,8 @@ class DataHandler:
             self.config.minimum_match_ratio = float(data["minimum_match_ratio"])
             self.config.sync_schedule = AppConfig.parse_sync_schedule(data["sync_schedule"])
             self.config.save()
+            # A saved key turns verification on without a restart; say so in the log.
+            self.gate.log_status()
             self.emit("new_toast_msg", {"title": "Settings", "message": "Settings saved successfully"})
         except Exception as e:
             self.logger.error(f"Failed to update settings: {e}")
