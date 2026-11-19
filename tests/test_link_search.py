@@ -1133,6 +1133,7 @@ def test_a_youtube_block_rotates_the_vpn_exit_instead_of_pausing(monkeypatch):
     searcher._SEARCH_RETRY_DELAYS = (0,)
     searcher._YOUTUBE_BLOCK_RETRY_DELAYS = (1800,)
     searcher.config.duration_tolerance_seconds = 15
+    searcher.config.vpn_rotation_after_backoffs = 0
     searcher.rotator = Mock(enabled=True)
     searcher.rotator.rotate.return_value = True
     calls = []
@@ -1152,6 +1153,7 @@ def test_a_block_pauses_as_before_when_no_rotation_is_due(monkeypatch):
     searcher._SEARCH_RETRY_DELAYS = (0,)
     searcher._YOUTUBE_BLOCK_RETRY_DELAYS = (0, 0, 0)
     searcher.config.duration_tolerance_seconds = 15
+    searcher.config.vpn_rotation_after_backoffs = 0
     searcher.rotator = Mock(enabled=True)
     searcher.rotator.rotate.return_value = False
     escalations = []
@@ -1172,9 +1174,35 @@ def test_a_disabled_rotator_is_never_asked(monkeypatch):
     searcher._SEARCH_RETRY_DELAYS = (0,)
     searcher._YOUTUBE_BLOCK_RETRY_DELAYS = (0, 0, 0)
     searcher.config.duration_tolerance_seconds = 15
+    searcher.config.vpn_rotation_after_backoffs = 0
     searcher.rotator = Mock(enabled=False)
     calls = []
     monkeypatch.setattr(link_search, "YTMusic", _blocked_then_open(calls, 1))
     monkeypatch.setattr(searcher, "_yt_search", lambda query_text: [])
     searcher.find_links(_network_retry_album())
     searcher.rotator.rotate.assert_not_called()
+
+
+def test_blocks_back_off_first_and_rotate_once_the_configured_back_offs_have_failed(monkeypatch):
+    searcher = build_searcher()
+    searcher._SEARCH_RETRY_DELAYS = (0,)
+    searcher._YOUTUBE_BLOCK_RETRY_DELAYS = (0, 0, 0, 0)
+    searcher._MAX_BLOCK_ATTEMPTS = 5
+    searcher.config.duration_tolerance_seconds = 15
+    searcher.config.vpn_rotation_after_backoffs = 2
+    searcher.rotator = Mock(enabled=True)
+    searcher.rotator.rotate.return_value = True
+    events = []
+    original = searcher._cooldown().escalate
+    monkeypatch.setattr(searcher._cooldown(), "escalate", lambda: events.append("pause") or original())
+    searcher.rotator.rotate.side_effect = lambda: events.append("rotate") or True
+    calls = []
+    monkeypatch.setattr(link_search, "YTMusic", _blocked_then_open(calls, 3))
+    monkeypatch.setattr(searcher, "_yt_search", lambda query_text: [])
+    album = _network_retry_album()
+
+    searcher.find_links(album)
+
+    assert events == ["pause", "pause", "rotate"]
+    assert searcher._cooldown().level == 0
+    assert album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"

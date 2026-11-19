@@ -106,6 +106,7 @@ Certain values can be set via environment variables:
 * __verification_retry_minutes__: How often a file held while AcoustID or MusicBrainz was unreachable is checked again. Defaults to `30`.
 * __gluetun_control_url__: Gluetun's control server as LidaTube sees it, normally `http://127.0.0.1:8000` when LidaTube shares Gluetun's network. Setting it turns on [VPN rotation](#vpn-rotation-on-youtube-blocks). Defaults to `` (off).
 * __gluetun_api_key__: The API key of the Gluetun control-server role LidaTube uses. Defaults to ``.
+* __vpn_rotation_after_backoffs__: Back-off pauses tried before rotating. A block that outlasts this many consecutive pauses moves to a new exit; `0` rotates at the first block. Defaults to `2` (the 60 s and 5 minute pauses).
 * __vpn_rotation_min_minutes__: Minimum minutes between rotations; blocks in between pause searching as before. Defaults to `15`.
 * __ULIMIT_NOFILE__: Startup target for open file descriptors (set in `init.sh` via `ulimit -n`). Thread limits are lowered automatically if the limit is too small for them. Defaults to `8192`.
 
@@ -168,7 +169,7 @@ AcoustID is asked at most 3 times a second and MusicBrainz at most once a second
 
 ## VPN rotation on YouTube blocks
 
-YouTube Music throttles a VPN exit that searches heavily, answering with a block page instead of results. By default every searcher then pauses on one shared cooldown (60 s, growing to 30 minutes). When LidaTube runs inside [Gluetun](https://github.com/qdm12/gluetun)'s network and `gluetun_control_url` is set, a block instead makes Gluetun reconnect to another server, and searching resumes on the new exit as soon as its public IP changes. Rotations are at least `vpn_rotation_min_minutes` apart, so a block that follows LidaTube everywhere falls back to the pause rather than cycling through servers. Downloads in flight retry through the brief reconnect.
+YouTube Music throttles a VPN exit that searches heavily, answering with a block page instead of results. By default every searcher then pauses on one shared cooldown (60 s, growing to 30 minutes). When LidaTube runs inside [Gluetun](https://github.com/qdm12/gluetun)'s network and `gluetun_control_url` is set, a block that outlasts `vpn_rotation_after_backoffs` consecutive pauses makes Gluetun reconnect to another server instead, and searching resumes on the new exit as soon as its public IP changes. A clean search or a rotation starts the count again. Rotations are at least `vpn_rotation_min_minutes` apart, so a block that follows LidaTube everywhere falls back to the pause rather than cycling through servers. Downloads in flight retry through the brief reconnect.
 
 Gluetun's control server must give LidaTube a role for the three routes it uses, in Gluetun's auth config file (`HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH`, by default `/gluetun/auth/config.toml`):
 

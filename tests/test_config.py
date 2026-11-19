@@ -188,7 +188,10 @@ def test_vpn_rotation_settings_default_off(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert (AppConfig.DEFAULTS["gluetun_control_url"], AppConfig.DEFAULTS["gluetun_api_key"]) == ("", "")
     assert AppConfig.DEFAULTS["vpn_rotation_min_minutes"] == 15
+    assert AppConfig.DEFAULTS["vpn_rotation_after_backoffs"] == 2
     monkeypatch.setenv("gluetun_control_url", "http://127.0.0.1:8000")
     monkeypatch.setenv("vpn_rotation_min_minutes", "5")
+    monkeypatch.setenv("vpn_rotation_after_backoffs", "0")
     config = AppConfig()
     assert (config.gluetun_control_url, config.vpn_rotation_min_minutes) == ("http://127.0.0.1:8000", 5.0)
+    assert config.vpn_rotation_after_backoffs == 0

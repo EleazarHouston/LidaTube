@@ -184,3 +184,14 @@ def test_wait_gives_up_when_the_stop_event_fires():
     cooldown, _ = _cooldown()
     cooldown.escalate()
     assert cooldown.wait(RecordingStop(stop_after=1)) is False
+
+
+def test_shared_cooldown_level_counts_escalations_until_cleared():
+    cooldown = SharedCooldown((60, 300), clock=lambda: 0.0)
+    assert cooldown.level == 0
+    cooldown.escalate()
+    cooldown.escalate()
+    cooldown.escalate()
+    assert cooldown.level == 3
+    cooldown.clear()
+    assert cooldown.level == 0

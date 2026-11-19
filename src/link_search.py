@@ -204,7 +204,7 @@ class LinkSearcher:
                     self._cooldown().escalate()
                     raise
                 waits += 1
-                if self.rotator is not None and self.rotator.enabled and self.rotator.rotate():
+                if self._rotation_due() and self.rotator.rotate():
                     # A fresh exit is usually unblocked, so search again at once instead of pausing.
                     self._cooldown().clear()
                     self.logger.warning(
@@ -217,6 +217,12 @@ class LinkSearcher:
                     f'YouTube block searching {req_album["artist"]} - {req_album["album_name"]}, '
                     f"pausing searches for {delay}s ({waits}/{self._MAX_BLOCK_ATTEMPTS}): {error}"
                 )
+
+    def _rotation_due(self):
+        """True once vpn_rotation_after_backoffs consecutive back-offs have failed to clear a block."""
+        if self.rotator is None or not self.rotator.enabled:
+            return False
+        return self._cooldown().level >= max(0, int(self.config.vpn_rotation_after_backoffs))
 
     def _search_attempt(self, req_album):
         """One pass over the album's stages, holding a search slot only while actually searching."""

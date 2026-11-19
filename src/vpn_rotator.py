@@ -46,8 +46,8 @@ class VpnRotator:
     def log_status(self):
         if self.enabled:
             self.logger.warning(
-                f"VPN rotation is on: a YouTube block moves to a new exit, at most every "
-                f"{float(self.config.vpn_rotation_min_minutes):g} minutes")
+                f"VPN rotation is on: a YouTube block that outlasts {int(self.config.vpn_rotation_after_backoffs)} "
+                f"back-off(s) moves to a new exit, at most every {float(self.config.vpn_rotation_min_minutes):g} minutes")
 
     def _url(self, path):
         return self.config.gluetun_control_url.rstrip("/") + path

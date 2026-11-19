@@ -76,6 +76,12 @@ class SharedCooldown:
         with self._lock:
             return max(0.0, self._deadline - self._clock())
 
+    @property
+    def level(self):
+        """How many escalations since the last clean pass: consecutive shared failures."""
+        with self._lock:
+            return self._level
+
     def escalate(self):
         """Extend the cooldown by the next step of the schedule and return that delay."""
         with self._lock:

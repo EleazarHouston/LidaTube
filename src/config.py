@@ -48,6 +48,8 @@ class AppConfig:
         "gluetun_api_key": "",
         # Rotations are at least this far apart; blocks in between pause searching as before.
         "vpn_rotation_min_minutes": 15,
+        # Back-off pauses tried before rotating; a block that outlasts them moves exit. 0 rotates at once.
+        "vpn_rotation_after_backoffs": 2,
     }
 
     _ENV_CONVERTERS = {
@@ -75,6 +77,7 @@ class AppConfig:
         "gluetun_control_url": str,
         "gluetun_api_key": str,
         "vpn_rotation_min_minutes": float,
+        "vpn_rotation_after_backoffs": int,
     }
 
     def __init__(self, logger=None):
