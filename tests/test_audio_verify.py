@@ -476,3 +476,67 @@ def test_artist_credits_are_read_in_acoustids_object_shape_and_plain_strings():
 def test_cross_script_title_with_acoustids_artist_objects_is_flagged_not_crashed():
     response = _one(_recording("Москва", ["Чайф"]))
     assert decide("Moskva", "exp", response, _no_works, expected_artist="Chaif").status == "flagged"
+
+
+# --- Titles written differently (from a 10k-file library scan) ----------------------------
+
+def _heard_one(title, sources=30, artists=("Someone Else",)):
+    return {"status": "ok", "results": [{"score": 0.97, "recordings": [
+        {"id": "cand", "title": title, "sources": sources, "artists": [{"name": a} for a in artists]}]}]}
+
+
+@pytest.mark.parametrize("expected, heard", [
+    ("Burnout", "Burn Out"),
+    ("Two O’Clock in the Morning", "2 O'Clock in the Morning"),
+    ("I Hope We Meet (On the Road Some Day)", "I Hope We Meet (On the Road Someday)"),
+    ("You Will Never Find", "You'll Never Find"),
+])
+def test_spacing_numerals_and_contractions_are_the_same_title(expected, heard):
+    assert same_title(expected, heard)
+
+
+@pytest.mark.parametrize("expected, heard", [
+    ("Joshua Fir The Battle Of Jericho", "Joshua Fit The Battle Of Jericho"),
+    ("Aaj Koi Baat Ho Gayi", "Aaj Koi Baat Ho Gaye"),
+    ("It Tears Me Ail to Pieces", "It Tears Me All to Pieces"),
+])
+def test_one_misspelt_word_in_a_longer_title_is_kept_as_similar(expected, heard):
+    verdict = decide(expected, "exp", _heard_one(heard), _no_works)
+    assert verdict.status == "weak"
+
+
+@pytest.mark.parametrize("expected, heard", [
+    ("Goldberg Variations BWV 988: 22.Variation 21 Canon at the Seventh", "Goldberg Variations, BWV 988: Variation 21. Canon on the Seventh"),
+    ("Goldberg Variations BWV 988: 14.Variation 13", "Goldberg Variations, BWV 988: XIV. Variatio 13 a 2 clav."),
+    ("Fünf Lieder, op. 105: I. Wie Melodien zieht es mir", "Five Songs, Op. 105 No. 1: Wie Melodien zieht es mir"),
+    ("Passion selon saint Jean, BWV 245: Chorus \"Sei gergrubet, lieber judenkonig\"", "St. John Passion, BWV 245: Part II. Chorus \"Sei gegrüßet, lieber Jüdenkönig\""),
+    ("Mass in B Minor, BWV 232: XX. Osanna [da capo]", "Mass in B minor BWV 232: Osanna in excelsis (Chorus)"),
+    ("Partita no. 2 for Violin Solo in D Minor, BWV 1004: V. Chaconne", "Partita No.2 in D minor, BWV 1004: V. Ciaccona"),
+    ("12 Etudes, Op. 25: No. 8 in D-Flat Major", "Etude, op. 25 no. 8 in D-flat major \"Sixths\""),
+    ("Symphony no. 1 in B-flat major, op. 38, “Frühling”: Allegro animato e grazioso", "Symphony No.1 in B-flat major, Op. 38 - IV. Allegro animato e grazioso"),
+])
+def test_same_catalogue_number_and_movement_is_kept_as_similar(expected, heard):
+    assert decide(expected, "exp", _heard_one(heard), _no_works).status == "weak"
+
+
+@pytest.mark.parametrize("expected, heard", [
+    ("Goldberg Variations BWV 988: 9.Variation 8", "Goldberg Variations, BWV 988: Variatio 7. a 1 ô vero 2 Clav."),
+    ("Concerto in F minor “L’inverno”, op. 8 no. 4, RV 297: III. Allegro", "Concerto in F minor “L’inverno”, op. 8 no. 4, RV 297: I. Allegro non molto"),
+    ("Concerto no. 5 in F minor, BWV 1056: I. [...]", "Keyboard Concerto in F minor, BWV 1056: II. Adagio"),
+    ("Acht Klavierstücke op. 76: 1. Capriccio fis-moll", "8 Klavierstücke, op. 76: No. 2, Capriccio in B minor"),
+    ("Sonata, BWV 1005 in C: Adagio", "Sonata no. 3 in C major, BWV 1005: IV. Allegro assai"),
+    ("Concerto Grosso in D major, op. 6 no. 5, HWV 323: IV. Largo", "Concerto Grosso in D, Op. 6 No. 5: Allegro"),
+    ("The Well-Tempered Clavier, Book I: No. 1 in C major, BWV 846: Prelude", "Fugue no. 1 en do majeur, BWV 846"),
+    # Lidarr's "30." is the track index glued to the title, not the variation's number.
+    ("Goldberg Variations BWV 988: 30.Variation 29", "Aria with 30 Variations \"Goldberg Variations\", BWV 988: Var. 30. Quodlibet"),
+    ("12 Etudes, Op. 25: No. 9 in G-Flat Major", "Etude, op. 25 no. 8 in D-flat major \"Sixths\""),
+    ("String Quartet No. 2 in A minor, Op. 51/2: II. Andante moderato", "String quartet in A minor, op. 51 no. 2: I. Allegro non troppo"),
+])
+def test_same_catalogue_number_with_another_movement_is_still_rejected(expected, heard):
+    assert decide(expected, "exp", _heard_one(heard), _no_works).status == "rejected"
+
+
+@pytest.mark.parametrize("expected, heard", [("Still Up", "Set Him Up"), ("Long Gun", "Long Way"), ("AGUA", "AGUARDIENTE"),
+                                             ("Days of Desperation", "Days Are Blood")])
+def test_different_songs_with_shared_words_are_still_rejected(expected, heard):
+    assert decide(expected, "exp", _heard_one(heard), _no_works).status == "rejected"

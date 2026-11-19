@@ -10,7 +10,8 @@ AcoustID. The verdict compares what AcoustID heard with what Lidarr asked for:
   match is never enough on its own: a wrong song by the right artist is the commonest failure.
 * Keep, without calling it verified, a file whose only evidence is the same title
   ("title_only": soundtracks credit performers on AcoustID and the composer in Lidarr) or a
-  similar one ("weak": "Love Me" for "Love Me Tender").
+  similar one ("weak"): "Love Me" for "Love Me Tender", one misspelt word, or the same
+  catalogue number and movement written in another language or edition.
 * Reject when none of those recordings matches and the evidence is strong (one heard by at
   least STRONG_SOURCES sources), or when every one of them has a title sharing no word with
   the request (the mislabelled-upload case, often heard by a single source).
@@ -232,12 +233,19 @@ _FILLER = {"the", "a", "an", "of", "from", "and", "in", "no", "nr", "op", "opus"
 _ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10"}
 
 
+_NUMBER_WORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8",
+                 "nine": "9", "ten": "10", "eleven": "11", "twelve": "12"}
+# What a contraction leaves behind once the apostrophe is gone: "You'll" -> "you ll".
+_CONTRACTIONS = {"ll": "will", "re": "are", "ve": "have"}
+
+
 def _fold(text):
     text = unidecode(text or "").lower().replace("&", " and ")
     text = _QUALIFIER_GROUP.sub(" ", text)
     text = _QUALIFIER_SUFFIX.sub(" ", text)
     text = _CATALOGUE.sub(" ", text)
-    return " ".join(re.findall(r"[a-z0-9]+", text))
+    words = re.findall(r"[a-z0-9]+", text)
+    return " ".join(_CONTRACTIONS.get(word, _NUMBER_WORDS.get(word, word)) for word in words)
 
 
 def title_tokens(title):
@@ -265,6 +273,8 @@ def _title_forms(title):
             forms.add(_fold(inner.group("cue")))
     for source, cue in pairs:
         forms.add(" ".join(sorted((_fold(source) + " " + _fold(cue)).split())))
+    # Spacing differs between spellings of one title: "Burnout" and "Burn Out".
+    forms |= {form.replace(" ", "") for form in forms}
     return {form for form in forms if form}
 
 
@@ -287,6 +297,101 @@ def same_title(expected, got):
         return False
     small, big = (a, b) if len(a) <= len(b) else (b, a)
     return all(_near(word, big) for word in small) and (len(small) >= 2 or len(big) == 1)
+
+
+def _one_word_apart(expected, got):
+    """Titles of three or more words that differ by one misspelt word ("Fir" for "Fit")."""
+    a = [word for word in _fold(expected).split() if word not in _FILLER]
+    b = [word for word in _fold(got).split() if word not in _FILLER]
+    if len(a) != len(b) or len(a) < 3:
+        return False
+    differing = [(x, y) for x, y in zip(a, b) if x != y]
+    return len(differing) == 1 and min(map(len, differing[0])) >= 3 and fuzz.ratio(*differing[0]) >= 66
+
+
+# --- Catalogued classical works -----------------------------------------------------------
+
+_WORK_NUMBER = re.compile(
+    r"\b(bwv|rv|hwv|kv|k|hob\.?\s*[ivx]+\s*:?|op|opus|s|d)\.?\s*(\d+[a-z]?)(?:\s*,?\s*(?:no|nr|n)\.?\s*(\d+))?", re.I)
+_ROMAN_NUMERALS = {numeral: value for value, numeral in enumerate(
+    "i ii iii iv v vi vii viii ix x xi xii xiii xiv xv xvi xvii xviii xix xx xxi xxii xxiii xxiv xxv xxvi xxvii xxviii xxix xxx".split(), 1)}
+# Words every movement shares; they cannot tell one movement from another.
+_GENERIC_MOVEMENT_WORDS = set("""allegro allegretto adagio andante andantino largo larghetto lento presto prestissimo vivace
+    moderato grave assai non troppo molto poco piu ma con e ed di da il la in sehr menuet menuetto minuet minuetto rondo
+    scherzo finale aria chorus choral chorale coro recit recitativo prelude fugue fuga gigue giga sarabande courante allemande
+    gavotte bourree trio part act major minor maggiore minore majeur mineur dur moll variation variations variatio tempo
+    movement mvt flat sharp""".split())
+# Lidarr titles often begin the movement with the track index glued on: "30.Variation 29".
+_GLUED_TRACK_INDEX = re.compile(r"^\s*\d+\.(?=[a-z])")
+
+
+def _work_numbers(title):
+    text = unidecode(title or "").lower().replace("№", " no ")
+    keys = set()
+    for kind, number, sub in _WORK_NUMBER.findall(text):
+        kind = re.sub(r"[\s.:]", "", kind)
+        kind = {"opus": "op", "kv": "k"}.get(kind, kind)
+        if kind in ("s", "d") and not re.search(rf"\b{kind}\.\s*\d", text):
+            continue
+        keys.add((kind, number.lstrip("0"), sub))
+    return keys
+
+
+def _movement(title, keys_text):
+    """The part of a catalogued title naming the movement: after its last colon, or after its number."""
+    text = unidecode(title or "").lower()
+    if ":" in text:
+        movement = text.rsplit(":", 1)[1]
+    else:
+        matches = list(_WORK_NUMBER.finditer(text))
+        movement = text[matches[-1].end():] if matches else ""
+    return _GLUED_TRACK_INDEX.sub("", movement)
+
+
+def _movement_numbers(movement):
+    numbers = set()
+    for word in re.findall(r"[a-z0-9]+", movement):
+        if word.isdigit():
+            numbers.add(int(word))
+        elif word in _ROMAN_NUMERALS:
+            numbers.add(_ROMAN_NUMERALS[word])
+    return numbers
+
+
+def _movement_words(movement):
+    return {word for word in re.findall(r"[a-z]+", movement)
+            if len(word) >= 3 and word not in _GENERIC_MOVEMENT_WORDS and word not in _FILLER and word not in _ROMAN_NUMERALS}
+
+
+def _same_catalogued_movement(expected, got):
+    """True when both titles carry the same catalogue number and compatible movements.
+
+    Translations and editions write one movement differently ("Passion selon saint Jean,
+    BWV 245" / "St. John Passion, BWV 245"), so the catalogue number identifies the work. The
+    movement must then agree: numbers that differ ("Variation 8" / "Variatio 7", "III." / "I.")
+    mean another movement, and without numbers the movements must share a distinctive word,
+    since "Allegro" alone names a movement in nearly every work.
+    """
+    a, b = _work_numbers(expected), _work_numbers(got)
+    shared = {(kind, number) for kind, number, _ in a} & {(kind, number) for kind, number, _ in b}
+    if not shared:
+        return False
+    for kind, number in shared:
+        subs_a = {sub for k, n, sub in a if (k, n) == (kind, number) and sub}
+        subs_b = {sub for k, n, sub in b if (k, n) == (kind, number) and sub}
+        if subs_a and subs_b and not subs_a & subs_b:
+            return False
+    move_a, move_b = _movement(expected, a).strip(), _movement(got, b).strip()
+    if not move_a or not move_b:
+        return not move_a and not move_b
+    numbers_a, numbers_b = _movement_numbers(move_a), _movement_numbers(move_b)
+    # "Op. 25: No. 8" names the piece in its movement, "op. 25 no. 8" in its catalogue number.
+    numbers_a = numbers_a or {int(sub) for kind, number, sub in a if (kind, number) in shared and sub}
+    numbers_b = numbers_b or {int(sub) for kind, number, sub in b if (kind, number) in shared and sub}
+    if numbers_a and numbers_b:
+        return bool(numbers_a & numbers_b)
+    words_a, words_b = _movement_words(move_a), _movement_words(move_b)
+    return any(_near(word, words_b) for word in words_a)
 
 
 def _non_latin(text):
@@ -380,7 +485,9 @@ def decide(expected_title, expected_recording_id, response, recording_info, expe
     for recording in recordings:
         if _title_forms(expected_title) & _title_forms(recording["title"]):
             (other_script if _non_latin(expected_title) != _non_latin(recording["title"]) else same).append(recording)
-        elif same_title(expected_title, recording["title"]) and _non_latin(expected_title) == _non_latin(recording["title"]):
+        elif _non_latin(expected_title) == _non_latin(recording["title"]) and (
+                same_title(expected_title, recording["title"]) or _one_word_apart(expected_title, recording["title"])
+                or _same_catalogued_movement(expected_title, recording["title"])):
             similar.append(recording)
     credited = [r for r in same if _artist_credited(expected_artist, r.get("artists"))]
     if credited:
