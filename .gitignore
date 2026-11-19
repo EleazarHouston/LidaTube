@@ -4,3 +4,5 @@ __pycache__/
 .coverage
 coverage.xml
 tmp/
+# Real AcoustID lookups of a private library, used by tests/test_audio_verify.py when present
+tests/fixtures/acoustid_gate_cases.json
