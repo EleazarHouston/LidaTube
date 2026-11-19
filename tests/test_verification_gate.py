@@ -18,7 +18,7 @@ class FakeVerifier:
         self.outcomes = list(outcomes)
         self.calls = []
 
-    def verify(self, path, track):
+    def verify(self, path, track, album=None):
         self.calls.append((path, track.get("track_title")))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -78,7 +78,7 @@ def test_verified_file_is_kept_and_recorded(tmp_path):
     assert verification_of(store, track) == {"verification": "verified", "suspicion": 0}
 
 
-@pytest.mark.parametrize("status, suspicion", [("no_match", 75), ("weak", 50), ("flagged", 50)])
+@pytest.mark.parametrize("status, suspicion", [("no_match", 75), ("variant", 60), ("weak", 50), ("flagged", 50)])
 def test_unconfirmed_files_are_kept_but_marked_suspicious(tmp_path, status, suspicion):
     gate, store = build_gate(tmp_path, FakeVerifier(Verdict(status, "why")))
     track = matched_track(store)
@@ -194,7 +194,7 @@ def test_start_runs_the_retry_loop_in_a_daemon_thread(tmp_path, monkeypatch):
 def test_track_queued_before_recording_ids_were_kept_asks_lidarr_for_it(tmp_path):
     verifier = FakeVerifier(Verdict("verified", "expected recording"))
     seen = []
-    verifier.verify = lambda path, track: seen.append(track.get("recording_id")) or Verdict("verified", "ok")
+    verifier.verify = lambda path, track, album=None: seen.append(track.get("recording_id")) or Verdict("verified", "ok")
     gate, store = build_gate(tmp_path, verifier)
     gate.lidarr_client.get_recording_id.return_value = "rec-from-lidarr"
     track = matched_track(store)

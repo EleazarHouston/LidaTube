@@ -14,6 +14,11 @@ AcoustID. The verdict compares what AcoustID heard with what Lidarr asked for:
 * Otherwise keep the file: "no_match" when AcoustID has no confident result, "weak" when
   thin evidence names a related title, "flagged" when titles match only across scripts.
 
+A recording that is the requested song may still be the wrong take. When every such recording
+is live and a studio recording was requested, the file is rejected, since a live take must never
+stand in for the original. Other variants the request did not name (instrumental, remix,
+karaoke, clean...) are kept as "variant" for review.
+
 The thresholds were set against real lookups of hand-labelled library files: 16 of 17 wrong
 songs rejected, and none of 389 correct control files.
 """
@@ -29,6 +34,8 @@ from dataclasses import dataclass, field
 import requests
 from thefuzz import fuzz
 from unidecode import unidecode
+
+import _matcher
 
 EVIDENCE_SCORE = 0.8
 STRONG_SOURCES = 3
@@ -177,11 +184,14 @@ class Verifier:
             raise VerificationUnavailable("MusicBrainz lookups are not configured")
         return self.musicbrainz.recording_info(recording_id)
 
-    def verify(self, path, track):
+    def verify(self, path, track, album=None):
+        album = album or {}
         duration, fingerprint_text = fingerprint(path, fpcalc=self.fpcalc)
         response = self.acoustid.lookup(duration, fingerprint_text)
+        expected_live = _matcher._request_is_live(track.get("track_title", ""), album.get("album_name"),
+                                                  album.get("album_secondary_types"))
         return decide(track.get("track_title", ""), track.get("recording_id"), response, self._recording_info,
-                      expected_artist=track.get("artist", ""))
+                      expected_artist=track.get("artist", ""), expected_live=expected_live)
 
 
 # --- Titles -------------------------------------------------------------------------------
@@ -190,7 +200,12 @@ _CATALOGUE = re.compile(
     r"\b(?:bwv|op|opus|k|kv|rv|hob|sc|p|t|s|woo|anh|r)\.?\s*\d+[a-z]?(?:\s*(?:no|nr)\.?\s*\d+)?\b", re.I)
 _QUALIFIER_GROUP = re.compile(
     r"[\(\[][^\)\]]*\b(?:version|mix|remix|edit|take|tk|alt|alternate|remaster(?:ed)?|mono|stereo|demo|"
-    r"instrumental|excerpt|orch|arr|feat|ft|featuring)\b[^\)\]]*[\)\]]", re.I)
+    r"instrumental|excerpt|orch|arr|feat|ft|featuring|clean|explicit|acoustic|a ?cappella|acapella|karaoke|unplugged|"
+    r"live|radio)\b[^\)\]]*[\)\]]", re.I)
+# A trailing " - Live" or " - Radio Edit" names the take, like a bracketed qualifier.
+_QUALIFIER_SUFFIX = re.compile(
+    r"\s+-\s+[^-]*\b(?:live|remix|mix|edit|version|instrumental|acoustic|demo|clean|karaoke|remaster(?:ed)?|"
+    r"a ?cappella|acapella|unplugged)\b[^-]*$", re.I)
 _FROM_SOURCE = re.compile(
     r"^(?P<cue>.*?)\s*[\(\[]?\s*\bfrom\s+[\"'“‘]?(?P<source>[^\"'”’\)\]]+)[\"'”’]?\s*[\)\]]?(?P<rest>.*)$",
     re.I)
@@ -203,6 +218,7 @@ _ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii"
 def _fold(text):
     text = unidecode(text or "").lower().replace("&", " and ")
     text = _QUALIFIER_GROUP.sub(" ", text)
+    text = _QUALIFIER_SUFFIX.sub(" ", text)
     text = _CATALOGUE.sub(" ", text)
     return " ".join(re.findall(r"[a-z0-9]+", text))
 
@@ -277,12 +293,44 @@ def _candidates(response):
                 yield score, recording
 
 
-def decide(expected_title, expected_recording_id, response, recording_info, expected_artist=""):
+_VARIANT_MARKER = re.compile(
+    r"\b(instrumental|karaoke|remix|mix|acoustic|demo|clean|radio edit|a ?cappella|acapella|unplugged)\b")
+
+
+def _qualifier_text(title):
+    """Text in a title's brackets or after its last " - ": where a variant is named, not the song."""
+    text = unidecode(title or "").lower()
+    groups = re.findall(r"[\(\[]([^\)\]]*)[\)\]]", text)
+    if " - " in text:
+        groups.append(text.rsplit(" - ", 1)[1])
+    return " ".join(groups)
+
+
+def _variant_markers(title):
+    return set(_VARIANT_MARKER.findall(_qualifier_text(title)))
+
+
+def _variant_verdict(expected_title, expected_live, matching, top_titles, status, reason):
+    """Judge recordings that are the requested song: a variant the request did not ask for counts
+    only when every one of them is that variant, since AcoustID groups a remix with its original."""
+    if not expected_live and all(_matcher._is_live_title(r["title"]) for r in matching):
+        return Verdict("rejected", "AcoustID heard a live recording of a studio request", top_titles)
+    wanted = _variant_markers(expected_title)
+    if all(_variant_markers(r["title"]) - wanted for r in matching):
+        variants = sorted(set().union(*(_variant_markers(r["title"]) - wanted for r in matching)))
+        return Verdict("variant", f"AcoustID heard a variant ({', '.join(variants)})", top_titles)
+    return Verdict(status, reason, top_titles)
+
+
+def decide(expected_title, expected_recording_id, response, recording_info, expected_artist="", expected_live=None):
     """Judge one AcoustID lookup response against the track Lidarr expects.
 
     recording_info(recording_id) returns (current_id, work_ids) from MusicBrainz and may raise
     VerificationUnavailable; it is only called when ids and titles cannot settle the case.
+    expected_live says whether a live recording was requested; None judges from the title.
     """
+    if expected_live is None:
+        expected_live = _matcher._is_live_title(expected_title)
     candidates = sorted(_candidates(response), key=lambda item: -item[0])
     if not candidates:
         return Verdict("no_match", "AcoustID has no confident result")
@@ -295,23 +343,33 @@ def decide(expected_title, expected_recording_id, response, recording_info, expe
     for recording in recordings:
         if expected_recording_id and recording["id"] == expected_recording_id:
             return Verdict("verified", "expected recording", top_titles)
+
+    titled, flagged = [], []
     for recording in recordings:
         if same_title(expected_title, recording["title"]):
             if _non_latin(expected_title) != _non_latin(recording["title"]):
                 if _artist_credited(expected_artist, recording.get("artists")):
-                    return Verdict("flagged", "same title in another script, same artist", top_titles)
+                    flagged.append(recording)
                 continue
-            return Verdict("verified", "same title", top_titles)
+            titled.append(recording)
+    if titled:
+        return _variant_verdict(expected_title, expected_live, titled, top_titles, "verified", "same title")
+    if flagged:
+        return _variant_verdict(expected_title, expected_live, flagged, top_titles, "flagged",
+                                "same title in another script, same artist")
 
     if expected_recording_id:
         current_id, expected_works = recording_info(expected_recording_id)
+        same_work = []
         for recording in recordings[:MAX_WORK_LOOKUPS]:
             if recording["id"] == current_id:
                 return Verdict("verified", "expected recording (merged id)", top_titles)
             if expected_works:
                 _, works = recording_info(recording["id"])
                 if expected_works & works:
-                    return Verdict("verified", "same work", top_titles)
+                    same_work.append(recording)
+        if same_work:
+            return _variant_verdict(expected_title, expected_live, same_work, top_titles, "verified", "same work")
 
     if any((recording.get("sources") or 0) >= STRONG_SOURCES for recording in recordings):
         return Verdict("rejected", "AcoustID heard a different recording", top_titles)

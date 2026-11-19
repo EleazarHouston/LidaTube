@@ -320,3 +320,64 @@ class Mock_lookup:
     def lookup(self, duration, fingerprint):
         self.calls.append((duration, fingerprint))
         return self.response
+
+
+# --- Variants of the requested song -------------------------------------------------------
+
+def _heard(*titles, sources=20):
+    return {"status": "ok", "results": [{"score": 0.95, "recordings": [
+        {"id": f"cand{index}", "title": title, "sources": sources} for index, title in enumerate(titles)]}]}
+
+
+def _no_works(recording_id):
+    return recording_id, set()
+
+
+@pytest.mark.parametrize("heard", ["Song (Instrumental)", "Song (Karaoke Version)", "Song (Remix)", "Song - Radio Edit",
+                                   "Song (Clean)", "Song (Acoustic)", "Song [Demo]", "Song (A Cappella)", "Song (Dance Mix)"])
+def test_a_variant_of_the_requested_song_is_kept_but_flagged(heard):
+    verdict = decide("Song", "exp", _heard(heard), _no_works)
+    assert verdict.status == "variant"
+    assert verdict.accepted
+
+
+@pytest.mark.parametrize("heard", ["Song (Live)", "Song (Live at Carnegie Hall)", "Song - Live"])
+def test_a_live_recording_heard_for_a_studio_request_is_rejected(heard):
+    verdict = decide("Song", "exp", _heard(heard), _no_works)
+    assert verdict.status == "rejected"
+    assert "live" in verdict.reason
+
+
+def test_a_live_recording_is_right_for_a_live_request():
+    assert decide("Song", "exp", _heard("Song (Live)"), _no_works, expected_live=True).status == "verified"
+    assert decide("Song (Live)", "exp", _heard("Song (Live at Wembley)"), _no_works).status == "verified"
+
+
+def test_no_flag_when_any_matching_recording_is_the_plain_song():
+    # AcoustID often groups a remix's entry with the original's; one plain title is enough.
+    assert decide("Song", "exp", _heard("Song (Remix)", "Song"), _no_works).status == "verified"
+    assert decide("Song", "exp", _heard("Song (Live)", "Song"), _no_works).status == "verified"
+
+
+def test_no_flag_when_the_request_names_the_same_variant():
+    assert decide("Song (Remix)", "exp", _heard("Song (Remix)"), _no_works).status == "verified"
+    assert decide("Song (Instrumental)", "exp", _heard("Song - Instrumental"), _no_works).status == "verified"
+
+
+@pytest.mark.parametrize("title", ["Clean", "Live Forever", "Remix to Ignition", "Live and Let Die"])
+def test_variant_words_that_are_part_of_the_song_title_are_not_variants(title):
+    assert decide(title, "exp", _heard(title), _no_works).status == "verified"
+
+
+def test_the_expected_recording_itself_is_never_a_variant():
+    response = {"status": "ok", "results": [{"score": 0.95, "recordings": [{"id": "exp", "title": "Song (Live)", "sources": 9}]}]}
+    assert decide("Song", "exp", response, _no_works).status == "verified"
+
+
+def test_verifier_tells_the_verdict_whether_the_album_is_live(monkeypatch):
+    monkeypatch.setattr(audio_verify, "fingerprint", lambda path, **kwargs: (180, "FP"))
+    verifier = audio_verify.Verifier(Mock_lookup(_heard("Song (Live)")), musicbrainz=None)
+    track = {"track_title": "Song", "recording_id": "exp", "artist": "A"}
+    assert verifier.verify("/tmp/x.mp3", track, {"album_name": "Live at Leeds"}).status == "verified"
+    assert verifier.verify("/tmp/x.mp3", track, {"album_name": "Album", "album_secondary_types": ["Live"]}).status == "verified"
+    assert verifier.verify("/tmp/x.mp3", track, {"album_name": "Studio Album"}).status == "rejected"

@@ -18,7 +18,7 @@ from audio_verify import AcoustIdClient, MusicBrainzClient, VerificationUnavaila
 USER_AGENT = "LidaTube/{} ( https://github.com/EleazarHouston/LidaTube )"
 HELD_FOLDER = "pending_verification"
 # A kept file whose audio was not confirmed surfaces on the Override list for review.
-SUSPICION = {"verified": None, "no_match": 75, "weak": 50, "flagged": 50, "pending": 50, "rejected": 90}
+SUSPICION = {"verified": None, "no_match": 75, "variant": 60, "weak": 50, "flagged": 50, "pending": 50, "rejected": 90}
 RETRY_POLL_SECONDS = 60
 
 
@@ -51,9 +51,9 @@ class VerificationGate:
                 self._verifier_key = self.config.acoustid_api_key
             return self._verifier
 
-    def _judge(self, path, track):
+    def _judge(self, path, track, album):
         try:
-            return self._current_verifier().verify(path, track), None
+            return self._current_verifier().verify(path, track, album), None
         except VerificationUnavailable as error:
             return None, str(error)
         except Exception as error:
@@ -66,7 +66,7 @@ class VerificationGate:
             # Albums queued before tracks carried their recording id; the id and its works
             # are what keep renamed soundtrack and classical recordings from being rejected.
             track["recording_id"] = self.lidarr_client.get_recording_id(track["track_id"])
-        verdict, error = self._judge(path, track)
+        verdict, error = self._judge(path, track, album)
         if verdict is None:
             self._hold(path, track, album, error)
             return "held"
@@ -125,7 +125,7 @@ class VerificationGate:
                 self.store.remove_pending_verification(pending["id"])
                 counts["missing"] += 1
                 continue
-            verdict, error = self._judge(held, track)
+            verdict, error = self._judge(held, track, pending["album"])
             if verdict is None:
                 self.store.retry_pending_verification(pending["id"], error, self._next_attempt())
                 counts["held"] += 1
@@ -169,7 +169,7 @@ class VerificationGate:
 
 
 def _album_summary(album):
-    keys = ("artist", "album_name", "artist_path", "album_folder", "album_full_path", "album_id")
+    keys = ("artist", "album_name", "artist_path", "album_folder", "album_full_path", "album_id", "album_secondary_types")
     return {key: album.get(key) for key in keys if key in album}
 
 
