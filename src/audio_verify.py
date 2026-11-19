@@ -215,7 +215,7 @@ class Verifier:
 # --- Titles -------------------------------------------------------------------------------
 
 _CATALOGUE = re.compile(
-    r"\b(?:bwv|op|opus|k|kv|rv|hob|sc|p|t|s|woo|anh|r)\.?\s*\d+[a-z]?(?:\s*(?:no|nr)\.?\s*\d+)?\b", re.I)
+    r"\b(?:bwv|hwv|op|opus|k|kv|rv|hob|sc|p|t|s|woo|anh|r)\.?\s*\d+[a-z]?(?:\s*(?:no|nr)\.?\s*\d+)?\b", re.I)
 _QUALIFIER_GROUP = re.compile(
     r"[\(\[][^\)\]]*\b(?:version|mix|remix|edit|take|tk|alt|alternate|remaster(?:ed)?|mono|stereo|demo|"
     r"instrumental|excerpt|orch|arr|feat|ft|featuring|clean|explicit|acoustic|a ?cappella|acapella|karaoke|unplugged|"
@@ -235,12 +235,16 @@ _ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii"
 
 _NUMBER_WORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8",
                  "nine": "9", "ten": "10", "eleven": "11", "twelve": "12"}
-# What a contraction leaves behind once the apostrophe is gone: "You'll" -> "you ll".
-_CONTRACTIONS = {"ll": "will", "re": "are", "ve": "have"}
+# What a contraction leaves behind once the apostrophe is gone: "You'll" -> "you ll"; and
+# abbreviations titles spell either way.
+_CONTRACTIONS = {"ll": "will", "re": "are", "ve": "have", "st": "saint", "pt": "part", "pts": "parts", "vol": "volume"}
+# A title that starts with its track index: "15. O Weh, sie binden ihn".
+_LEADING_TRACK_INDEX = re.compile(r"^\s*\d{1,2}\.\s*(?=[a-z])")
 
 
 def _fold(text):
     text = unidecode(text or "").lower().replace("&", " and ")
+    text = _LEADING_TRACK_INDEX.sub("", text)
     text = _QUALIFIER_GROUP.sub(" ", text)
     text = _QUALIFIER_SUFFIX.sub(" ", text)
     text = _CATALOGUE.sub(" ", text)
@@ -278,6 +282,31 @@ def _title_forms(title):
     return {form for form in forms if form}
 
 
+def _movement_part(title):
+    text = unidecode(title or "").lower()
+    return text.rsplit(":", 1)[1] if ":" in text else ""
+
+
+def _numbers_in(text):
+    return {word for word in _fold(text).split() if word.isdigit()} | {
+        str(_ROMAN_NUMERALS[word]) for word in re.findall(r"[a-z]+", unidecode(text or "").lower()) if word in _ROMAN_NUMERALS}
+
+
+def _comparable_tokens(expected, got):
+    """Title words of both titles, without a movement number only one of them gives.
+
+    "Mass in B Minor, BWV 232: X. Credo" and "B Minor Mass: Credo: Chorus. Credo" name the same
+    movement; Lidarr numbers it and the other title does not. Numbers both titles give still count.
+    """
+    a, b = title_tokens(expected), title_tokens(got)
+    numbers_a, numbers_b = _numbers_in(_movement_part(expected)), _numbers_in(_movement_part(got))
+    if numbers_a and not numbers_b and _movement_part(got):
+        a -= numbers_a
+    elif numbers_b and not numbers_a and _movement_part(expected):
+        b -= numbers_b
+    return a, b
+
+
 def _near(word, pool):
     return word in pool or (len(word) >= 5 and any(len(other) >= 5 and fuzz.ratio(word, other) >= 80 for other in pool))
 
@@ -292,21 +321,35 @@ def same_title(expected, got):
     """
     if _title_forms(expected) & _title_forms(got):
         return True
-    a, b = title_tokens(expected), title_tokens(got)
+    a, b = _comparable_tokens(expected, got)
     if not a or not b:
         return False
     small, big = (a, b) if len(a) <= len(b) else (b, a)
     return all(_near(word, big) for word in small) and (len(small) >= 2 or len(big) == 1)
 
 
-def _one_word_apart(expected, got):
-    """Titles of three or more words that differ by one misspelt word ("Fir" for "Fit")."""
-    a = [word for word in _fold(expected).split() if word not in _FILLER]
-    b = [word for word in _fold(got).split() if word not in _FILLER]
+def _spelled_alike(expected, got):
+    """Titles of three or more words spelt differently word by word: transliterations
+    ("Main Lag Jayegi" / "Mein Lag Jai") and typos ("Joshua Fir" / "Fit"). At least one word
+    must agree exactly, and numbers must agree, so "Part 3" never passes for "Part 2"."""
+    a, b = _fold(expected).split(), _fold(got).split()
     if len(a) != len(b) or len(a) < 3:
         return False
     differing = [(x, y) for x, y in zip(a, b) if x != y]
-    return len(differing) == 1 and min(map(len, differing[0])) >= 3 and fuzz.ratio(*differing[0]) >= 66
+    if not differing or len(differing) == len(a):
+        return False
+    return all(not (x.isdigit() or y.isdigit()) and min(len(x), len(y)) >= 3 and fuzz.ratio(x, y) >= 60
+               for x, y in differing)
+
+
+def _joined_alike(expected, got):
+    """Long titles nearly identical once spaces go: "Golliwog's Cake-Walk" / "Golliwoggs Cakewalk"."""
+    a, b = _comparable_tokens(expected, got)
+    if {w for w in a if w.isdigit()} != {w for w in b if w.isdigit()}:
+        return False
+    order = lambda title, kept: "".join(w for w in _fold(title).split() if w in kept)
+    joined_a, joined_b = order(expected, a), order(got, b)
+    return min(len(joined_a), len(joined_b)) >= 12 and fuzz.ratio(joined_a, joined_b) >= 90
 
 
 # --- Catalogued classical works -----------------------------------------------------------
@@ -418,13 +461,26 @@ def _artist_credited(expected_artist, artists):
 
 # --- Verdict ------------------------------------------------------------------------------
 
+_PLACEHOLDER_TITLE = re.compile(r"^\s*(?:track|piste|titel|untitled|unknown|audio)\b[\s\d#.\-]*$", re.I)
+
+
+def _without_artist_groups(title, artist):
+    """A title without a bracketed artist name: "Abendempfindung (Wolfgang Amadeus Mozart)"."""
+    if not artist:
+        return title
+    kept = re.sub(r"\s*[\(\[]([^\)\]]*)[\)\]]",
+                  lambda match: "" if _artist_credited(artist, [match.group(1)]) else match.group(0), title)
+    return kept.strip() or title
+
+
 def _candidates(response):
     for result in response.get("results") or []:
         score = result.get("score") or 0
         if score < EVIDENCE_SCORE:
             continue
         for recording in result.get("recordings") or []:
-            if recording.get("id") and recording.get("title"):
+            # "Track 12" names nothing, so it proves nothing either way.
+            if recording.get("id") and recording.get("title") and not _PLACEHOLDER_TITLE.match(recording["title"]):
                 yield score, recording
 
 
@@ -466,7 +522,10 @@ def decide(expected_title, expected_recording_id, response, recording_info, expe
     """
     if expected_live is None:
         expected_live = _matcher._is_live_title(expected_title)
-    candidates = sorted(_candidates(response), key=lambda item: -item[0])
+    expected_title = _without_artist_groups(expected_title, expected_artist)
+    candidates = [(score, dict(recording, title=_without_artist_groups(recording["title"], expected_artist)))
+                  for score, recording in _candidates(response)]
+    candidates.sort(key=lambda item: -item[0])
     if not candidates:
         return Verdict("no_match", "AcoustID has no confident result")
     recordings = []
@@ -486,7 +545,8 @@ def decide(expected_title, expected_recording_id, response, recording_info, expe
         if _title_forms(expected_title) & _title_forms(recording["title"]):
             (other_script if _non_latin(expected_title) != _non_latin(recording["title"]) else same).append(recording)
         elif _non_latin(expected_title) == _non_latin(recording["title"]) and (
-                same_title(expected_title, recording["title"]) or _one_word_apart(expected_title, recording["title"])
+                same_title(expected_title, recording["title"]) or _spelled_alike(expected_title, recording["title"])
+                or _joined_alike(expected_title, recording["title"])
                 or _same_catalogued_movement(expected_title, recording["title"])):
             similar.append(recording)
     credited = [r for r in same if _artist_credited(expected_artist, r.get("artists"))]

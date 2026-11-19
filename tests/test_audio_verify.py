@@ -540,3 +540,46 @@ def test_same_catalogue_number_with_another_movement_is_still_rejected(expected,
                                              ("Days of Desperation", "Days Are Blood")])
 def test_different_songs_with_shared_words_are_still_rejected(expected, heard):
     assert decide(expected, "exp", _heard_one(heard), _no_works).status == "rejected"
+
+
+@pytest.mark.parametrize("expected, heard", [
+    ("St. Louis Blues", "Saint Louis Blues"),
+    ("Pale Dry Boogie, Pt 1", "Pale Dry Boogie, Part 1"),
+    ("15. O Weh, Sie Binden Ihn Mit Strick Und Ketten!", "O weh, sie binden ihn mit Strick und Ketten!"),
+])
+def test_abbreviations_and_a_leading_track_index_are_the_same_title(expected, heard):
+    assert same_title(expected, heard)
+
+
+@pytest.mark.parametrize("expected, heard", [
+    ("Tumhen Dillagi Bhool Jaani Padegi", "Tumhen Dillagi Bhool Jani Paregee"),
+    ("Aag Daman Main Lag Jayegi", "Aag Daman Mein Lag Jai"),
+    ("Data Saab De Dware", "Data sahab de daware"),
+    ("Children’s Corner: Golliwog’s Cake-Walk", "Children's Corner: VI. Golliwoggs Cakewalk"),
+    ("Mass in B Minor, BWV 232: X. Credo in unum Deum", "B Minor Mass: Credo: Chorus. Credo in unum Deum"),
+    ("Orchestral Suite no. 3 in D major, BWV 1068: II. Air", "Orchestral Suite no. 3 in D major: Air on a G String"),
+    ('Orlando, HWV 31: Act II. "Verdi allori" (Medoro)', 'Orlando: Act Two VIII. "Verdi allori" (Medoro)'),
+])
+def test_transliterations_and_one_sided_movement_numbers_are_kept_as_similar(expected, heard):
+    assert decide(expected, "exp", _heard_one(heard), _no_works).status == "weak"
+
+
+def test_a_bracketed_composer_name_is_not_part_of_the_title():
+    response = _heard_one("Abendempfindung (Wolfgang Amadeus Mozart)", artists=("Elly Ameling",))
+    assert decide("Abendempfindung KV523", "exp", response, _no_works, expected_artist="Wolfgang Amadeus Mozart").status == "title_only"
+
+
+def test_placeholder_titles_from_acoustid_are_no_evidence():
+    response = _heard_one("Track 12", sources=50)
+    assert decide("Cantata, BWV 130: IV. Recitativo", "exp", response, _no_works).status == "no_match"
+
+
+@pytest.mark.parametrize("expected, heard", [
+    ("There Was a Kid (Part 3)", "There Was a Kid, Part 2"),
+    ("Up, Up and Down", "Up, Up, and Away"),
+    ("Symphony no. 5 in C minor, op. 67: III. Allegro Scherzo", "Symphony No. 4, Op. 60 - III. Allegro Vivace"),
+    ("Precious Lord,Take My Hand", "Precious Lord, Hold My Hand"),
+    ("Data Saab De Dware", "Data Sahab Ki Nagri"),
+])
+def test_similar_looking_different_titles_stay_rejected(expected, heard):
+    assert decide(expected, "exp", _heard_one(heard), _no_works).status == "rejected"
