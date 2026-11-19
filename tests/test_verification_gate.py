@@ -179,3 +179,13 @@ def test_retry_waits_while_verification_is_switched_off(tmp_path):
     gate.clock = lambda: NOW + timedelta(minutes=31)
     assert gate.retry_due() == {"accepted": 0, "rejected": 0, "held": 0, "missing": 0}
     assert store.count_pending_verifications() == 1
+
+
+def test_start_runs_the_retry_loop_in_a_daemon_thread(tmp_path, monkeypatch):
+    import verification_gate
+
+    gate, _ = build_gate(tmp_path, FakeVerifier())
+    started = []
+    monkeypatch.setattr(verification_gate.threading.Thread, "start", lambda self: started.append((self.daemon, self._target)))
+    gate.start()
+    assert started == [(True, gate.run)]

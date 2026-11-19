@@ -18,6 +18,7 @@ from lidarr_scan import LidarrScanner
 from link_search import LinkSearcher
 from scheduler import SyncScheduler
 from store import Store
+from verification_gate import VerificationGate
 
 
 class DataHandler:
@@ -50,10 +51,11 @@ class DataHandler:
             self.config, self.lidarr_client, self.fd, self.emit, self.logger,
             download_stop_event=download_stop_event,
         )
+        self.gate = VerificationGate(self.config, self.store, self.lidarr_client, self.logger)
         self.queue = DownloadQueue(
             self.config, self.store, self.scanner, self.searcher, self.downloader, self.lidarr_client,
             download_stop_event, self.emit, self.logger,
-            yield_to_event_loop=yield_to_event_loop,
+            yield_to_event_loop=yield_to_event_loop, gate=self.gate,
         )
         self.searcher.on_status_change = self.queue.emit_update
         self.scanner.on_album_scanned = self.queue.enqueue_scanned_album
@@ -66,6 +68,8 @@ class DataHandler:
             self.searcher.parallel,
         )
 
+        self.gate.log_status()
+        self.gate.start()
         self.queue.auto_resume()
         self.scheduler = SyncScheduler(self.config, self.scanner, self.queue, self.logger)
         self.scheduler.start()

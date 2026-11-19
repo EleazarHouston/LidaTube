@@ -165,3 +165,9 @@ def test_update_settings_keeps_the_saved_acoustid_key_when_left_blank(handler, m
         payload["acoustid_api_key"] = submitted
     handler.update_settings(payload)
     assert handler.config.acoustid_api_key == kept
+
+
+def test_queue_downloads_pass_through_the_verification_gate(handler):
+    assert handler.queue.gate is handler.gate
+    assert handler.gate.store is handler.store
+    assert handler.gate.lidarr_client is handler.lidarr_client

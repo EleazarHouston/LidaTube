@@ -140,6 +140,21 @@ class VerificationGate:
                 counts["rejected"] += 1
         return counts
 
+    def start(self):
+        """Re-verify held files in the background for the life of the process."""
+        self._stop = threading.Event()
+        threading.Thread(target=self.run, args=(self._stop,), daemon=True, name="verification-retry").start()
+
+    def log_status(self):
+        if not self.config.audio_verification:
+            self.logger.warning("Audio verification is switched off: downloads go to Lidarr unchecked")
+        elif not self.config.acoustid_api_key:
+            self.logger.warning("Audio verification is off: set an AcoustID API key to check downloads before import")
+        elif shutil.which("fpcalc") is None:
+            self.logger.error("Audio verification is on but fpcalc (Chromaprint) is missing: every download will be held")
+        else:
+            self.logger.warning("Audio verification is on: downloads are checked with AcoustID before import")
+
     def run(self, stop_event):
         """Background loop: re-verify held files until stop_event is set."""
         while not stop_event.wait(RETRY_POLL_SECONDS):

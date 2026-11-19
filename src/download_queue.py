@@ -17,7 +17,7 @@ import _general
 
 class DownloadQueue:
     def __init__(self, config, store, scanner, searcher, downloader, lidarr_client, stop_event, emit,
-                 logger=None, yield_to_event_loop=None):
+                 logger=None, yield_to_event_loop=None, gate=None):
         """yield_to_event_loop() lets a cooperative (gevent) worker run other greenlets during long loops."""
         self.config = config
         self.store = store
@@ -29,6 +29,8 @@ class DownloadQueue:
         self.emit = emit
         self.logger = logger or logging.getLogger(__name__)
         self.yield_to_event_loop = yield_to_event_loop or (lambda: None)
+        # Audio verification between yt-dlp and Lidarr (see verification_gate); None or disabled skips it.
+        self.gate = gate
 
         self.current_session_id = None
         # While a scheduled sync is scanning Lidarr, albums join the running session as they are scanned.
@@ -404,7 +406,7 @@ class DownloadQueue:
             artist_str = os.path.basename(req_album["artist_path"].rstrip("/"))
             album_name = req_album["album_name"]
             folder_with_year = req_album["album_folder"]
-            grabbed_count = existing_count = error_count = 0
+            grabbed_count = existing_count = error_count = held_count = 0
             song_links = [x for x in req_album["missing_tracks"] if x["link"] != ""]
             total_req = len(song_links)
             self.logger.warning(f"Valid link count of {total_req} for: {artist_str} - {album_name}")
@@ -413,31 +415,21 @@ class DownloadQueue:
                 if self.stop_event.is_set():
                     break
 
-                title = song["title_of_link"]
-                link = song["link"]
-                self.logger.warning(f"Starting Download of: {title}")
-                title_str = _general.convert_to_lidarr_format(title)
-                track_number = str(song["absolute_track_number"]).zfill(2)
-                file_name = os.path.join(artist_str, folder_with_year, f"{artist_str} - {album_name} - {track_number} - {title_str}")
-                full_file_path_with_ext = os.path.join(self.config.download_folder, f"{file_name}.{self.config.preferred_codec}")
-
-                if os.path.exists(full_file_path_with_ext):
+                outcome = self._download_song(song, req_album, artist_str, album_name, folder_with_year)
+                if outcome == "grabbed":
+                    grabbed_count += 1
+                elif outcome == "existing":
                     existing_count += 1
-                    self.logger.warning(f"File Already Exists: {artist_str} - {title_str}")
+                elif outcome == "held":
+                    held_count += 1
                 else:
-                    success = self.downloader.download(link, file_name)
-                    if success:
-                        _general.add_metadata(self.logger, song, req_album, full_file_path_with_ext)
-                        grabbed_count += 1
-                        self.stop_event.wait(self.config.sleep_interval)
-                        if self.stop_event.is_set():
-                            break
-                    else:
-                        error_count += 1
-                        if self.stop_event.is_set():
-                            break
+                    error_count += 1
+                if outcome in ("grabbed", "held"):
+                    self.stop_event.wait(self.config.sleep_interval)
+                if self.stop_event.is_set():
+                    break
 
-                song_processed_count = grabbed_count + error_count + existing_count
+                song_processed_count = grabbed_count + error_count + existing_count + held_count
                 req_album["status"] = f"Processed: {song_processed_count} of {total_req}"
                 self.emit_update()
 
@@ -452,12 +444,15 @@ class DownloadQueue:
                 req_album["status"] = "Download Complete"
             elif error_count == total_req:
                 req_album["status"] = "Download Failed"
+            elif held_count == total_req:
+                req_album["status"] = "Held for Verification"
             else:
                 req_album["status"] = "Partially Complete"
 
             self.logger.warning(
                 f'Download summary for {artist_str} - {album_name}: '
-                f'grabbed={grabbed_count}, existing={existing_count}, errors={error_count}, total={total_req} | status: {req_album["status"]}'
+                f'grabbed={grabbed_count}, existing={existing_count}, held={held_count}, errors={error_count}, '
+                f'total={total_req} | status: {req_album["status"]}'
             )
 
         except Exception as e:
@@ -467,6 +462,54 @@ class DownloadQueue:
         finally:
             self.index += 1
             self.emit_update()
+
+    def _download_song(self, song, req_album, artist_str, album_name, folder_with_year):
+        """Download one track: "grabbed", "existing", "held" for verification, "rejected" or "error".
+
+        With verification on, a file AcoustID rejects is replaced by searching that track again
+        (its rejected video now excluded), up to verification_attempts_per_track downloads.
+        """
+        verifying = self.gate is not None and self.gate.enabled
+        attempts = max(1, int(self.config.verification_attempts_per_track)) if verifying else 1
+        for attempt in range(1, attempts + 1):
+            title = song["title_of_link"]
+            self.logger.warning(f"Starting Download of: {title}")
+            title_str = _general.convert_to_lidarr_format(title)
+            track_number = str(song["absolute_track_number"]).zfill(2)
+            file_name = os.path.join(artist_str, folder_with_year, f"{artist_str} - {album_name} - {track_number} - {title_str}")
+            full_file_path_with_ext = os.path.join(self.config.download_folder, f"{file_name}.{self.config.preferred_codec}")
+
+            if os.path.exists(full_file_path_with_ext):
+                self.logger.warning(f"File Already Exists: {artist_str} - {title_str}")
+                return "existing"
+            if not self.downloader.download(song["link"], file_name):
+                return "error"
+            _general.add_metadata(self.logger, song, req_album, full_file_path_with_ext)
+            if not verifying:
+                return "grabbed"
+
+            verdict = self.gate.check(full_file_path_with_ext, song, req_album)
+            if verdict == "accepted":
+                return "grabbed"
+            if verdict == "held":
+                return "held"
+            if attempt == attempts or self.stop_event.is_set() or not self._search_track_again(song, req_album):
+                return "rejected"
+        return "rejected"
+
+    def _search_track_again(self, song, req_album):
+        """Search one track again after its download was rejected; True when a new link was found."""
+        song["link"], song["title_of_link"] = "", ""
+        song.pop("_track_result_id", None)
+        song.pop("_match_trace", None)
+        single_track = dict(req_album)
+        single_track["missing_tracks"] = [song]
+        single_track["missing_count"] = 1
+        # More tracks than missing ones keeps the search off the whole-album stage.
+        single_track["track_count"] = max(int(req_album.get("track_count") or 0), 1) + 1
+        single_track["_album_search_done"] = True
+        self.searcher.find_links(single_track, self.current_session_id)
+        return bool(song.get("link"))
 
     def stop(self):
         try:

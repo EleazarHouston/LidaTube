@@ -733,3 +733,96 @@ def test_an_album_that_simply_found_nothing_is_still_done(monkeypatch):
     queue._process_item(43, _blocked_album())
 
     queue.store.mark_queue_item.assert_called_once_with(43, "done")
+
+
+def _gated_queue(monkeypatch, outcomes, attempts=3):
+    queue = build_queue()
+    queue.config.attempt_lidarr_import = True
+    queue.config.verification_attempts_per_track = attempts
+    queue.gate = Mock()
+    queue.gate.enabled = True
+    queue.gate.check.side_effect = list(outcomes)
+    monkeypatch.setattr(queue, "_wait_for_album_scan_data", lambda _: True)
+    monkeypatch.setattr(download_queue.os.path, "exists", lambda _: False)
+    monkeypatch.setattr(download_queue._general, "add_metadata", Mock())
+    queue.downloader.download.return_value = True
+    return queue
+
+
+def test_verified_download_is_imported(monkeypatch):
+    queue = _gated_queue(monkeypatch, ["accepted"])
+    album = _make_req_album([_make_track(1)])
+    queue.download_album(album)
+    path, track, checked_album = queue.gate.check.call_args[0]
+    assert path == "/downloads/Artist/Album (2024)/Artist - Album - 01 - Track 1.mp3"
+    assert track is album["missing_tracks"][0] and checked_album is album
+    queue.lidarr_client.import_album.assert_called_once_with(album)
+    assert album["status"] == "Download Complete"
+
+
+def test_held_download_is_not_imported(monkeypatch):
+    queue = _gated_queue(monkeypatch, ["held"])
+    album = _make_req_album([_make_track(1)])
+    queue.download_album(album)
+    queue.lidarr_client.import_album.assert_not_called()
+    assert album["status"] == "Held for Verification"
+
+
+def test_rejected_download_searches_that_track_again_and_keeps_the_replacement(monkeypatch):
+    queue = _gated_queue(monkeypatch, ["rejected", "accepted"])
+    album = _make_req_album([_make_track(1), _make_track(2)])
+    album["missing_tracks"][1]["link"] = ""
+    searched = []
+
+    def search_again(sub_album, session_id=None):
+        if sub_album is album:
+            return
+        searched.append(sub_album)
+        track = sub_album["missing_tracks"][0]
+        assert track["link"] == "" and "_track_result_id" not in track
+        track["link"], track["title_of_link"] = "https://example.com/1-better", "Track 1 (better)"
+
+    album["missing_tracks"][0]["_track_result_id"] = 41
+    queue.searcher.find_links.side_effect = search_again
+    queue.download_album(album)
+
+    # The re-search covers only the rejected track, never the album as a whole.
+    assert [t["track_id"] for t in searched[0]["missing_tracks"]] == [1]
+    assert searched[0]["track_count"] > searched[0]["missing_count"]
+    assert [c[0][0] for c in queue.downloader.download.call_args_list] == ["https://example.com/1", "https://example.com/1-better"]
+    queue.lidarr_client.import_album.assert_called_once()
+
+
+def test_rejections_stop_after_the_configured_attempts(monkeypatch):
+    queue = _gated_queue(monkeypatch, ["rejected", "rejected"], attempts=2)
+    album = _make_req_album([_make_track(1)])
+
+    def search_again(sub_album, session_id=None):
+        if sub_album is album:
+            return
+        track = sub_album["missing_tracks"][0]
+        track["link"], track["title_of_link"] = "https://example.com/again", "Track 1 again"
+
+    queue.searcher.find_links.side_effect = search_again
+    queue.download_album(album)
+    assert queue.downloader.download.call_count == 2
+    queue.lidarr_client.import_album.assert_not_called()
+    assert album["status"] == "Download Failed"
+
+
+def test_rejection_with_no_other_candidate_gives_up(monkeypatch):
+    queue = _gated_queue(monkeypatch, ["rejected"])
+    album = _make_req_album([_make_track(1)])
+    queue.searcher.find_links.side_effect = lambda sub_album, session_id=None: None
+    queue.download_album(album)
+    assert queue.downloader.download.call_count == 1
+    assert album["status"] == "Download Failed"
+
+
+def test_download_is_not_checked_when_verification_is_off(monkeypatch):
+    queue = _gated_queue(monkeypatch, [])
+    queue.gate.enabled = False
+    album = _make_req_album([_make_track(1)])
+    queue.download_album(album)
+    queue.gate.check.assert_not_called()
+    queue.lidarr_client.import_album.assert_called_once()
