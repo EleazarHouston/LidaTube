@@ -864,3 +864,24 @@ def test_held_file_is_left_out_of_the_album_import(monkeypatch):
     album = _make_req_album([_make_track(1), _make_track(2)])
     queue.download_album(album)
     queue.lidarr_client.import_album.assert_called_once_with(album, only_files=["Artist - Album - 02 - Track 2.mp3"])
+
+
+def test_files_already_staged_are_imported_when_their_album_comes_round_again(monkeypatch):
+    # An import that never landed (Lidarr can drop queued ManualImports on restart) left the
+    # files staged; seeing them again must retry the import, not skip it for good.
+    queue = build_queue()
+    queue.config.attempt_lidarr_import = True
+    monkeypatch.setattr(queue, "_wait_for_album_scan_data", lambda _: True)
+    monkeypatch.setattr(download_queue.os.path, "exists", lambda _: True)
+    album = _make_req_album([_make_track(1), _make_track(2)])
+    queue.download_album(album)
+    queue.downloader.download.assert_not_called()
+    queue.lidarr_client.import_album.assert_called_once_with(album)
+
+
+def test_staged_files_are_verified_before_their_import_is_retried(monkeypatch):
+    queue = _gated_queue(monkeypatch, ["accepted", "held"])
+    monkeypatch.setattr(download_queue.os.path, "exists", lambda _: True)
+    album = _make_req_album([_make_track(1), _make_track(2)])
+    queue.download_album(album)
+    queue.lidarr_client.import_album.assert_called_once_with(album, only_files=["Artist - Album - 01 - Track 1.mp3"])

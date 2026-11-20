@@ -436,9 +436,11 @@ class DownloadQueue:
                 req_album["status"] = f"Processed: {song_processed_count} of {total_req}"
                 self.emit_update()
 
-            if self.config.attempt_lidarr_import and grabbed_count > 0 and not self.stop_event.is_set():
+            # Files already staged count too: their earlier import may never have landed.
+            if self.config.attempt_lidarr_import and grabbed_count + existing_count > 0 and not self.stop_event.is_set():
                 if self.gate is not None and self.gate.enabled:
-                    self.lidarr_client.import_album(req_album, only_files=verified_files)
+                    if verified_files:
+                        self.lidarr_client.import_album(req_album, only_files=verified_files)
                 else:
                     self.lidarr_client.import_album(req_album)
 
