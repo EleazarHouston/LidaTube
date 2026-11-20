@@ -90,7 +90,7 @@ Certain values can be set via environment variables:
 * __library_scan_on_completion__: Ask Lidarr to rescan its root folders when a download session completes. Defaults to `True`.
 * __thread_limit__: Number of albums downloaded in parallel. YouTube Music searches are capped at 2 at a time either way. Defaults to `1`.
 * __lidarr_scan_thread_limit__: Max worker threads used during the Lidarr refresh (fetching missing tracks per album). Defaults to `16`.
-* __batch_size__: Maximum albums loaded and processed per persisted batch. Defaults to `200`.
+* __batch_size__: How many recent albums the download queue view shows. Albums are taken from the persisted queue one at a time as download slots free up, so one long album never holds the others back. Defaults to `200`.
 * __auto_resume__: Resume an interrupted persisted queue when LidaTube starts. Defaults to `True`.
 * __sleep_interval__: Seconds to wait after each downloaded track. Defaults to `0`.
 * __sync_schedule__: Hours at which to start a sync (comma-separated, 24-hour). Defaults to ``.

@@ -236,54 +236,46 @@ class DownloadQueue:
                 f"thread_limit={self.config.thread_limit}"
             )
 
-            while not self.stop_event.is_set():
-                batch_rows = self.store.next_batch(session_id, batch_size)
-                if not batch_rows:
-                    if self.streaming_mode:
-                        self.stop_event.wait(0.25)
-                        continue
-                    break
-
-                self.batch_number += 1
-                self.index = 0
-                self.items = []
-                work_items = []
-                for row in batch_rows:
-                    try:
-                        req_album = json.loads(row["album_json"])
-                    except (TypeError, ValueError):
-                        self.store.mark_queue_item(row["id"], "error")
-                        continue
-                    req_album["_queue_item_id"] = row["id"]
-                    self.items.append(req_album)
-                    work_items.append((row["id"], req_album))
-
-                self.store.mark_queue_items(
-                    [queue_item_id for queue_item_id, _ in work_items], "in_progress"
-                )
-                self._refresh_progress(session_id)
-                self.emit_update()
-
-                with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=self.config.thread_limit
-                ) as executor:
-                    future_items = {
-                        executor.submit(self._process_item, queue_item_id, req_album): queue_item_id
-                        for queue_item_id, req_album in work_items
-                    }
-                    self.futures = list(future_items)
-                    for future in concurrent.futures.as_completed(future_items):
-                        queue_item_id = future_items[future]
+            # Rolling queue: each download slot takes the next pending album as soon as it frees,
+            # so one long album holds only its own slot, and reordering the queue takes effect at
+            # the next free slot. The UI shows a window of the last batch_size albums.
+            slots = max(1, int(self.config.thread_limit))
+            self.items = []
+            active = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=slots) as executor:
+                while True:
+                    claimed = [] if self.stop_event.is_set() else self._claim(session_id, slots - len(active))
+                    for queue_item_id, req_album in claimed:
+                        self._show(req_album, max(batch_size, slots), active)
+                        future = executor.submit(self._process_item, queue_item_id, req_album)
+                        active[future] = (queue_item_id, req_album)
+                    self.futures = list(active)
+                    if claimed:
+                        self._refresh_progress(session_id)
+                        self.emit_update()
+                    if not active:
+                        if self.stop_event.is_set():
+                            break
+                        if self.streaming_mode:
+                            self.stop_event.wait(0.25)
+                            continue
+                        break
+                    finished, _ = concurrent.futures.wait(
+                        active, timeout=0.25, return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+                    for future in finished:
+                        queue_item_id, _ = active.pop(future)
                         try:
                             future.result()
                         except concurrent.futures.CancelledError:
                             self.store.mark_queue_item(queue_item_id, "pending")
-
-                self._refresh_progress(session_id)
-                self.emit_update()
-                # Yield between bounded batches so the gevent worker can service heartbeats.
-                if not self.stop_event.wait(0.05):
-                    self.yield_to_event_loop()
+                    if finished:
+                        self._refresh_progress(session_id)
+                        self.emit_update()
+                        # Yield between albums so the gevent worker can service heartbeats.
+                        if not self.stop_event.wait(0.05):
+                            self.yield_to_event_loop()
+                self.futures = []
 
             if session_id in self._reset_session_ids:
                 self.status = "idle"
@@ -311,6 +303,34 @@ class DownloadQueue:
                 self.current_session_id = None
             self.emit_update()
             self.emit("new_toast_msg", {"title": "End of Session", "message": f"Downloading {self.status.capitalize()}"})
+
+    def _claim(self, session_id, free_slots):
+        """Take up to free_slots pending albums from the front of the queue, marking them in progress."""
+        if free_slots <= 0:
+            return []
+        claimed = []
+        for row in self.store.next_batch(session_id, free_slots):
+            try:
+                req_album = json.loads(row["album_json"])
+            except (TypeError, ValueError):
+                self.store.mark_queue_item(row["id"], "error")
+                continue
+            req_album["_queue_item_id"] = row["id"]
+            claimed.append((row["id"], req_album))
+        if claimed:
+            self.batch_number += 1
+            self.store.mark_queue_items([queue_item_id for queue_item_id, _ in claimed], "in_progress")
+        return claimed
+
+    def _show(self, req_album, window, active):
+        """Add an album to the UI's queue view, dropping the oldest finished ones beyond window."""
+        self.items.append(req_album)
+        running = {id(album) for _, album in active.values()} | {id(req_album)}
+        while len(self.items) > window:
+            oldest_finished = next((album for album in self.items if id(album) not in running), None)
+            if oldest_finished is None:
+                break
+            self.items.remove(oldest_finished)
 
     def _process_item(self, queue_item_id, req_album):
         queue_status = "error"

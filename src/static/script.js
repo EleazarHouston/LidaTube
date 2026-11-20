@@ -152,7 +152,7 @@ function update_queue_detail(queue = {}) {
     const total = Number(queue.total || 0);
     if (!total) { ytdlp_queue_text.textContent = ''; return; }
     const completed = Number(queue.done || 0) + Number(queue.error || 0);
-    ytdlp_queue_text.textContent = `Batch ${Number(queue.batch || 0).toLocaleString()} · album ${completed.toLocaleString()} / ${total.toLocaleString()} overall · ${Number(queue.matched || 0).toLocaleString()} matched / ${Number(queue.failed || 0).toLocaleString()} failed`;
+    ytdlp_queue_text.textContent = `Album ${completed.toLocaleString()} / ${total.toLocaleString()} overall · ${Number(queue.matched || 0).toLocaleString()} matched / ${Number(queue.failed || 0).toLocaleString()} failed`;
 }
 
 function check_if_all_true() {

@@ -247,10 +247,12 @@ def test_persisted_batches_resume_after_simulated_restart_without_drops(monkeypa
 
     reopened = Store(db_path)
     assert reopened.resumable_session()["id"] == session_id
+    # Albums are claimed as download slots free up (one slot here), so the crash on the second
+    # claim leaves one album done and the rest pending; none is lost or left in progress.
     assert reopened.queue_counts(session_id) == {
-        "pending": 3,
+        "pending": 4,
         "in_progress": 0,
-        "done": 2,
+        "done": 1,
         "error": 0,
         "total": 5,
     }
@@ -885,3 +887,68 @@ def test_staged_files_are_verified_before_their_import_is_retried(monkeypatch):
     album = _make_req_album([_make_track(1), _make_track(2)])
     queue.download_album(album)
     queue.lidarr_client.import_album.assert_called_once_with(album, only_files=["Artist - Album - 01 - Track 1.mp3"])
+
+
+
+def _rolling_queue(tmp_path, albums, thread_limit=2):
+    queue = build_queue()
+    queue.store = Store(tmp_path / "rolling.db")
+    queue.config.thread_limit = thread_limit
+    queue.config.batch_size = 200
+    session_id = queue.store.start_session(requested_count=len(albums))
+    queue.store.enqueue_items(session_id, [{"album_id": i, "album_name": name, "scan_ready": True} for i, name in enumerate(albums)])
+    return queue, session_id
+
+
+def test_a_long_album_does_not_hold_the_other_download_slots_idle(tmp_path, monkeypatch):
+    queue, session_id = _rolling_queue(tmp_path, ["Giant", "A", "B", "C", "D"])
+    queue.config.batch_size = 2  # a batch boundary falls right after "A"
+    giant_may_finish = threading.Event()
+    finished = []
+
+    def fake_download_album(req_album):
+        if req_album["album_name"] == "Giant":
+            assert giant_may_finish.wait(5)
+        finished.append(req_album["album_name"])
+        req_album["status"] = "Download Complete"
+        if finished == ["A", "B", "C", "D"]:
+            giant_may_finish.set()
+
+    monkeypatch.setattr(queue, "download_album", fake_download_album)
+    queue.run(session_id)
+
+    # Every other album went through the second slot while the giant one was still downloading.
+    assert finished == ["A", "B", "C", "D", "Giant"]
+    assert queue.store.queue_counts(session_id)["done"] == 5
+
+
+def test_a_priority_change_is_picked_up_at_the_next_free_slot(tmp_path, monkeypatch):
+    queue, session_id = _rolling_queue(tmp_path, ["First", "Second", "Third", "Urgent"], thread_limit=1)
+    order = []
+
+    def fake_download_album(req_album):
+        order.append(req_album["album_name"])
+        req_album["status"] = "Download Complete"
+        if req_album["album_name"] == "First":
+            urgent = [row for row in queue.store._fetchall("SELECT id, album_json FROM queue_items") if "Urgent" in row["album_json"]][0]
+            queue.store._connection.execute("UPDATE queue_items SET position = -1 WHERE id = ?", (urgent["id"],))
+            queue.store._connection.commit()
+
+    monkeypatch.setattr(queue, "download_album", fake_download_album)
+    queue.run(session_id)
+    assert order == ["First", "Urgent", "Second", "Third"]
+
+
+def test_the_queue_view_keeps_a_window_of_recent_albums(tmp_path, monkeypatch):
+    queue, session_id = _rolling_queue(tmp_path, [f"Album {i}" for i in range(7)], thread_limit=1)
+    queue.config.batch_size = 3
+    sizes = []
+
+    def fake_download_album(req_album):
+        sizes.append(len(queue.items))
+        req_album["status"] = "Download Complete"
+
+    monkeypatch.setattr(queue, "download_album", fake_download_album)
+    queue.run(session_id)
+    assert max(sizes) <= 3
+    assert [item["album_name"] for item in queue.items] == ["Album 4", "Album 5", "Album 6"]
