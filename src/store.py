@@ -133,6 +133,27 @@ _MIGRATIONS = (
 )
 
 
+def _wanted_tracks(album):
+    """The track ids a queued album will download; None for every missing track."""
+    if album.get("scan_ready", True):
+        return {track.get("track_id") for track in album.get("missing_tracks", [])}
+    restricted = album.get("only_track_ids")
+    return set(restricted) if restricted else None
+
+
+def _widened(queued, requested):
+    """The album to queue instead of queued so requested is covered; None when it already is."""
+    have, want = _wanted_tracks(queued), _wanted_tracks(requested)
+    if have is None or (want is not None and want <= have):
+        return None
+    album = dict(requested)
+    if want is None:
+        album.pop("only_track_ids", None)
+    else:
+        album["only_track_ids"] = sorted(have | want)
+    return album
+
+
 class Store:
     """SQLite-backed persistence for sessions, queued albums, results, and overrides."""
 
@@ -344,6 +365,64 @@ class Store:
                 (status, 1 if charge_attempt else 0, album_json, self._now(), queue_item_id),
             )
             self._connection.commit()
+
+    def requeue_albums(self, session_id, albums, front=False):
+        """Queue unscanned albums in a session without repeating ones already waiting.
+
+        A pending album that already covers the wanted tracks is left as it is; one that
+        covers only some is replaced by the union. front=True places the albums (new or
+        already pending) ahead of everything else. Albums being downloaded are skipped.
+        Returns counts of added, updated, already_queued and in_progress albums.
+        """
+        counts = {"added": 0, "updated": 0, "already_queued": 0, "in_progress": 0}
+        now = self._now()
+        placeholders = ",".join("?" for _ in albums)
+        with _DB_LOCK:
+            queued = {}
+            for row in self._connection.execute(
+                f"SELECT id, album_id, status, album_json FROM queue_items WHERE session_id = ? "
+                f"AND status IN ('pending', 'in_progress') AND album_id IN ({placeholders})",
+                (session_id, *[album["album_id"] for album in albums]),
+            ).fetchall():
+                if row["status"] == "in_progress" or row["album_id"] not in queued:
+                    queued[row["album_id"]] = row
+            places = []  # (queue item id or None, album, new album_json or None), in queue order
+            for album in albums:
+                row = queued.get(album["album_id"])
+                if row is None:
+                    counts["added"] += 1
+                    places.append((None, album, json.dumps(album, separators=(",", ":"))))
+                elif row["status"] == "in_progress":
+                    counts["in_progress"] += 1
+                else:
+                    wider = _widened(json.loads(row["album_json"]), album)
+                    counts["already_queued" if wider is None else "updated"] += 1
+                    places.append((row["id"], album, None if wider is None else json.dumps(wider, separators=(",", ":"))))
+            edge = "MIN(position)" if front else "MAX(position)"
+            found = self._connection.execute(
+                f"SELECT {edge} FROM queue_items WHERE session_id = ?", (session_id,)
+            ).fetchone()[0]
+            if front:
+                position = (0 if found is None else found) - len(places)
+            else:
+                position = 0 if found is None else found + 1
+            for item_id, album, album_json in places:
+                if item_id is None:
+                    self._connection.execute(
+                        "INSERT INTO queue_items (session_id, position, artist_id, album_id, album_json, status, "
+                        "updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                        (session_id, position, album.get("artist_id"), album["album_id"], album_json, now),
+                    )
+                elif front or album_json is not None:
+                    self._connection.execute(
+                        "UPDATE queue_items SET position = CASE WHEN ? THEN ? ELSE position END, "
+                        "album_json = COALESCE(?, album_json), "
+                        "attempts = CASE WHEN ? IS NULL THEN attempts ELSE 0 END, updated_at = ? WHERE id = ?",
+                        (front, position, album_json, album_json, now, item_id),
+                    )
+                position += 1
+            self._connection.commit()
+        return counts
 
     def queue_counts(self, session_id):
         row = self._fetchone(

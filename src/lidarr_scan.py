@@ -355,36 +355,7 @@ class LidarrScanner:
                     for album in albums_on_page:
                         if self.stop_event.is_set():
                             break
-                        artist = artist_lookup.get(album["artistId"], {})
-                        parsed_date = datetime.fromisoformat(album["releaseDate"].replace("Z", "+00:00"))
-                        album_year = parsed_date.year
-                        album_name = _general.convert_to_lidarr_format(album["title"])
-                        album_folder = f"{album_name} ({album_year})"
-                        album_full_path = os.path.join(artist.get("path", ""), album_folder)
-                        album_release_id = album["releases"][0]["id"]
-                        new_item = {
-                            "artist_id": album["artistId"],
-                            "artist_path": artist.get("path", ""),
-                            "artist": artist.get("artistName", ""),
-                            "album_name": album_name,
-                            "album_folder": album_folder,
-                            "album_full_path": album_full_path,
-                            "album_year": album_year,
-                            "album_id": album["id"],
-                            "album_release_id": album_release_id,
-                            "album_genres": ", ".join(album["genres"]),
-                            "album_secondary_types": list(album.get("secondaryTypes") or []),
-                            "artist_genres": ", ".join(artist.get("genres") or []),
-                            "track_count": 0,
-                            "missing_count": 0,
-                            "missing_tracks": [],
-                            "checked": True,
-                            "scan_ready": False,
-                            "scan_in_progress": False,
-                            "scan_state": "pending",
-                            "scan_error": None,
-                            "status": "",
-                        }
+                        new_item = self._album_item(album, artist_lookup.get(album["artistId"], {}))
                         self.items.append(new_item)
                         while len(future_map) >= max_pending and not self.stop_event.is_set():
                             processed, failed = self._drain_futures(future_map, wait_for_one=True)
@@ -472,7 +443,82 @@ class LidarrScanner:
         finally:
             self.emit_update()
 
-    def scan_album_tracks(self, req_album):
+    # --- Albums ---
+
+    # What identifies an album and where its files go; everything else describes one scan or download.
+    ALBUM_IDENTITY_KEYS = (
+        "artist_id", "artist_path", "artist", "album_name", "album_folder", "album_full_path", "album_year",
+        "album_id", "album_release_id", "album_genres", "album_secondary_types", "artist_genres",
+    )
+
+    @staticmethod
+    def unscanned_album(identity):
+        """A queueable album whose missing tracks are still to be read from Lidarr."""
+        album = {key: identity[key] for key in LidarrScanner.ALBUM_IDENTITY_KEYS if key in identity}
+        album.update(track_count=0, missing_count=0, missing_tracks=[], checked=True, scan_ready=False,
+                     scan_in_progress=False, scan_state="pending", scan_error=None, status="")
+        return album
+
+    def _album_item(self, album, artist):
+        """The queueable form of a Lidarr album resource and its artist."""
+        # Lidarr omits the date of an album that has none, and otherwise reports year 1 for it.
+        release_date = album.get("releaseDate") or "0001-01-01T00:00:00Z"
+        album_year = datetime.fromisoformat(release_date.replace("Z", "+00:00")).year
+        album_name = _general.convert_to_lidarr_format(album["title"])
+        album_folder = f"{album_name} ({album_year})"
+        return self.unscanned_album({
+            "artist_id": album["artistId"],
+            "artist_path": artist.get("path", ""),
+            "artist": artist.get("artistName", ""),
+            "album_name": album_name,
+            "album_folder": album_folder,
+            "album_full_path": os.path.join(artist.get("path", ""), album_folder),
+            "album_year": album_year,
+            "album_id": album["id"],
+            "album_release_id": album["releases"][0]["id"],
+            "album_genres": ", ".join(album["genres"]),
+            "album_secondary_types": list(album.get("secondaryTypes") or []),
+            "artist_genres": ", ".join(artist.get("genres") or []),
+        })
+
+    def albums_by_id(self, album_ids):
+        """Queueable copies of these albums, from the scan cache or else Lidarr.
+
+        Returns ({album id: album}, [ids that could not be read]).
+        """
+        cached = {item.get("album_id"): item for item in list(self.items)}
+        albums, failed, artists = {}, [], {}
+        for album_id in album_ids:
+            item = cached.get(album_id)
+            if item is not None and item.get("artist_path"):
+                albums[album_id] = self.unscanned_album(item)
+                continue
+            try:
+                album = self._read_resource(self.lidarr_client.get_album(album_id))
+                artist_id = album["artistId"]
+                if artist_id not in artists:
+                    artists[artist_id] = self._read_resource(self.lidarr_client.get_artist(artist_id))
+                albums[album_id] = self._album_item(album, artists[artist_id])
+            except Exception as error:
+                self.logger.error(f"Could not read album {album_id} from Lidarr: {error}")
+                failed.append(album_id)
+        return albums, failed
+
+    @staticmethod
+    def _read_resource(response):
+        try:
+            if response.status_code != 200:
+                raise RuntimeError(f"Lidarr API error {response.status_code}")
+            return response.json()
+        finally:
+            response.close()
+
+    def scan_album_tracks(self, req_album, notify=True):
+        """Read the album's missing tracks from Lidarr; True on success.
+
+        An album with only_track_ids wants just those of its missing tracks. notify=False
+        skips on_album_scanned, for an album that is already queued.
+        """
         while True:
             with self.scan_guard:
                 if req_album.get("scan_ready", False):
@@ -504,12 +550,13 @@ class LidarrScanner:
                     if response.status_code == 200:
                         tracks = response.json()
                         track_count = len(tracks)
+                        wanted = set(req_album.get("only_track_ids") or ())
                         for track in tracks:
                             if self.stop_event.is_set():
                                 del tracks
                                 self._set_album_scan_state(req_album, "pending")
                                 return False
-                            if not track.get("hasFile", False):
+                            if not track.get("hasFile", False) and (not wanted or track["id"] in wanted):
                                 new_item = {
                                     "artist": req_album["artist"],
                                     "track_title": track["title"],
@@ -558,7 +605,7 @@ class LidarrScanner:
             f'({req_album["missing_count"]} missing of {req_album["track_count"]} tracks)'
         )
 
-        if self.on_album_scanned is not None:
+        if notify and self.on_album_scanned is not None:
             self.on_album_scanned(req_album)
 
         return True

@@ -224,6 +224,33 @@ class DownloadQueue:
                     {"title": "Download Queue Updated", "message": f"Added {added} album(s) to queue"},
                 )
 
+    def requeue_albums(self, wanted, front=False):
+        """Queue albums again: wanted maps a Lidarr album id to track ids, or None for all missing.
+
+        They join the running session, or else the resumable one; with neither, a stopped
+        session is made. Nothing is started.
+        """
+        albums, failed = self.scanner.albums_by_id(list(wanted))
+        for album_id, album in albums.items():
+            if wanted[album_id]:
+                album["only_track_ids"] = sorted(set(wanted[album_id]))
+            album["status"] = "Queued"
+        counts = {"added": 0, "updated": 0, "already_queued": 0, "in_progress": 0}
+        session_id = None
+        if albums:
+            session_id = self.current_session_id if self.in_progress else None
+            if session_id is None:
+                resumable = self.store.resumable_session(include_user_stopped=True)
+                session_id = resumable["id"] if resumable else self.store.start_session(status="stopped")
+            counts = self.store.requeue_albums(session_id, list(albums.values()), front=front)
+            self._refresh_progress(session_id)
+            self.emit_update()
+        self.logger.warning(
+            f"Requeue for session {session_id}: "
+            + ", ".join(f"{key}={value}" for key, value in counts.items()) + f", failed={len(failed)}"
+        )
+        return {"session_id": session_id, **counts, "failed": failed}
+
     def run(self, session_id=None):
         session_id = session_id or self.current_session_id
         try:
@@ -449,7 +476,7 @@ class DownloadQueue:
 
         if not req_album.get("scan_in_progress", False):
             self.logger.warning(f'Prioritizing scan for queued album: {req_album["artist"]} - {req_album["album_name"]}')
-            self.scanner.scan_album_tracks(req_album)
+            self.scanner.scan_album_tracks(req_album, notify=False)
             if req_album.get("scan_ready", False):
                 return True
 

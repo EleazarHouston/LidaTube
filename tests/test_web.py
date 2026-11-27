@@ -374,3 +374,31 @@ def test_reset_socket_handler_runs_off_the_event_loop(lidatube_module, monkeypat
     assert len(started) == 1 and reset_called == []
     started[0]()
     assert reset_called == [1]
+
+
+class TestRequeueApi:
+    def test_albums_are_passed_to_the_queue_with_their_tracks(self, app_client, monkeypatch):
+        client, module = app_client
+        requeue = Mock(return_value={"added": 2})
+        monkeypatch.setattr(module.data_handler.queue, "requeue_albums", requeue)
+
+        response = client.post("/api/queue/requeue", json={
+            "albums": [{"album_id": 1, "track_ids": [12, 11]}, {"album_id": 1, "track_ids": [13]}],
+            "album_ids": [2], "front": True,
+        })
+
+        assert (response.status_code, response.get_json()) == (200, {"added": 2})
+        requeue.assert_called_once_with({1: [11, 12, 13], 2: None}, front=True)
+
+    @pytest.mark.parametrize("body", [
+        None, {}, {"albums": []}, {"album_ids": ["1"]}, {"album_ids": [True]}, {"albums": [{"track_ids": [1]}]},
+        {"albums": [{"album_id": 1, "track_ids": []}]}, {"albums": [{"album_id": 1, "track_ids": "1"}]},
+        {"album_ids": [1], "front": "yes"}, {"album_ids": list(range(501))},
+    ])
+    def test_a_malformed_request_queues_nothing(self, app_client, monkeypatch, body):
+        client, module = app_client
+        requeue = Mock()
+        monkeypatch.setattr(module.data_handler.queue, "requeue_albums", requeue)
+
+        assert client.post("/api/queue/requeue", json=body).status_code == 400
+        requeue.assert_not_called()

@@ -19,6 +19,35 @@ def _page_args():
     return limit, offset
 
 
+MAX_REQUEUE_ALBUMS = 500
+
+
+def _is_id(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _requeue_request(data):
+    """{album id: sorted track ids, or None for all missing} from a requeue body; None if it is malformed."""
+    if not isinstance(data, dict) or not isinstance(data.get("front", False), bool):
+        return None
+    albums, album_ids = data.get("albums", []), data.get("album_ids", [])
+    if not isinstance(albums, list) or not isinstance(album_ids, list):
+        return None
+    wanted = {}
+    for entry in [*albums, *({"album_id": album_id} for album_id in album_ids)]:
+        if not isinstance(entry, dict) or not _is_id(entry.get("album_id")):
+            return None
+        album_id, tracks = entry["album_id"], entry.get("track_ids")
+        if tracks is None:
+            wanted[album_id] = None
+            continue
+        if not isinstance(tracks, list) or not tracks or not all(_is_id(track) for track in tracks):
+            return None
+        if album_id not in wanted or wanted[album_id] is not None:
+            wanted[album_id] = sorted({*(wanted.get(album_id) or []), *tracks})
+    return wanted if 0 < len(wanted) <= MAX_REQUEUE_ALBUMS else None
+
+
 def register_routes(app, socketio, data_handler):
     @app.route("/")
     def home():
@@ -58,6 +87,16 @@ def register_routes(app, socketio, data_handler):
     @app.route("/api/queue/status")
     def api_queue_status():
         return jsonify(data_handler.queue.snapshot())
+
+    @app.route("/api/queue/requeue", methods=["POST"])
+    def api_queue_requeue():
+        """Queue albums again, from {"albums": [{"album_id", "track_ids"}], "album_ids": [...], "front"}."""
+        data = request.get_json(silent=True)
+        wanted = _requeue_request(data)
+        if wanted is None:
+            return jsonify({"error": f"Send 1-{MAX_REQUEUE_ALBUMS} Lidarr album ids as album_ids, or as albums of "
+                                     "{album_id, track_ids}, with an optional boolean front"}), 400
+        return jsonify(data_handler.queue.requeue_albums(wanted, front=data.get("front", False)))
 
     @app.route("/api/session/resume", methods=["POST"])
     def api_session_resume():

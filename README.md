@@ -208,6 +208,18 @@ A track counts as matched only while its download has not failed. When a downloa
 
 When `download_failure_threshold` downloads fail in a row with no success between them, something other than one video is wrong, such as an outdated yt-dlp, the network or the disk. The queue then pauses for 1 minute, probes with a single album, and waits longer after each failed probe, up to an hour. Albums use up no attempts while this lasts. Failures that belong to one video (age limits, regional blocks, unavailable videos) do not count. `/api/queue/status` reports `downloads_failing` and `pause_seconds`, and **Stop** followed by **Resume** retries at once.
 
+## Queueing albums again
+
+`requeue_albums.py` puts albums back on the download queue, for example after downloads were lost. Give it a file of Lidarr album ids, or JSONL lines of `{"album": <album id>, "tid": <track id>, "cat": <category>}`, from which it takes only the `no trace` category unless told otherwise (`--cat`, `--any-cat`):
+
+```
+python3 src/requeue_albums.py lost.jsonl --dry-run
+python3 src/requeue_albums.py lost.jsonl --album 41749
+python3 src/requeue_albums.py lost.jsonl
+```
+
+Listed tracks are downloaded only while Lidarr still lacks a file for them (`--all-missing` wants every missing track of each album). Albums join the running session, or else the stopped one, behind what is already pending unless `--front` is given. Nothing is started: press **Resume** or `POST /api/session/resume`. Running it again does not queue an album twice. It posts to `/api/queue/requeue`, which takes up to 500 albums per request.
+
 ## Download queue recovery
 
 Download selections are stored in `config/lidatube.db` and processed in bounded batches. If the worker restarts mid-session, the unfinished session resumes automatically unless `auto_resume` is disabled. **Stop** halts the run and keeps pending albums for **Resume**. A stopped session stays stopped across restarts until you resume it. **Reset** deletes the persisted queue for that session and clears its progress.
@@ -280,6 +292,8 @@ This serves the UI on port 5000 and creates `config/` and `downloads/` in the wo
 | `_backoff.py`, `_general.py` | Shared retry policy; naming, tagging and error-classification helpers. |
 | `audit_library.py`, `library_suspicion.py` | The offline library audit tools. |
 | `reject_videos.py` | Bulk-rejects videos per track through the running app's API. |
+| `requeue_albums.py` | Puts chosen albums back on the download queue through the running app's API. |
+| `download_health.py` | Notices when downloads fail across the board, so the queue pauses. |
 | `vpn_rotator.py` | Moves to a new VPN exit through Gluetun's control server when YouTube blocks searches. |
 | `audio_verify.py`, `verification_gate.py` | Audio verification: fingerprinting, AcoustID and MusicBrainz lookups, the verdict, and holding or rejecting downloads. |
 

@@ -48,6 +48,16 @@ class LidarrClient:
         params = {"apikey": self.config.lidarr_api_key, "albumId": album_id}
         return self.session.get(endpoint, params=params, timeout=self.config.lidarr_api_timeout)
 
+    def _get(self, path):
+        return self.session.get(f"{self.config.lidarr_address}/api/v1/{path}",
+                                params={"apikey": self.config.lidarr_api_key}, timeout=self.config.lidarr_api_timeout)
+
+    def get_album(self, album_id):
+        return self._get(f"album/{int(album_id)}")
+
+    def get_artist(self, artist_id):
+        return self._get(f"artist/{int(artist_id)}")
+
     def get_recording_id(self, track_id):
         """The MusicBrainz recording id Lidarr holds for a track, or None when Lidarr cannot say."""
         endpoint = f"{self.config.lidarr_address}/api/v1/track/{track_id}"
