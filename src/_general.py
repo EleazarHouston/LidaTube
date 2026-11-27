@@ -108,6 +108,25 @@ def is_empty_file_error(error):
     return "the downloaded file is empty" in str(error).lower()
 
 
+# Failures that belong to one video, whoever asks and however often.
+_PERMANENT_VIDEO_MESSAGES = (
+    "playback on other websites has been disabled",
+    "private video",
+    "this video has been removed",
+    "removed by the uploader",
+    "copyright claim",
+    "copyright grounds",
+)
+
+
+def is_permanent_video_error(error):
+    """Return True when this video can never be downloaded, so another should be searched for."""
+    if error is None:
+        return False
+    msg = str(error).lower()
+    return any(fragment in msg for fragment in _PERMANENT_VIDEO_MESSAGES)
+
+
 _NETWORK_ERROR_MESSAGES = (
     "nameresolutionerror",
     "failed to resolve",

@@ -469,3 +469,27 @@ def test_pending_verifications_queue_retries_and_removal(tmp_path):
     assert store.due_pending_verifications("2026-01-02T00:00:00+00:00")[0]["attempts"] == 1
     store.remove_pending_verification(pending_id)
     assert store.count_pending_verifications() == 0
+
+
+def test_download_tracking_migration_keeps_existing_v4_data(tmp_path):
+    import sqlite3
+    import store as store_module
+
+    path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(path)
+    for script in store_module._MIGRATIONS[:4]:
+        for statement in script.split(";"):
+            if statement.strip():
+                connection.execute(statement)
+    connection.execute("INSERT INTO sessions (id, started_at, status) VALUES (1, 'now', 'stopped')")
+    connection.execute("INSERT INTO queue_items (session_id, position, album_json, status, updated_at) VALUES (1, 0, '{}', 'done', 'now')")
+    connection.execute("INSERT INTO track_results (session_id, outcome, created_at, updated_at) VALUES (1, 'matched', 'now', 'now')")
+    connection.execute("PRAGMA user_version = 4")
+    connection.commit()
+    connection.close()
+
+    store = Store(path)
+    assert store._fetchone("SELECT status, attempts FROM queue_items") == {"status": "done", "attempts": 0}
+    assert store._fetchone("SELECT outcome, download FROM track_results") == {"outcome": "matched", "download": None}
+    assert store._connection.execute("PRAGMA user_version").fetchone()[0] == len(store_module._MIGRATIONS)
+    store.close()

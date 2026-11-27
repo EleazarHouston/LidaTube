@@ -68,6 +68,8 @@ class LinkSearcher:
                 outcome = "matched"
             else:
                 outcome = "error" if search_error is not None else "no_match"
+            if outcome == "error":
+                track["_search_failed"] = True  # the queue brings the track round again
             suspicion, _ = library_suspicion.score_track({
                 "duration_delta_s": None,
                 "expected_known": bool(track.get("duration_ms")),

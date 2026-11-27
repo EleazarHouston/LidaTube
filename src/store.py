@@ -126,6 +126,10 @@ _MIGRATIONS = (
     CREATE INDEX IF NOT EXISTS idx_pending_verifications_next_attempt
         ON pending_verifications(next_attempt_at);
     """,
+    """
+    ALTER TABLE queue_items ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE track_results ADD COLUMN download TEXT;
+    """,
 )
 
 
@@ -317,6 +321,27 @@ class Store:
             self._connection.execute(
                 f"UPDATE queue_items SET status = ?, updated_at = ? WHERE id IN ({placeholders})",
                 (status, self._now(), *ids),
+            )
+            self._connection.commit()
+
+    def retry_queue_item(self, queue_item_id, status, album=None, charge_attempt=True):
+        """Move an unfinished item to the back of its session's queue as status.
+
+        album, when given, replaces what is queued (typically just the tracks still wanted).
+        """
+        if status not in self.QUEUE_STATUSES:
+            raise ValueError(f"Invalid queue status: {status}")
+        album_json = None if album is None else json.dumps(album, separators=(",", ":"))
+        with _DB_LOCK:
+            self._connection.execute(
+                """
+                UPDATE queue_items SET status = ?, attempts = attempts + ?,
+                    album_json = COALESCE(?, album_json), updated_at = ?,
+                    position = (SELECT MAX(other.position) + 1 FROM queue_items AS other
+                                WHERE other.session_id = queue_items.session_id)
+                WHERE id = ?
+                """,
+                (status, 1 if charge_attempt else 0, album_json, self._now(), queue_item_id),
             )
             self._connection.commit()
 
@@ -618,6 +643,16 @@ class Store:
                 "UPDATE track_results SET verification = ?, suspicion = MAX(suspicion, COALESCE(?, suspicion)), "
                 "updated_at = ? WHERE id = ?",
                 (verification, minimum_suspicion, self._now(), track_result_id),
+            )
+            self._connection.commit()
+
+    def set_download_result(self, track_result_id, downloaded):
+        """Record whether a matched track's file arrived. A failed download is no longer "matched"."""
+        with _DB_LOCK:
+            self._connection.execute(
+                "UPDATE track_results SET download = ?, outcome = CASE WHEN ? THEN outcome ELSE 'error' END, "
+                "updated_at = ? WHERE id = ?",
+                ("done" if downloaded else "failed", bool(downloaded), self._now(), track_result_id),
             )
             self._connection.commit()
 

@@ -7,6 +7,7 @@ imported into Lidarr. Stop keeps pending albums for Resume; Reset deletes them.
 """
 
 import concurrent.futures
+import functools
 import json
 import logging
 import os
@@ -316,6 +317,7 @@ class DownloadQueue:
                 self.store.mark_queue_item(row["id"], "error")
                 continue
             req_album["_queue_item_id"] = row["id"]
+            req_album["_attempts"] = row.get("attempts", 0)
             claimed.append((row["id"], req_album))
         if claimed:
             self.batch_number += 1
@@ -334,6 +336,7 @@ class DownloadQueue:
 
     def _process_item(self, queue_item_id, req_album):
         queue_status = "error"
+        retry = False
         try:
             self.download_album(req_album)
             if req_album.pop("_search_blocked", False):
@@ -345,17 +348,38 @@ class DownloadQueue:
                 queue_status = "pending"
             elif self.stop_event.is_set():
                 queue_status = "pending"
-            elif req_album.get("status") in ("Download Error", "Refresh data unavailable"):
+            elif req_album.get("status") == "Download Error":
                 queue_status = "error"
+            elif req_album.get("status") == "Refresh data unavailable" or req_album.get("_failed_tracks"):
+                retry = True
             else:
                 queue_status = "done"
         except Exception as e:
             req_album["status"] = "Download Error"
             self.logger.error(f"Unhandled queue item error: {e}")
         finally:
-            self.store.mark_queue_item(queue_item_id, queue_status)
+            if retry:
+                self._retry_later(queue_item_id, req_album)
+            else:
+                self.store.mark_queue_item(queue_item_id, queue_status)
             self._refresh_progress(self.current_session_id)
             self.emit_update()
+
+    def _retry_later(self, queue_item_id, req_album):
+        """Send an album with unfinished tracks to the back of the queue, or give up on it as an error."""
+        attempts = req_album.get("_attempts", 0) + 1
+        limit = max(1, int(self.config.download_attempts_per_album))
+        status = "pending" if attempts < limit else "error"
+        failed = req_album.get("_failed_tracks")
+        # Only the tracks still wanted go round again; the others may already be in the library.
+        album = _album_for_retry(req_album, failed) if failed else None
+        self.store.retry_queue_item(queue_item_id, status, album=album)
+        wanted = f"{len(failed)} track(s)" if failed else "the track list"
+        action = "will retry" if status == "pending" else "giving up on"
+        self.logger.warning(
+            f'{req_album["artist"]} - {req_album["album_name"]}: {action} {wanted} '
+            f"after attempt {attempts} of {limit}"
+        )
 
     def begin_streaming(self):
         """Take albums from a scheduled Lidarr scan as they are scanned, starting a session if none is running."""
@@ -432,6 +456,9 @@ class DownloadQueue:
             total_req = len(song_links)
             self.logger.warning(f"Valid link count of {total_req} for: {artist_str} - {album_name}")
 
+            # Tracks whose search or download failed; the queue brings the album back for them.
+            failed_tracks = [x for x in req_album["missing_tracks"] if x["link"] == "" and x.get("_search_failed")]
+            req_album["_failed_tracks"] = failed_tracks
             for song in song_links:
                 if self.stop_event.is_set():
                     break
@@ -447,6 +474,10 @@ class DownloadQueue:
                     held_count += 1
                 else:
                     error_count += 1
+                if (outcome == "error" and not self.stop_event.is_set()) or (
+                    outcome == "rejected" and not song.get("link") and song.get("_search_failed")
+                ):
+                    failed_tracks.append(song)
                 if outcome in ("grabbed", "held"):
                     self.stop_event.wait(self.config.sleep_interval)
                 if self.stop_event.is_set():
@@ -511,12 +542,18 @@ class DownloadQueue:
             existed = os.path.exists(full_file_path_with_ext)
             if existed:
                 self.logger.warning(f"File Already Exists: {artist_str} - {title_str}")
+                self._record_download(song, True)
                 if not verifying:
                     return "existing", None
             else:
                 self.logger.warning(f"Starting Download of: {title}")
-                if not self.downloader.download(song["link"], file_name):
+                on_failure = functools.partial(self._reject_unplayable, song)
+                if not self.downloader.download(song["link"], file_name, on_failure=on_failure):
+                    # A download cut short by Stop says nothing about the track.
+                    if not self.stop_event.is_set():
+                        self._record_download(song, False)
                     return "error", None
+                self._record_download(song, True)
                 _general.add_metadata(self.logger, song, req_album, full_file_path_with_ext)
                 if not verifying:
                     return "grabbed", None
@@ -530,11 +567,23 @@ class DownloadQueue:
                 return "rejected", None
         return "rejected", None
 
+    def _record_download(self, song, downloaded):
+        result_id = song.get("_track_result_id")
+        if result_id:
+            self.store.set_download_result(result_id, downloaded)
+
+    def _reject_unplayable(self, song, error):
+        """Rule out a video that can never be downloaded, so the retry searches for another."""
+        video_id = _general.youtube_video_id(song.get("link"))
+        if video_id and song.get("track_id") is not None and _general.is_permanent_video_error(error):
+            self.store.reject_video(song["track_id"], video_id, "unplayable", "download", detail=str(error)[:300])
+
     def _search_track_again(self, song, req_album):
         """Search one track again after its download was rejected; True when a new link was found."""
         song["link"], song["title_of_link"] = "", ""
         song.pop("_track_result_id", None)
         song.pop("_match_trace", None)
+        song.pop("_search_failed", None)
         single_track = dict(req_album)
         single_track["missing_tracks"] = [song]
         single_track["missing_count"] = 1
@@ -605,3 +654,14 @@ class DownloadQueue:
             self.emit("new_toast_msg", {"title": "Downloads Reset", "message": "Download queue cleared"})
         finally:
             self.emit_update()
+
+
+def _album_for_retry(req_album, tracks):
+    """req_album as it should be queued again: only these tracks, to be searched afresh."""
+    def fresh(track):
+        kept = {key: value for key, value in track.items() if not key.startswith("_")}
+        return dict(kept, link="", title_of_link="")
+
+    album = {key: value for key, value in req_album.items() if not key.startswith("_")}
+    album.update(missing_tracks=[fresh(track) for track in tracks], missing_count=len(tracks), status="Queued")
+    return album

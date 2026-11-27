@@ -21,8 +21,11 @@ class Downloader:
         self.logger = logger or logging.getLogger(__name__)
         self._consecutive_unavailable = 0
 
-    def download(self, link, file_name):
-        """Download audio from link. Returns True on success, False on failure."""
+    def download(self, link, file_name, on_failure=None):
+        """Download audio from link. Returns True on success, False on failure.
+
+        on_failure(error) receives the error of a download that failed for a reason other than a stop.
+        """
         if self.stop_event.is_set():
             return False
 
@@ -43,6 +46,8 @@ class Downloader:
             if self.stop_event.is_set():
                 return False
             self.logger.error(f"Error downloading song: {link}. Error: {e}")
+            if on_failure is not None:
+                on_failure(e)
             if _general.is_unavailable_error(e):
                 self._consecutive_unavailable += 1
                 if self._consecutive_unavailable >= CONSECUTIVE_UNAVAILABLE_THRESHOLD:
