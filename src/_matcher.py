@@ -624,7 +624,7 @@ def album_matcher(minimum_match_ratio, artist, album_name, cleaned_artist, clean
             _append_trace(trace, "ytmusic", item, 0, None, "live_gate")
             continue
         raw_album_match_ratio = fuzz.ratio(album_name, item["title"])
-        artist_names = [entry["name"] for entry in item.get("artists", [])]
+        artist_names = [entry["name"] for entry in item.get("artists") or []]
         artists_string = " ".join(artist_names)
         artist_credited = _artist_credited(cleaned_artist, artist_names)
         raw_artist_match_ratio = 100 if artist_credited else fuzz.ratio(artist, artists_string)
@@ -699,7 +699,7 @@ def _song_matcher_pass(minimum_match_ratio, artist, cleaned_artist, song_title, 
             normal_tolerance_seconds is not None
             and not _duration_ok(expected_duration_ms, candidate_seconds, normal_tolerance_seconds)
         )
-        artist_names = [x["name"] for x in item["artists"]]
+        artist_names = [x["name"] for x in item.get("artists") or []]
         artists_string = "".join(artist_names)
         artist_named = _artist_credited(cleaned_artist, artist_names) or _artist_credited(_normalized_text(artist), artist_names)
         artist_credited = artist_named or _soundtrack_recording_credit(

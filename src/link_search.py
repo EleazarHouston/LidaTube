@@ -134,6 +134,8 @@ class LinkSearcher:
                 missing_track_title = _general.string_cleaner(missing_track["track_title"])
                 song_title = _general.string_cleaner(track["title"])
                 if fuzz.ratio(song_title, missing_track_title) > 90:
+                    if not track.get("videoId"):
+                        continue  # greyed-out album entries have no video to download
                     candidate_seconds = track.get("durationSeconds") or 0
                     if not _matcher._duration_ok(missing_track["duration_ms"], candidate_seconds, self.config.duration_tolerance_seconds):
                         continue
@@ -327,6 +329,11 @@ class LinkSearcher:
             self.logger.error(f"Error in Album Search: {e}")
             raise
 
+    @staticmethod
+    def _search_songs(ytmusic, query_text, limit):
+        """YouTube Music song results that have a video to download; some come back without one."""
+        return [result for result in ytmusic.search(query=query_text, filter="songs", limit=limit) if result.get("videoId")]
+
     def _get_song_links(self, req_album, artist, cleaned_artist, ytmusic):
         """Primary song-by-song search. Returns True unless FD exhaustion occurred."""
         try:
@@ -342,7 +349,7 @@ class LinkSearcher:
                     song_title = missing_track["track_title"]
                     cleaned_song_title = _general.string_cleaner(song_title).lower()
                     query_text = f'{missing_track["artist"]} - {song_title}'
-                    search_results = self._drop_rejected(missing_track, ytmusic.search(query=query_text, filter="songs", limit=5), "ytmusic")
+                    search_results = self._drop_rejected(missing_track, self._search_songs(ytmusic, query_text, 5), "ytmusic")
                     trace = missing_track.setdefault("_match_trace", [])
                     song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
                                                        expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace,
@@ -373,7 +380,7 @@ class LinkSearcher:
                     song_title = missing_track["track_title"]
                     cleaned_song_title = _general.string_cleaner(song_title).lower()
                     query_text = f'{missing_track["artist"]} - {song_title}'
-                    search_results = self._drop_rejected(missing_track, ytmusic.search(query=query_text, filter="songs", limit=20), "ytmusic")
+                    search_results = self._drop_rejected(missing_track, self._search_songs(ytmusic, query_text, 20), "ytmusic")
                     trace = missing_track.setdefault("_match_trace", [])
                     song_match = _matcher.song_matcher(self.config.minimum_match_ratio, artist, cleaned_artist, song_title, cleaned_song_title, search_results,
                                                        expected_duration_ms=missing_track["duration_ms"], duration_tolerance_seconds=self.config.duration_tolerance_seconds, trace=trace,

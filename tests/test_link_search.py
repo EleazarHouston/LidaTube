@@ -1206,3 +1206,31 @@ def test_blocks_back_off_first_and_rotate_once_the_configured_back_offs_have_fai
     assert events == ["pause", "pause", "rotate"]
     assert searcher._cooldown().level == 0
     assert album["missing_tracks"][0]["link"] == "https://www.youtube.com/watch?v=vid-1"
+
+
+@pytest.mark.parametrize("stage", ["_get_song_links", "_get_song_links_secondary"])
+def test_a_search_result_without_a_video_id_is_never_linked(monkeypatch, stage):
+    searcher = build_searcher()
+    searcher.config.fallback_to_top_result = True
+    monkeypatch.setattr(_matcher, "song_matcher", lambda *args, **kwargs: None)
+
+    class FakeYTMusic:
+        def search(self, query, filter, limit):
+            return [{"title": "No id", "videoId": None}, {"title": "Playable", "videoId": "vid-123"}]
+
+    track = {"artist": "Artist", "track_title": "Track One", "link": "", "title_of_link": "", "duration_ms": 0}
+    req_album = {"artist": "Artist", "album_name": "Album", "missing_tracks": [track]}
+
+    getattr(searcher, stage)(req_album, "Artist", "artist", FakeYTMusic())
+
+    assert track["link"] == "https://www.youtube.com/watch?v=vid-123"
+
+
+def test_an_album_track_without_a_video_id_is_left_unlinked():
+    searcher = build_searcher()
+    searcher.config.duration_tolerance_seconds = 8
+    track = {"track_title": "Track A", "link": "", "title_of_link": "", "duration_ms": 0}
+
+    searcher._apply_album_track_links({"missing_tracks": [track]}, {"tracks": [{"title": "Track A", "videoId": None}]})
+
+    assert track["link"] == ""

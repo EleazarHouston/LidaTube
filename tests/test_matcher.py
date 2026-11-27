@@ -1735,3 +1735,22 @@ def test_drop_rejected_videos_removes_rejected_candidates_and_traces_each_skip()
     assert trace[0]["candidate_duration_s"] == 180
     assert _matcher.drop_rejected_videos(results, set(), trace, "ytmusic") == results
     assert _matcher.drop_rejected_videos(None, {"aaaaaaaaaaa"}, trace, "ytmusic") is None
+
+
+def test_song_matcher_survives_a_result_without_artists():
+    results = [
+        {"resultType": "song", "title": "One", "videoId": "bare", "duration_seconds": 180},
+        {"resultType": "song", "title": "One", "videoId": "none", "artists": None, "duration_seconds": 180},
+        {"resultType": "song", "title": "One", "videoId": "good", "artists": [{"name": "Three Dog Night"}], "duration_seconds": 180},
+    ]
+
+    match = _matcher.song_matcher(80, "Three Dog Night", "three dog night", "One", "one", results,
+                                  expected_duration_ms=180000)
+
+    assert match["videoId"] == "good"
+
+
+def test_album_matcher_survives_a_result_with_null_artists():
+    results = [{"type": "Album", "title": "Exact Album", "artists": None, "browseId": "a"}]
+
+    assert _matcher.album_matcher(90, "Exact Artist", "Exact Album", "exact artist", "exact album", results) is None
