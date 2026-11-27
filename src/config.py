@@ -31,6 +31,8 @@ class AppConfig:
         "auto_resume": True,
         # Tries an album gets before the queue gives up on its failed tracks and marks it as an error.
         "download_attempts_per_album": 3,
+        # Downloads failing in a row, with no success between them, before the queue pauses; 0 never pauses.
+        "download_failure_threshold": 10,
         # Lidarr-namespace path that maps to LidaTube's download_folder. When set,
         # downloads go to a staging area and are imported into the library via the
         # Lidarr API instead of being written into the library in place. Empty = legacy
@@ -72,6 +74,7 @@ class AppConfig:
         "batch_size": int,
         "auto_resume": lambda v: v.lower() == "true",
         "download_attempts_per_album": int,
+        "download_failure_threshold": int,
         "lidarr_download_path": str,
         "acoustid_api_key": str,
         "audio_verification": lambda v: v.lower() == "true",

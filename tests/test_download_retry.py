@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 import download_queue
+from download_health import DownloadHealth
 from download_queue import DownloadQueue
 from store import Store
 
@@ -214,3 +215,86 @@ def test_an_ordinary_download_error_does_not_reject_the_video(queue):
     _process_next(queue, session_id)
 
     assert queue.store.rejected_video_ids(1) == set()
+
+
+def _with_health(queue, threshold=2, pauses=(60,)):
+    queue.config.download_failure_threshold = threshold
+    health = DownloadHealth(queue.config, Mock())
+    health.PAUSE_SECONDS = pauses
+    health.reset()
+    queue.health = health
+
+    def download(link, file_name, on_failure=None):
+        succeeded = queue.link_works(link)
+        if succeeded:
+            health.record_success()
+        else:
+            health.record_failure(Exception("Requested format is not available"))
+        return succeeded
+
+    queue.downloader.download.side_effect = download
+    queue.link_works = lambda link: False
+    return health
+
+
+def test_while_downloads_fail_everywhere_albums_use_up_no_attempts(queue):
+    session_id = _enqueue(queue, _album(), _album("Next", (3,)))
+    _with_health(queue, threshold=2)
+
+    _process_next(queue, session_id)
+
+    first = _rows(queue, "queue_items")[0]
+    assert (first["status"], first["attempts"]) == ("pending", 0)
+
+
+def test_the_queue_stops_claiming_albums_while_downloads_are_paused(queue):
+    albums = [_album(f"Album {n}", (n, n + 100)) for n in range(1, 8)]
+    session_id = _enqueue(queue, *albums)
+    _with_health(queue, threshold=2)
+    queue.in_progress = True
+    queue.stop_event = threading.Event()
+    threading.Timer(1.0, queue.stop_event.set).start()
+
+    queue.run(session_id)
+
+    assert queue.downloader.download.call_count == 2, "only the album that revealed the failure was tried"
+    assert {item["status"] for item in _rows(queue, "queue_items")} == {"pending"}
+    assert queue.status == "stopped", "a paused session waits rather than completing"
+
+
+def test_after_a_pause_one_album_probes_and_success_resumes_the_queue(queue):
+    session_id = _enqueue(queue, *[_album(f"Album {n}", (n,)) for n in range(1, 5)])
+    health = _with_health(queue, threshold=1, pauses=(0.3,))
+    seen = []
+
+    def works_after_the_first(link):
+        seen.append(link)
+        return len(seen) > 1
+
+    queue.link_works = works_after_the_first
+    queue.in_progress = True
+
+    queue.run(session_id)
+
+    assert [item["status"] for item in _rows(queue, "queue_items")] == ["done"] * 4
+    assert health.failing is False
+    assert queue.status == "complete"
+
+
+def test_only_one_slot_probes_while_downloads_are_failing(queue):
+    queue.config.thread_limit = 4
+    health = _with_health(queue, threshold=1, pauses=(0,))
+    health.record_failure(Exception("broken"))
+
+    assert queue._open_slots(4, active={}) == 1
+    assert queue._open_slots(3, active={object(): None}) == 0
+
+
+def test_the_queue_status_says_when_downloads_are_paused(queue):
+    health = _with_health(queue, threshold=1, pauses=(60,))
+    assert queue.snapshot()["downloads_failing"] is False
+
+    health.record_failure(Exception("broken"))
+
+    snapshot = queue.snapshot()
+    assert snapshot["downloads_failing"] is True and 0 < snapshot["pause_seconds"] <= 60

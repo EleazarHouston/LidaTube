@@ -10,6 +10,7 @@ import os
 import threading
 
 from config import AppConfig
+from download_health import DownloadHealth
 from download_queue import DownloadQueue
 from downloader import Downloader
 from fd_governor import FdGovernor
@@ -46,7 +47,8 @@ class DataHandler:
         # Components. One stop event halts every part of a download session: search, download and queue.
         download_stop_event = threading.Event()
         self.lidarr_client = LidarrClient(self.config, self.logger)
-        self.downloader = Downloader(self.config, download_stop_event, self.logger)
+        self.health = DownloadHealth(self.config, self.logger)
+        self.downloader = Downloader(self.config, download_stop_event, self.logger, health=self.health)
         self.rotator = VpnRotator(self.config, self.logger)
         self.searcher = LinkSearcher(self.config, self.store, self.fd, download_stop_event, self.logger, rotator=self.rotator)
         self.scanner = LidarrScanner(
@@ -57,7 +59,7 @@ class DataHandler:
         self.queue = DownloadQueue(
             self.config, self.store, self.scanner, self.searcher, self.downloader, self.lidarr_client,
             download_stop_event, self.emit, self.logger,
-            yield_to_event_loop=yield_to_event_loop, gate=self.gate,
+            yield_to_event_loop=yield_to_event_loop, gate=self.gate, health=self.health,
         )
         self.searcher.on_status_change = self.queue.emit_update
         self.scanner.on_album_scanned = self.queue.enqueue_scanned_album

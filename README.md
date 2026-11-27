@@ -92,6 +92,8 @@ Certain values can be set via environment variables:
 * __lidarr_scan_thread_limit__: Max worker threads used during the Lidarr refresh (fetching missing tracks per album). Defaults to `16`.
 * __batch_size__: How many recent albums the download queue view shows. Albums are taken from the persisted queue one at a time as download slots free up, so one long album never holds the others back. Defaults to `200`.
 * __auto_resume__: Resume an interrupted persisted queue when LidaTube starts. Defaults to `True`.
+* __download_attempts_per_album__: Tries an album gets before its failed tracks mark it as an error (see [Failed downloads](#failed-downloads)). Defaults to `3`.
+* __download_failure_threshold__: Downloads failing in a row before the queue pauses; `0` never pauses. Defaults to `10`.
 * __sleep_interval__: Seconds to wait after each downloaded track. Defaults to `0`.
 * __sync_schedule__: Hours at which to start a sync (comma-separated, 24-hour). Defaults to ``.
 * __minimum_match_ratio__: Minimum match score (0–100) a candidate needs to be accepted. Defaults to `90`.
@@ -199,6 +201,12 @@ It posts to `/api/rejected_videos/import`. Re-running a file is safe: videos alr
 
 Suspicion scores are for triage. A high score does not prove that a file is wrong.
 
+
+## Failed downloads
+
+A track counts as matched only while its download has not failed. When a download or search fails, the track's result becomes `error`, and the album goes to the back of the queue holding just the tracks still wanted. After `download_attempts_per_album` tries the album is marked as an error instead of done. A video that can never be downloaded (private, removed, or blocked from playing outside YouTube) is added to the track's rejected videos, so the retry looks for another.
+
+When `download_failure_threshold` downloads fail in a row with no success between them, something other than one video is wrong, such as an outdated yt-dlp, the network or the disk. The queue then pauses for 1 minute, probes with a single album, and waits longer after each failed probe, up to an hour. Albums use up no attempts while this lasts. Failures that belong to one video (age limits, regional blocks, unavailable videos) do not count. `/api/queue/status` reports `downloads_failing` and `pause_seconds`, and **Stop** followed by **Resume** retries at once.
 
 ## Download queue recovery
 

@@ -15,7 +15,9 @@ UNAVAILABLE_BACKOFF_SECONDS = 60
 
 
 class Downloader:
-    def __init__(self, config, stop_event, logger=None):
+    def __init__(self, config, stop_event, logger=None, health=None):
+        # Told of every finished download (see download_health), to notice when none succeed.
+        self.health = health
         self.config = config
         self.stop_event = stop_event
         self.logger = logger or logging.getLogger(__name__)
@@ -46,6 +48,8 @@ class Downloader:
             if self.stop_event.is_set():
                 return False
             self.logger.error(f"Error downloading song: {link}. Error: {e}")
+            if self.health is not None:
+                self.health.record_failure(e)
             if on_failure is not None:
                 on_failure(e)
             if _general.is_unavailable_error(e):
@@ -58,6 +62,8 @@ class Downloader:
                     self.stop_event.wait(UNAVAILABLE_BACKOFF_SECONDS)
             return False
         self.logger.warning(f"DL Complete: {link}")
+        if self.health is not None:
+            self.health.record_success()
         self._consecutive_unavailable = 0
         return True
 

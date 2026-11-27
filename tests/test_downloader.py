@@ -376,3 +376,29 @@ def test_ydl_output_path_keeps_percent_signs_from_titles_literal(dl):
     )
 
     assert rendered == f"{name}.mp3"
+
+
+@pytest.mark.parametrize("error, expected", [(None, "record_success"), (Exception("boom"), "record_failure")])
+def test_download_reports_its_result_to_the_health_monitor(config, stop_event, error, expected):
+    health = Mock()
+    downloader = Downloader(config, stop_event, Mock(), health=health)
+    downloader._download_once = Mock(side_effect=error)
+
+    downloader.download("https://youtu.be/x", "file")
+
+    assert [c[0] for c in health.method_calls] == [expected]
+
+
+def test_a_stopped_download_is_not_reported_to_the_health_monitor(config, stop_event):
+    health = Mock()
+    downloader = Downloader(config, stop_event, Mock(), health=health)
+
+    def cancelled(link, file_name):
+        stop_event.set()
+        raise Exception("Cancelled")
+
+    downloader._download_once = cancelled
+
+    downloader.download("https://youtu.be/x", "file")
+
+    assert health.method_calls == []

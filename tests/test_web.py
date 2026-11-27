@@ -159,6 +159,8 @@ class TestPersistenceApiRoutes:
             "batch": 0,
             "matched": 0,
             "failed": 0,
+            "downloads_failing": False,
+            "pause_seconds": 0,
         }
 
     def test_resume_and_stop_endpoints_delegate_to_handler(self, app_client, monkeypatch):

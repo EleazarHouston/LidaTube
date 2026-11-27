@@ -127,6 +127,28 @@ def is_permanent_video_error(error):
     return any(fragment in msg for fragment in _PERMANENT_VIDEO_MESSAGES)
 
 
+_VIDEO_SPECIFIC_MESSAGES = _PERMANENT_VIDEO_MESSAGES + (
+    "confirm your age",
+    "members-only",
+    "join this channel",
+    "available in your country",
+    "premieres in",
+    "video unavailable",
+    "incomplete youtube id",
+)
+
+
+def is_video_specific_error(error):
+    """Return True when a download failed because of that video, not because downloading is broken."""
+    if error is None:
+        return False
+    msg = str(error).lower()
+    # "Video unavailable. This content ..." is how YouTube words a rate limit.
+    if is_unavailable_error(error):
+        return False
+    return any(fragment in msg for fragment in _VIDEO_SPECIFIC_MESSAGES)
+
+
 _NETWORK_ERROR_MESSAGES = (
     "nameresolutionerror",
     "failed to resolve",

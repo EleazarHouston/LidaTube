@@ -18,7 +18,7 @@ import _general
 
 class DownloadQueue:
     def __init__(self, config, store, scanner, searcher, downloader, lidarr_client, stop_event, emit,
-                 logger=None, yield_to_event_loop=None, gate=None):
+                 logger=None, yield_to_event_loop=None, gate=None, health=None):
         """yield_to_event_loop() lets a cooperative (gevent) worker run other greenlets during long loops."""
         self.config = config
         self.store = store
@@ -32,6 +32,8 @@ class DownloadQueue:
         self.yield_to_event_loop = yield_to_event_loop or (lambda: None)
         # Audio verification between yt-dlp and Lidarr (see verification_gate); None or disabled skips it.
         self.gate = gate
+        # Says when downloads are failing across the board (see download_health); None never pauses.
+        self.health = health
 
         self.current_session_id = None
         # While a scheduled sync is scanning Lidarr, albums join the running session as they are scanned.
@@ -101,7 +103,9 @@ class DownloadQueue:
             session_id = resumable["id"] if resumable else None
         if session_id is not None:
             self._refresh_progress(session_id)
-        return dict(self.progress)
+        failing = self._downloads_failing()
+        pause = round(self.health.pause_remaining()) if failing else 0
+        return dict(self.progress, downloads_failing=failing, pause_seconds=pause)
 
     def auto_resume(self):
         # Crash recovery only: a session the user stopped stays stopped until they resume it.
@@ -115,6 +119,7 @@ class DownloadQueue:
         previous_session_id, previous_status = self.current_session_id, self.status
         self.current_session_id = session_id
         self.stop_event.clear()
+        self._forget_download_failures()
         self.status = "running"
         self.in_progress = True
         thread = threading.Thread(
@@ -245,7 +250,8 @@ class DownloadQueue:
             active = {}
             with concurrent.futures.ThreadPoolExecutor(max_workers=slots) as executor:
                 while True:
-                    claimed = [] if self.stop_event.is_set() else self._claim(session_id, slots - len(active))
+                    free_slots = 0 if self.stop_event.is_set() else self._open_slots(slots - len(active), active)
+                    claimed = self._claim(session_id, free_slots)
                     for queue_item_id, req_album in claimed:
                         self._show(req_album, max(batch_size, slots), active)
                         future = executor.submit(self._process_item, queue_item_id, req_album)
@@ -257,7 +263,8 @@ class DownloadQueue:
                     if not active:
                         if self.stop_event.is_set():
                             break
-                        if self.streaming_mode:
+                        paused = self._downloads_failing() and self.store.next_batch(session_id, 1)
+                        if self.streaming_mode or paused:
                             self.stop_event.wait(0.25)
                             continue
                         break
@@ -304,6 +311,22 @@ class DownloadQueue:
                 self.current_session_id = None
             self.emit_update()
             self.emit("new_toast_msg", {"title": "End of Session", "message": f"Downloading {self.status.capitalize()}"})
+
+    def _downloads_failing(self):
+        return self.health is not None and self.health.failing
+
+    def _forget_download_failures(self):
+        # Starting or resuming a session is the user's way of saying "try now".
+        if self.health is not None:
+            self.health.reset()
+
+    def _open_slots(self, free_slots, active):
+        """How many albums may start: while downloads are failing, none until a lone probe is due."""
+        if not self._downloads_failing():
+            return free_slots
+        if active or self.health.pause_remaining() > 0:
+            return 0
+        return min(1, free_slots)
 
     def _claim(self, session_id, free_slots):
         """Take up to free_slots pending albums from the front of the queue, marking them in progress."""
@@ -373,6 +396,10 @@ class DownloadQueue:
         failed = req_album.get("_failed_tracks")
         # Only the tracks still wanted go round again; the others may already be in the library.
         album = _album_for_retry(req_album, failed) if failed else None
+        if self._downloads_failing():
+            # Not this album's fault: it keeps all its attempts.
+            self.store.retry_queue_item(queue_item_id, "pending", album=album, charge_attempt=False)
+            return
         self.store.retry_queue_item(queue_item_id, status, album=album)
         wanted = f"{len(failed)} track(s)" if failed else "the track list"
         action = "will retry" if status == "pending" else "giving up on"
